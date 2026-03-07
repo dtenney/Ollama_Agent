@@ -4,6 +4,8 @@
 
 ### A fully local, offline AI coding assistant for VS Code — powered by Ollama
 
+[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/kchikech.ollamapilot?label=Marketplace&color=007ACC&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
+[![Installs](https://img.shields.io/visual-studio-marketplace/i/kchikech.ollamapilot?label=Installs&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
 [![Version](https://img.shields.io/badge/version-0.0.1-blue.svg)](https://github.com/kchikech/Ollama_Agent/releases)
 [![VS Code](https://img.shields.io/badge/VS%20Code-%5E1.80.0-007ACC.svg)](https://code.visualstudio.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -89,16 +91,20 @@ ollama serve
 
 ## 🚀 Installation
 
-### Option A — Install from VS Code Marketplace *(coming soon)*
+### Option A — Install from VS Code Marketplace *(recommended)*
 
+**One-click install:**
+[➡ Install OllamaPilot on the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
+
+Or via Quick Open:
 1. Open VS Code
 2. Press `Ctrl+P` / `Cmd+P` and type:
    ```
-   ext install local-dev.ollama-agent
+   ext install kchikech.ollamapilot
    ```
 3. Press Enter
 
-### Option B — Install from `.vsix` file (current)
+### Option B — Install from `.vsix` file
 
 1. Download the latest `.vsix` from the [Releases page](https://github.com/kchikech/Ollama_Agent/releases)
 2. Open VS Code
