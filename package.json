@@ -1,18 +1,25 @@
 {
-  "name": "ollama-agent",
-  "displayName": "Ollama Agent",
-  "version": "0.6.0",
-  "description": "Local AI coding assistant powered by Ollama — 100% offline, no telemetry",
-  "publisher": "local-dev",
+  "name": "ollamapilot",
+  "displayName": "OllamaPilot",
+  "version": "0.0.1",
+  "description": "Your offline AI co-pilot powered by Ollama — 100% local, no telemetry, no internet required",
+  "publisher": "kchikech",
+  "author": {
+    "name": "Hamza Kchikech",
+    "url": "https://github.com/kchikech"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/ollama-agent"
+    "url": "https://github.com/kchikech/Ollama_Agent"
   },
   "bugs": {
-    "url": "https://github.com/your-username/ollama-agent/issues"
+    "url": "https://github.com/kchikech/Ollama_Agent/issues"
   },
-  "homepage": "https://github.com/your-username/ollama-agent#readme",
-  "keywords": ["ollama", "ai", "llm", "offline", "coding-assistant", "agent"],
+  "homepage": "https://github.com/kchikech/Ollama_Agent#readme",
+  "sponsor": {
+    "url": "https://github.com/sponsors/kchikech"
+  },
+  "keywords": ["ollama", "ai", "llm", "offline", "coding-assistant", "agent", "local-ai"],
   "categories": ["Machine Learning", "Other"],
   "engines": { "vscode": "^1.80.0" },
   "main": "dist/main.js",

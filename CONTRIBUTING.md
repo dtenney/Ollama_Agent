@@ -313,6 +313,6 @@ Add the tool to the Agent Tools table in `README.md`.
 
 ## Questions?
 
-Open a [GitHub Discussion](https://github.com/your-username/ollama-agent/discussions) or a GitHub Issue with the `question` label.
+Open a [GitHub Discussion](https://github.com/kchikech/Ollama_Agent/discussions) or a GitHub Issue with the `question` label.
 
 Thank you for contributing! 🙏

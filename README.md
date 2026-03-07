@@ -1,10 +1,10 @@
 <div align="center">
 
-# 🤖 Ollama Agent
+# 🤖 OllamaPilot
 
 ### A fully local, offline AI coding assistant for VS Code — powered by Ollama
 
-[![Version](https://img.shields.io/badge/version-0.6.0-blue.svg)](https://github.com/your-username/ollama-agent/releases)
+[![Version](https://img.shields.io/badge/version-0.0.1-blue.svg)](https://github.com/kchikech/Ollama_Agent/releases)
 [![VS Code](https://img.shields.io/badge/VS%20Code-%5E1.80.0-007ACC.svg)](https://code.visualstudio.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
@@ -100,7 +100,7 @@ ollama serve
 
 ### Option B — Install from `.vsix` file (current)
 
-1. Download the latest `.vsix` from the [Releases page](https://github.com/your-username/ollama-agent/releases)
+1. Download the latest `.vsix` from the [Releases page](https://github.com/kchikech/Ollama_Agent/releases)
 2. Open VS Code
 3. Press `Ctrl+Shift+P` / `Cmd+Shift+P` → type **"Install from VSIX"**
 4. Select the downloaded `.vsix` file
@@ -382,7 +382,7 @@ Contributions are warmly welcome! Whether it's a bug fix, a new feature, better 
 
 ### Ways to contribute
 
-- 🐛 **Report bugs** — open an [Issue](https://github.com/your-username/ollama-agent/issues) with reproduction steps
+- 🐛 **Report bugs** — open an [Issue](https://github.com/kchikech/Ollama_Agent/issues) with reproduction steps
 - 💡 **Suggest features** — open an Issue with the `enhancement` label
 - 🔧 **Submit a PR** — see [Development Setup](#-development-setup) below
 - 📖 **Improve docs** — typos, clarity, missing info
@@ -407,7 +407,7 @@ Be kind, be constructive. We follow the [Contributor Covenant](https://www.contr
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/your-username/ollama-agent.git
+git clone https://github.com/kchikech/Ollama_Agent.git
 cd ollama-agent
 
 # 2. Install dev dependencies
@@ -478,7 +478,7 @@ This tests HTTP connectivity, lists models, and runs a streaming test. Output ap
 - [ ] Icon and banner assets
 - [ ] Comprehensive test suite
 
-> Have a feature idea? [Open an issue](https://github.com/your-username/ollama-agent/issues/new?labels=enhancement) — community feedback drives the roadmap.
+> Have a feature idea? [Open an issue](https://github.com/kchikech/Ollama_Agent/issues/new?labels=enhancement) — community feedback drives the roadmap.
 
 ---
 
@@ -554,7 +554,7 @@ all copies or substantial portions of the Software.
 
 **Made with ❤️ by the open-source community**
 
-[Report a Bug](https://github.com/your-username/ollama-agent/issues) · [Request a Feature](https://github.com/your-username/ollama-agent/issues) · [Contribute](CONTRIBUTING.md)
+[Report a Bug](https://github.com/kchikech/Ollama_Agent/issues) · [Request a Feature](https://github.com/kchikech/Ollama_Agent/issues) · [Contribute](CONTRIBUTING.md)
 
 ⭐ Star this repo if you find it useful!
 
