@@ -14,11 +14,15 @@
 
 **No cloud. No subscriptions. No telemetry. Just you, your code, and a local AI.**
 
+<br/>
+
+![OllamaPilot Demo](images/demo.gif)
+
 </div>
 
 ---
 
-## ✨ What is Ollama Agent?
+## ✨ What is OllamaPilot?
 
 Ollama Agent is a free, open-source VS Code extension that brings a **Cursor-like AI coding assistant** experience directly into VS Code — running entirely on your machine using [Ollama](https://ollama.com).
 
