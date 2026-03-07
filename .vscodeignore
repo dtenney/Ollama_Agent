@@ -1,0 +1,33 @@
+# ── Source (compiled to dist/) ────────────────────────────────────────────────
+src/**
+**/*.ts
+!dist/**
+
+# ── Dev tooling ───────────────────────────────────────────────────────────────
+node_modules/**
+tsconfig.json
+.vscode/**
+.github/**
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.gitignore
+.git/**
+
+# ── Logs / temp ───────────────────────────────────────────────────────────────
+*.log
+*.tsbuildinfo
+coverage/**
+.nyc_output/**
+
+# ── OS artefacts ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Keep these in the VSIX ────────────────────────────────────────────────────
+# dist/**        ← included (compiled extension)
+# webview/**     ← included (chat UI)
+# images/**      ← included (sidebar icon)
+# package.json   ← included (manifest)
+# README.md      ← included (Marketplace description)
+# CONTRIBUTING.md← included
+# LICENSE        ← included

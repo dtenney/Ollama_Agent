@@ -1,0 +1,140 @@
+{
+  "name": "ollama-agent",
+  "displayName": "Ollama Agent",
+  "version": "0.6.0",
+  "description": "Local AI coding assistant powered by Ollama — 100% offline, no telemetry",
+  "publisher": "local-dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/ollama-agent"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/ollama-agent/issues"
+  },
+  "homepage": "https://github.com/your-username/ollama-agent#readme",
+  "keywords": ["ollama", "ai", "llm", "offline", "coding-assistant", "agent"],
+  "categories": ["Machine Learning", "Other"],
+  "engines": { "vscode": "^1.80.0" },
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "vscode:prepublish": "npm run build"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.0.0"
+  },
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ollama-sidebar",
+          "title": "Ollama Agent",
+          "icon": "images/sidebar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "ollama-sidebar": [
+        {
+          "type": "webview",
+          "id": "ollamaAgent.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ollamaAgent.newChat",
+        "title": "New Chat",
+        "icon": "$(add)"
+      },
+      {
+        "command": "ollamaAgent.openChat",
+        "title": "Ollama: Open Chat"
+      },
+      {
+        "command": "ollamaAgent.generateCode",
+        "title": "Ollama: Generate Code (selection)"
+      },
+      {
+        "command": "ollamaAgent.diagnose",
+        "title": "Ollama: Run Diagnostics"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "ollamaAgent.newChat",
+          "when": "view == ollamaAgent.chatView",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "ollamaAgent.openChat",
+        "key": "ctrl+shift+o",
+        "mac": "cmd+shift+o"
+      }
+    ],
+    "configuration": {
+      "title": "Ollama Agent",
+      "properties": {
+        "ollamaAgent.baseUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Full base URL for the Ollama server, e.g. `http://localhost:11434`. When set, overrides `host` + `port`."
+        },
+        "ollamaAgent.host": {
+          "type": "string",
+          "default": "localhost",
+          "description": "Ollama server hostname (used only when baseUrl is empty)."
+        },
+        "ollamaAgent.port": {
+          "type": "number",
+          "default": 11434,
+          "description": "Ollama server port (used only when baseUrl is empty)."
+        },
+        "ollamaAgent.model": {
+          "type": "string",
+          "default": "llama2",
+          "description": "Default model to use when the extension starts. Overridable per session via the model selector in the sidebar."
+        },
+        "ollamaAgent.temperature": {
+          "type": "number",
+          "default": 0.7,
+          "minimum": 0,
+          "maximum": 2,
+          "markdownDescription": "Sampling temperature (0 = deterministic, 1 = balanced, 2 = creative). Only sent to Ollama when it differs from the default."
+        },
+        "ollamaAgent.systemPrompt": {
+          "type": "string",
+          "default": "",
+          "description": "Custom system prompt override. Leave empty to use the built-in coding assistant prompt."
+        },
+        "ollamaAgent.autoIncludeFile": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-attach the full active file content to every message sent."
+        },
+        "ollamaAgent.autoIncludeSelection": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-attach selected code from the active editor when a selection exists."
+        },
+        "ollamaAgent.maxContextFiles": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Maximum number of workspace files to include when the agent auto-loads context. Higher values increase token usage."
+        }
+      }
+    }
+  }
+}
