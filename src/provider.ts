@@ -1,0 +1,386 @@
+import * as vscode from 'vscode';
+import { Agent, PostFn } from './agent';
+import { fetchModels, rawGet, streamChatRequest } from './ollamaClient';
+import { getConfig } from './config';
+import { getActiveContext, buildContextString } from './context';
+import { logInfo, logError, channel } from './logger';
+import { ChatStorage, ChatSession, StoredMessage, deriveTitle, relativeTime } from './chatStorage';
+
+// ── Message shapes (webview → extension) ─────────────────────────────────────
+
+interface MsgGetModels     { command: 'getModels' }
+interface MsgSendMessage   { command: 'sendMessage'; text: string; model: string; includeFile: boolean; includeSelection: boolean; }
+interface MsgNewChat       { command: 'newChat' }
+interface MsgStopGen       { command: 'stopGeneration' }
+interface MsgRetryLast     { command: 'retryLast'; model: string }
+interface MsgGetContext    { command: 'getContext' }
+interface MsgListSessions  { command: 'listSessions' }
+interface MsgLoadSession   { command: 'loadSession';   id: string }
+interface MsgDeleteSession { command: 'deleteSession'; id: string }
+interface MsgClearSessions { command: 'clearAllSessions' }
+
+type WebviewMsg =
+    | MsgGetModels | MsgSendMessage  | MsgNewChat      | MsgStopGen
+    | MsgRetryLast | MsgGetContext   | MsgListSessions  | MsgLoadSession
+    | MsgDeleteSession | MsgClearSessions;
+
+// ── Serialised session summary sent to the webview ───────────────────────────
+
+interface SessionSummary {
+    id: string;
+    title: string;
+    model: string;
+    messageCount: number;
+    updatedAt: number;
+    relativeTime: string;
+}
+
+function toSummary(s: ChatSession): SessionSummary {
+    return {
+        id:           s.id,
+        title:        s.title,
+        model:        s.model,
+        messageCount: s.messages.length,
+        updatedAt:    s.updatedAt,
+        relativeTime: relativeTime(s.updatedAt),
+    };
+}
+
+// ── Provider ──────────────────────────────────────────────────────────────────
+
+export class OllamaAgentProvider implements vscode.WebviewViewProvider {
+    private _view?: vscode.WebviewView;
+    private _agent?: Agent;
+    private _editorListener?: vscode.Disposable;
+
+    private readonly storage: ChatStorage;
+    private currentSession: ChatSession;
+
+    constructor(private readonly context: vscode.ExtensionContext) {
+        this.storage = new ChatStorage(context);
+        // Bootstrap: restore the last session or start fresh
+        const sessions = this.storage.list();
+        this.currentSession = sessions[0] ?? this.storage.createNew(getConfig().model);
+        logInfo(`[provider] Loaded session "${this.currentSession.title}" (${this.currentSession.messages.length} msgs)`);
+    }
+
+    async resolveWebviewView(webviewView: vscode.WebviewView): Promise<void> {
+        this._view = webviewView;
+
+        const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        this._agent = new Agent(workspaceRoot);
+
+        // Restore agent conversation history from the loaded session
+        if (this.currentSession.agentHistory.length) {
+            this._agent.restoreHistory(this.currentSession.agentHistory);
+        }
+
+        webviewView.webview.options = { enableScripts: true };
+
+        const post = (m: object) => webviewView.webview.postMessage(m);
+
+        webviewView.webview.onDidReceiveMessage(async (raw: WebviewMsg) => {
+            logInfo(`[webview→ext] ${raw.command}`);
+
+            switch (raw.command) {
+
+                // ── Model discovery ───────────────────────────────────────
+                case 'getModels': {
+                    const models = await fetchModels();
+                    post({ type: 'models', models, connected: models.length > 0 });
+                    break;
+                }
+
+                // ── Send a message ────────────────────────────────────────
+                case 'sendMessage': {
+                    const text  = raw.text?.trim() ?? '';
+                    const model = raw.model ?? getConfig().model;
+                    if (!text) { break; }
+
+                    logInfo(`[user] ${text.slice(0, 120)}${text.length > 120 ? '…' : ''}`);
+
+                    // Record user message (display text only, no injected context)
+                    this.appendToSession({ role: 'user', content: text, timestamp: Date.now() });
+                    // Propagate model if it changed
+                    this.currentSession.model = model;
+
+                    // Build context string for the model
+                    const ctx = buildContextString(raw.includeFile, raw.includeSelection);
+                    const fullMessage = ctx ? `${text}${ctx}` : text;
+
+                    // Wrap post() to capture streamed tokens → save assistant message
+                    let assistantBuf = '';
+                    const trackedPost: PostFn = (m: object) => {
+                        post(m);
+                        const pm = m as { type: string; text?: string };
+                        if (pm.type === 'token') {
+                            assistantBuf += pm.text ?? '';
+                        } else if (pm.type === 'streamEnd') {
+                            if (assistantBuf.trim()) {
+                                const clean = assistantBuf
+                                    .replace(/<tool>[\s\S]*?<\/tool>\s*/g, '')
+                                    .trim();
+                                this.appendToSession({ role: 'assistant', content: clean, timestamp: Date.now() });
+                                logInfo(`[assistant] ${clean.slice(0, 120)}${clean.length > 120 ? '…' : ''}`);
+                            }
+                            assistantBuf = '';
+                            this.persistSession();
+                        } else if (pm.type === 'error') {
+                            const errText = (m as { type: string; text: string }).text;
+                            this.appendToSession({ role: 'error', content: errText, timestamp: Date.now() });
+                            this.persistSession();
+                        }
+                    };
+
+                    await this._agent!.run(fullMessage, model, trackedPost);
+                    // Sync agent history into session after run completes
+                    this.currentSession.agentHistory = this._agent!.conversationHistory;
+                    this.persistSession();
+                    break;
+                }
+
+                // ── New chat ──────────────────────────────────────────────
+                case 'newChat': {
+                    this.startNewSession(raw as unknown as { model?: string });
+                    post({ type: 'clearChat' });
+                    logInfo('[provider] New chat started');
+                    break;
+                }
+
+                // ── Stop generation ───────────────────────────────────────
+                case 'stopGeneration': {
+                    this._agent!.stop();
+                    post({ type: 'streamEnd' });
+                    logInfo('[provider] Generation stopped');
+                    break;
+                }
+
+                // ── Retry last ────────────────────────────────────────────
+                case 'retryLast': {
+                    const model   = raw.model ?? getConfig().model;
+                    const lastMsg = this._agent!.retryLast();
+                    if (!lastMsg) { break; }
+                    // Remove the last assistant + error messages from session
+                    this.trimSessionToLastUser();
+                    post({ type: 'removeLastAssistant' });
+                    logInfo('[provider] Retrying last message…');
+
+                    let assistantBuf2 = '';
+                    const retryPost: PostFn = (m: object) => {
+                        post(m);
+                        const pm = m as { type: string; text?: string };
+                        if (pm.type === 'token') { assistantBuf2 += pm.text ?? ''; }
+                        else if (pm.type === 'streamEnd') {
+                            if (assistantBuf2.trim()) {
+                                this.appendToSession({ role: 'assistant', content: assistantBuf2.replace(/<tool>[\s\S]*?<\/tool>\s*/g, '').trim(), timestamp: Date.now() });
+                            }
+                            assistantBuf2 = '';
+                            this.persistSession();
+                        }
+                    };
+
+                    await this._agent!.run(lastMsg, model, retryPost);
+                    this.currentSession.agentHistory = this._agent!.conversationHistory;
+                    this.persistSession();
+                    break;
+                }
+
+                // ── Context ───────────────────────────────────────────────
+                case 'getContext': {
+                    post({ type: 'contextUpdate', ...getActiveContext() });
+                    break;
+                }
+
+                // ── Session management ────────────────────────────────────
+                case 'listSessions': {
+                    const summaries = this.storage.list().map(toSummary);
+                    post({ type: 'sessionList', sessions: summaries, currentId: this.currentSession.id });
+                    break;
+                }
+
+                case 'loadSession': {
+                    const session = this.storage.get(raw.id);
+                    if (!session) {
+                        post({ type: 'error', text: `Session not found: ${raw.id}` });
+                        break;
+                    }
+                    this.currentSession = session;
+                    // Rebuild agent with the saved history
+                    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                    this._agent = new Agent(root);
+                    if (session.agentHistory.length) {
+                        this._agent.restoreHistory(session.agentHistory);
+                    }
+                    logInfo(`[provider] Loaded session "${session.title}"`);
+                    post({
+                        type: 'sessionLoaded',
+                        session: toSummary(session),
+                        messages: session.messages,
+                    });
+                    break;
+                }
+
+                case 'deleteSession': {
+                    this.storage.delete(raw.id);
+                    // If we just deleted the active session, start a new one
+                    if (raw.id === this.currentSession.id) {
+                        this.startNewSession({});
+                        post({ type: 'clearChat' });
+                    }
+                    post({ type: 'sessionList', sessions: this.storage.list().map(toSummary), currentId: this.currentSession.id });
+                    break;
+                }
+
+                case 'clearAllSessions': {
+                    this.storage.clearAll();
+                    this.startNewSession({});
+                    post({ type: 'clearChat' });
+                    post({ type: 'sessionList', sessions: [], currentId: this.currentSession.id });
+                    logInfo('[provider] All sessions cleared');
+                    break;
+                }
+            }
+        });
+
+        // Push context updates when the active editor / selection changes
+        this._editorListener?.dispose();
+        this._editorListener = vscode.window.onDidChangeActiveTextEditor(() => {
+            if (webviewView.visible) {
+                post({ type: 'contextUpdate', ...getActiveContext() });
+            }
+        });
+        this.context.subscriptions.push(
+            vscode.window.onDidChangeTextEditorSelection(() => {
+                if (webviewView.visible) {
+                    post({ type: 'contextUpdate', ...getActiveContext() });
+                }
+            })
+        );
+
+        try {
+            webviewView.webview.html = await this.buildHtml();
+            logInfo('[provider] Webview HTML loaded');
+
+            // Restore the current session into the freshly-loaded webview
+            if (this.currentSession.messages.length) {
+                setTimeout(() => {
+                    post({
+                        type: 'sessionLoaded',
+                        session: toSummary(this.currentSession),
+                        messages: this.currentSession.messages,
+                    });
+                }, 300); // small delay so the webview JS has time to initialise
+            }
+        } catch (err) {
+            logError(`[provider] Failed to build webview: ${(err as Error).message}`);
+        }
+    }
+
+    /** Called from the `ollamaAgent.newChat` command. */
+    newChat(): void {
+        this.startNewSession({});
+        this._view?.webview.postMessage({ type: 'clearChat' });
+    }
+
+    dispose(): void {
+        this._editorListener?.dispose();
+    }
+
+    // ── Session helpers ───────────────────────────────────────────────────────
+
+    private startNewSession(opts: { model?: string }): void {
+        const model = opts.model ?? getConfig().model;
+        this.currentSession = this.storage.createNew(model);
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        this._agent = new Agent(root);
+        logInfo(`[provider] New session: ${this.currentSession.id}`);
+    }
+
+    private appendToSession(msg: StoredMessage): void {
+        this.currentSession.messages.push(msg);
+        // Update title once we have the first user message
+        if (this.currentSession.title === 'New Chat') {
+            this.currentSession.title = deriveTitle(this.currentSession.messages);
+        }
+    }
+
+    private trimSessionToLastUser(): void {
+        // Remove everything after (and including) the last non-user message
+        while (
+            this.currentSession.messages.length > 0 &&
+            this.currentSession.messages[this.currentSession.messages.length - 1].role !== 'user'
+        ) {
+            this.currentSession.messages.pop();
+        }
+    }
+
+    private persistSession(): void {
+        this.storage.upsert(this.currentSession);
+        this._view?.webview.postMessage({
+            type: 'sessionSaved',
+            session: toSummary(this.currentSession),
+        });
+    }
+
+    // ── HTML builder ──────────────────────────────────────────────────────────
+
+    private async buildHtml(): Promise<string> {
+        const read = async (rel: string): Promise<string> => {
+            const uri = vscode.Uri.joinPath(this.context.extensionUri, rel);
+            return Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+        };
+
+        const [html, js] = await Promise.all([
+            read('webview/webview.html'),
+            read('webview/webview.js'),
+        ]);
+
+        const nonce = Array.from({ length: 32 }, () =>
+            'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
+                .charAt(Math.floor(Math.random() * 62))
+        ).join('');
+
+        return html
+            .replace(/\{\{nonce\}\}/g, nonce)
+            .replace('{{inlineScript}}', js);
+    }
+}
+
+// ── Diagnostics ───────────────────────────────────────────────────────────────
+
+export async function runDiagnostics(): Promise<void> {
+    channel.show(false);
+    logInfo('━━━━━  DIAGNOSTICS  ━━━━━');
+    logInfo(`Platform: ${process.platform}  Node: ${process.version}`);
+    logInfo(`HTTP_PROXY: ${process.env.HTTP_PROXY ?? process.env.http_proxy ?? '(none)'}`);
+    logInfo(`Extension storage: ${vscode.Uri.joinPath(vscode.extensions.getExtension('local-dev.ollama-agent')?.extensionUri ?? vscode.Uri.parse(''), '').fsPath}`);
+
+    try {
+        const { status, body } = await rawGet('/', 3000);
+        logInfo(`Ollama root → HTTP ${status}: ${body.trim()}`);
+    } catch (e) {
+        logError(`Ollama unreachable: ${(e as Error).message}`);
+    }
+
+    const models = await fetchModels();
+    logInfo(`Available models: ${models.join(', ') || '(none)'}`);
+
+    if (models.length) {
+        let toks = 0;
+        try {
+            await streamChatRequest(
+                models[0],
+                [{ role: 'user', content: 'Say ok.' }],
+                [],
+                () => toks++,
+                { stop: false }
+            );
+            logInfo(`Stream test OK — ${toks} tokens from ${models[0]}`);
+        } catch (e) {
+            logError(`Stream test failed: ${(e as Error).message}`);
+        }
+    }
+
+    logInfo('━━━━━  END  ━━━━━');
+    vscode.window.showInformationMessage('Diagnostics done — check Output › Ollama Agent');
+}
