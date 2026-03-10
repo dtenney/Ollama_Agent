@@ -647,6 +647,101 @@
     }
     a { color: var(--vscode-textLink-foreground, #4fc1ff); text-decoration: none; }
     a:hover { text-decoration: underline; }
+
+    /* ── highlight.js token colours (VS Code-themed) ─────────────────────── */
+    .hljs-keyword, .hljs-built_in { color: #569cd6; }
+    .hljs-type                    { color: #4ec9b0; }
+    .hljs-string, .hljs-regexp    { color: #ce9178; }
+    .hljs-number                  { color: #b5cea8; }
+    .hljs-comment                 { color: #6a9955; font-style: italic; }
+    .hljs-meta                    { color: #9b9b9b; }
+    .hljs-attr, .hljs-attribute   { color: #9cdcfe; }
+    .hljs-property                { color: #9cdcfe; }
+    .hljs-title, .hljs-title.class_,
+    .hljs-title.function_         { color: #dcdcaa; }
+    .hljs-params                  { color: #cccccc; }
+    .hljs-variable, .hljs-name    { color: #9cdcfe; }
+    .hljs-tag                     { color: #569cd6; }
+    .hljs-selector-class,
+    .hljs-selector-id             { color: #d7ba7d; }
+    .hljs-literal                 { color: #569cd6; }
+    .hljs-symbol, .hljs-bullet    { color: #b5cea8; }
+    .hljs-operator                { color: #cccccc; }
+    .hljs-punctuation             { color: #cccccc; }
+    .hljs-link                    { color: var(--vscode-textLink-foreground, #4fc1ff); }
+    .hljs-deletion                { color: #f44747; }
+    .hljs-addition                { color: #4ec94e; }
+    .hljs-emphasis                { font-style: italic; }
+    .hljs-strong                  { font-weight: bold; }
+
+    /* ── @mention dropdown ───────────────────────────────────────────────── */
+    #mention-dropdown {
+      position: absolute;
+      bottom: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      max-height: 220px;
+      overflow-y: auto;
+      background: var(--vscode-editorSuggestWidget-background, #252526);
+      border: 1px solid var(--vscode-editorSuggestWidget-border, #454545);
+      border-radius: 5px;
+      z-index: 50;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+      scrollbar-width: thin;
+    }
+    #mention-dropdown::-webkit-scrollbar { width: 4px; }
+    #mention-dropdown::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.4); border-radius: 2px; }
+    .mention-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 10px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .mention-item:hover, .mention-item.selected {
+      background: var(--vscode-editorSuggestWidget-selectedBackground, #094771);
+    }
+    .mention-item-icon { font-size: 12px; flex-shrink: 0; opacity: 0.7; }
+    .mention-item-rel  { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground, #888); font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); }
+    .mention-item-base { font-weight: 600; color: var(--vscode-sideBar-foreground, #ccc); flex-shrink: 0; }
+    .mention-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 10px;
+      padding: 1px 5px 1px 6px;
+      border-radius: 10px;
+      border: 1px solid var(--vscode-focusBorder, #0078d4);
+      color: var(--vscode-textLink-foreground, #4fc1ff);
+      background: rgba(0,120,212,0.12);
+      cursor: default;
+      user-select: none;
+      white-space: nowrap;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .mention-pill-remove {
+      flex-shrink: 0;
+      cursor: pointer;
+      opacity: 0.6;
+      font-size: 10px;
+      line-height: 1;
+    }
+    .mention-pill-remove:hover { opacity: 1; color: #f44747; }
+    #input-container { position: relative; }
+
+    /* ── Token / context indicator ───────────────────────────────────────── */
+    #token-indicator {
+      font-size: 10px;
+      color: var(--vscode-descriptionForeground, #888);
+      opacity: 0.65;
+      white-space: nowrap;
+      transition: color 0.2s;
+    }
+    #token-indicator.warn  { color: #e5c07b; opacity: 1; }
+    #token-indicator.over  { color: #f44747; opacity: 1; }
   </style>
 </head>
 <body>
@@ -687,8 +782,10 @@
   <!-- Input -->
   <div id="input-container">
     <div id="context-bar"></div>
+    <!-- @mention autocomplete dropdown -->
+    <div id="mention-dropdown" style="display:none"></div>
     <div id="input-box" style="margin-top: 5px;">
-      <textarea id="prompt" rows="1" placeholder="Ask anything… (Enter ↵ send, Shift+Enter newline)"></textarea>
+      <textarea id="prompt" rows="1" placeholder="Ask anything… (@ to mention a file, Enter ↵ to send)"></textarea>
       <button id="send-btn" disabled>Send</button>
     </div>
     <div id="input-footer">
@@ -696,10 +793,15 @@
         <span id="status-dot" class="checking"></span>
         <span id="status-text">Connecting…</span>
       </div>
-      <button id="stop-btn">■ Stop</button>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span id="token-indicator"></span>
+        <button id="stop-btn">■ Stop</button>
+      </div>
     </div>
   </div>
 
+  <!-- Vendored highlight.js (offline, generated by scripts/vendor-hljs.js) -->
+  <script nonce="{{nonce}}">{{inlineHljs}}</script>
   <script nonce="{{nonce}}">{{inlineScript}}</script>
 </body>
 </html>
