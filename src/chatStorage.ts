@@ -101,6 +101,8 @@ export function deriveTitle(messages: StoredMessage[]): string {
     const clean = first.content
         .replace(/<active-file[\s\S]*?<\/active-file>/g, '')
         .replace(/<selection[\s\S]*?<\/selection>/g, '')
+        .replace(/<mention[\s\S]*?<\/mention>/g, '')
+        .replace(/<git-diff[\s\S]*?<\/git-diff>/g, '')
         .trim()
         .replace(/\n+/g, ' ');
     if (!clean) { return 'New Chat'; }

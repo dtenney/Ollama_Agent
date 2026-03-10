@@ -5,11 +5,14 @@ import { getConfig } from './config';
 import { getActiveContext, buildContextString } from './context';
 import { logInfo, logError, channel } from './logger';
 import { ChatStorage, ChatSession, StoredMessage, deriveTitle, relativeTime } from './chatStorage';
+import { indexWorkspaceFiles, fuzzySearchFiles, buildMentionContext } from './mentions';
+import { buildGitDiffContext } from './gitContext';
+import { ProjectMemory } from './projectMemory';
 
 // ── Message shapes (webview → extension) ─────────────────────────────────────
 
 interface MsgGetModels     { command: 'getModels' }
-interface MsgSendMessage   { command: 'sendMessage'; text: string; model: string; includeFile: boolean; includeSelection: boolean; }
+interface MsgSendMessage   { command: 'sendMessage'; text: string; model: string; includeFile: boolean; includeSelection: boolean; mentionedFiles?: string[]; }
 interface MsgNewChat       { command: 'newChat' }
 interface MsgStopGen       { command: 'stopGeneration' }
 interface MsgRetryLast     { command: 'retryLast'; model: string }
@@ -18,11 +21,12 @@ interface MsgListSessions  { command: 'listSessions' }
 interface MsgLoadSession   { command: 'loadSession';   id: string }
 interface MsgDeleteSession { command: 'deleteSession'; id: string }
 interface MsgClearSessions { command: 'clearAllSessions' }
+interface MsgSearchFiles   { command: 'searchFiles'; query: string }
 
 type WebviewMsg =
     | MsgGetModels | MsgSendMessage  | MsgNewChat      | MsgStopGen
     | MsgRetryLast | MsgGetContext   | MsgListSessions  | MsgLoadSession
-    | MsgDeleteSession | MsgClearSessions;
+    | MsgDeleteSession | MsgClearSessions | MsgSearchFiles;
 
 // ── Serialised session summary sent to the webview ───────────────────────────
 
@@ -54,10 +58,14 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
     private _editorListener?: vscode.Disposable;
 
     private readonly storage: ChatStorage;
+    private readonly memory: ProjectMemory;
     private currentSession: ChatSession;
+    /** Cached workspace file index for @mention autocomplete. Rebuilt on new workspace. */
+    private _fileIndex: ReturnType<typeof indexWorkspaceFiles> = [];
 
     constructor(private readonly context: vscode.ExtensionContext) {
         this.storage = new ChatStorage(context);
+        this.memory  = new ProjectMemory(context);
         // Bootstrap: restore the last session or start fresh
         const sessions = this.storage.list();
         this.currentSession = sessions[0] ?? this.storage.createNew(getConfig().model);
@@ -68,7 +76,15 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         this._view = webviewView;
 
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-        this._agent = new Agent(workspaceRoot);
+        this._agent = new Agent(workspaceRoot, this.memory);
+
+        // Build file index for @mention autocomplete (async, non-blocking)
+        if (workspaceRoot) {
+            setTimeout(() => {
+                try { this._fileIndex = indexWorkspaceFiles(workspaceRoot); }
+                catch { /* best-effort */ }
+            }, 500);
+        }
 
         // Restore agent conversation history from the loaded session
         if (this.currentSession.agentHistory.length) {
@@ -106,7 +122,24 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
                     // Build context string for the model
                     const ctx = buildContextString(raw.includeFile, raw.includeSelection);
-                    const fullMessage = ctx ? `${text}${ctx}` : text;
+
+                    // Resolve @mentioned files (deduplicate against auto-attached file)
+                    const autoAttachedFile = raw.includeFile
+                        ? vscode.workspace.asRelativePath(vscode.window.activeTextEditor?.document.uri ?? vscode.Uri.parse(''), false)
+                        : '';
+                    const mentionCtx = raw.mentionedFiles?.length
+                        ? buildMentionContext(raw.mentionedFiles, workspaceRoot, new Set([autoAttachedFile]))
+                        : '';
+
+                    // Optionally inject git diff context
+                    const cfg = getConfig();
+                    const gitCtx = cfg.injectGitDiff && workspaceRoot
+                        ? await buildGitDiffContext(workspaceRoot)
+                        : '';
+
+                    const fullMessage = ctx || mentionCtx || gitCtx
+                        ? `${text}${ctx}${mentionCtx}${gitCtx}`
+                        : text;
 
                     // Wrap post() to capture streamed tokens → save assistant message
                     let assistantBuf = '';
@@ -119,6 +152,8 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                             if (assistantBuf.trim()) {
                                 const clean = assistantBuf
                                     .replace(/<tool>[\s\S]*?<\/tool>\s*/g, '')
+                                    .replace(/<mention[\s\S]*?<\/mention>\s*/g, '')
+                                    .replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '')
                                     .trim();
                                 this.appendToSession({ role: 'assistant', content: clean, timestamp: Date.now() });
                                 logInfo(`[assistant] ${clean.slice(0, 120)}${clean.length > 120 ? '…' : ''}`);
@@ -172,7 +207,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         if (pm.type === 'token') { assistantBuf2 += pm.text ?? ''; }
                         else if (pm.type === 'streamEnd') {
                             if (assistantBuf2.trim()) {
-                                this.appendToSession({ role: 'assistant', content: assistantBuf2.replace(/<tool>[\s\S]*?<\/tool>\s*/g, '').trim(), timestamp: Date.now() });
+                                this.appendToSession({ role: 'assistant', content: assistantBuf2.replace(/<tool>[\s\S]*?<\/tool>\s*/g, '').replace(/<mention[\s\S]*?<\/mention>\s*/g, '').replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '').trim(), timestamp: Date.now() });
                             }
                             assistantBuf2 = '';
                             this.persistSession();
@@ -207,7 +242,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     this.currentSession = session;
                     // Rebuild agent with the saved history
                     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-                    this._agent = new Agent(root);
+                    this._agent = new Agent(root, this.memory);
                     if (session.agentHistory.length) {
                         this._agent.restoreHistory(session.agentHistory);
                     }
@@ -237,6 +272,14 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     post({ type: 'clearChat' });
                     post({ type: 'sessionList', sessions: [], currentId: this.currentSession.id });
                     logInfo('[provider] All sessions cleared');
+                    break;
+                }
+
+                // ── @mention file search ──────────────────────────────────
+                case 'searchFiles': {
+                    const q = (raw as MsgSearchFiles).query ?? '';
+                    const matches = fuzzySearchFiles(this._fileIndex, q, 12);
+                    post({ type: 'fileSearchResults', query: q, files: matches.map((f) => ({ rel: f.rel, display: f.display, ext: f.ext })) });
                     break;
                 }
             }
@@ -292,7 +335,11 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         const model = opts.model ?? getConfig().model;
         this.currentSession = this.storage.createNew(model);
         const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-        this._agent = new Agent(root);
+        this._agent = new Agent(root, this.memory);
+        // Re-index files for the new session (workspace may have changed)
+        if (root && !this._fileIndex.length) {
+            try { this._fileIndex = indexWorkspaceFiles(root); } catch { /* best-effort */ }
+        }
         logInfo(`[provider] New session: ${this.currentSession.id}`);
     }
 
@@ -330,6 +377,11 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
             return Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
         };
 
+        // Load vendor bundle — gracefully degrade if missing (first build before vendor step)
+        let hljs = '';
+        try { hljs = await read('webview/vendor/highlight.bundle.js'); }
+        catch { logInfo('[provider] highlight.bundle.js not found — syntax highlighting disabled'); }
+
         const [html, js] = await Promise.all([
             read('webview/webview.html'),
             read('webview/webview.js'),
@@ -342,7 +394,8 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
         return html
             .replace(/\{\{nonce\}\}/g, nonce)
-            .replace('{{inlineScript}}', js);
+            .replace('{{inlineHljs}}', () => hljs)
+            .replace('{{inlineScript}}', () => js);
     }
 }
 

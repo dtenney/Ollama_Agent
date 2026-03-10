@@ -4,22 +4,24 @@
 const vscode = acquireVsCodeApi();
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
-const messagesEl     = /** @type {HTMLDivElement}     */ (document.getElementById('messages'));
-const welcomeEl      = /** @type {HTMLDivElement}     */ (document.getElementById('welcome'));
-const promptEl       = /** @type {HTMLTextAreaElement} */ (document.getElementById('prompt'));
-const sendBtn        = /** @type {HTMLButtonElement}  */ (document.getElementById('send-btn'));
-const stopBtn        = /** @type {HTMLButtonElement}  */ (document.getElementById('stop-btn'));
-const newChatBtn     = /** @type {HTMLButtonElement}  */ (document.getElementById('new-chat-btn'));
-const modelSelect    = /** @type {HTMLSelectElement}  */ (document.getElementById('model-select'));
-const statusDot      = /** @type {HTMLSpanElement}    */ (document.getElementById('status-dot'));
-const statusText     = /** @type {HTMLSpanElement}    */ (document.getElementById('status-text'));
-const scrollBtn      = /** @type {HTMLButtonElement}  */ (document.getElementById('scroll-btn'));
-const contextBar     = /** @type {HTMLDivElement}     */ (document.getElementById('context-bar'));
-const historyBtn     = /** @type {HTMLButtonElement}  */ (document.getElementById('history-btn'));
-const historyPanel   = /** @type {HTMLDivElement}     */ (document.getElementById('history-panel'));
-const historyList    = /** @type {HTMLDivElement}     */ (document.getElementById('history-list'));
-const historyCloseBtn= /** @type {HTMLButtonElement}  */ (document.getElementById('history-close-btn'));
-const historyClearBtn= /** @type {HTMLButtonElement}  */ (document.getElementById('history-clear-btn'));
+const messagesEl       = /** @type {HTMLDivElement}     */ (document.getElementById('messages'));
+const welcomeEl        = /** @type {HTMLDivElement}     */ (document.getElementById('welcome'));
+const promptEl         = /** @type {HTMLTextAreaElement} */ (document.getElementById('prompt'));
+const sendBtn          = /** @type {HTMLButtonElement}  */ (document.getElementById('send-btn'));
+const stopBtn          = /** @type {HTMLButtonElement}  */ (document.getElementById('stop-btn'));
+const newChatBtn       = /** @type {HTMLButtonElement}  */ (document.getElementById('new-chat-btn'));
+const modelSelect      = /** @type {HTMLSelectElement}  */ (document.getElementById('model-select'));
+const statusDot        = /** @type {HTMLSpanElement}    */ (document.getElementById('status-dot'));
+const statusText       = /** @type {HTMLSpanElement}    */ (document.getElementById('status-text'));
+const scrollBtn        = /** @type {HTMLButtonElement}  */ (document.getElementById('scroll-btn'));
+const contextBar       = /** @type {HTMLDivElement}     */ (document.getElementById('context-bar'));
+const historyBtn       = /** @type {HTMLButtonElement}  */ (document.getElementById('history-btn'));
+const historyPanel     = /** @type {HTMLDivElement}     */ (document.getElementById('history-panel'));
+const historyList      = /** @type {HTMLDivElement}     */ (document.getElementById('history-list'));
+const historyCloseBtn  = /** @type {HTMLButtonElement}  */ (document.getElementById('history-close-btn'));
+const historyClearBtn  = /** @type {HTMLButtonElement}  */ (document.getElementById('history-clear-btn'));
+const mentionDropdown  = /** @type {HTMLDivElement}     */ (document.getElementById('mention-dropdown'));
+const tokenIndicator   = /** @type {HTMLSpanElement}    */ (document.getElementById('token-indicator'));
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -41,6 +43,96 @@ const ctx = {
     includeFile: false,
     includeSelection: true,
 };
+
+// ── @mention state ────────────────────────────────────────────────────────────
+
+/** Files the user has explicitly mentioned via @. [{rel, display, ext}] */
+/** @type {Array<{rel: string, display: string, ext: string}>} */
+let mentionedFiles = [];
+/** Position in textarea where the current @ query started (-1 = not active). */
+let mentionAtStart = -1;
+/** Current autocomplete query (text after @). */
+let mentionQuery = '';
+/** Currently highlighted dropdown item index. */
+let mentionSelectedIdx = 0;
+/** File results from the last searchFiles response. */
+/** @type {Array<{rel: string, display: string, ext: string}>} */
+let mentionResults = [];
+
+// ── Token estimation state ────────────────────────────────────────────────────
+
+/** Approximate context window sizes (tokens) for known model families. */
+const MODEL_CONTEXT_WINDOWS = {
+    'llama2':           4096,
+    'llama3':           8192,
+    'llama3.1':         8192,
+    'llama3.2':         8192,
+    'llama3.3':         8192,
+    'qwen2.5':          8192,
+    'qwen2.5-coder':   32768,
+    'qwen3':           32768,
+    'phi3':             4096,
+    'phi3.5':           8192,
+    'phi4':            16384,
+    'codellama':       16384,
+    'mistral':          8192,
+    'mixtral':         32768,
+    'gemma2':           8192,
+    'deepseek-coder':  16384,
+    'deepseek-r1':     32768,
+    'starcoder2':      16384,
+    'granite-code':     8192,
+};
+
+/** Estimate token count using the 4-chars-per-token heuristic. */
+function estimateTokens(text) {
+    return Math.ceil(text.length / 4);
+}
+
+/** Find the approximate context window for the selected model. */
+function getContextWindow() {
+    const model = modelSelect.value.toLowerCase();
+    for (const [prefix, size] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
+        if (model.startsWith(prefix)) { return size; }
+    }
+    return 8192; // safe default
+}
+
+/** Update the token indicator in the footer. */
+function updateTokenIndicator() {
+    if (!tokenIndicator) { return; }
+    const promptText = promptEl.value;
+    if (!promptText.trim()) {
+        tokenIndicator.textContent = '';
+        tokenIndicator.className = '';
+        return;
+    }
+
+    // Estimate: prompt + any mentioned file content (rough chars / 4)
+    let totalChars = promptText.length;
+    // Add rough estimate for each mentioned file (we don't have content here,
+    // use a conservative 500 tokens per mention as placeholder)
+    totalChars += mentionedFiles.length * 2000;
+    if (ctx.includeFile && ctx.fileLines) { totalChars += ctx.fileLines * 40; }
+
+    const estimated = estimateTokens(totalChars);
+    const window = getContextWindow();
+    const pct = estimated / window;
+
+    if (pct >= 0.95) {
+        tokenIndicator.textContent = `~${estimated.toLocaleString()} / ${window.toLocaleString()} tokens ⚠`;
+        tokenIndicator.className = 'over';
+    } else if (pct >= 0.75) {
+        tokenIndicator.textContent = `~${estimated.toLocaleString()} tokens`;
+        tokenIndicator.className = 'warn';
+    } else if (estimated > 50) {
+        tokenIndicator.textContent = `~${estimated.toLocaleString()} tokens`;
+        tokenIndicator.className = '';
+    } else {
+        tokenIndicator.textContent = '';
+        tokenIndicator.className = '';
+    }
+}
 
 // ── Status helpers ────────────────────────────────────────────────────────────
 
@@ -78,7 +170,11 @@ function populateModels(models, connected) {
     setStatus('connected', `${models.length} model${models.length > 1 ? 's' : ''} available`);
     sendBtn.disabled = false;
     promptEl.focus();
+    updateTokenIndicator();
 }
+
+// Update token indicator when model changes (context window changes)
+modelSelect.addEventListener('change', updateTokenIndicator);
 
 // ── Markdown renderer ─────────────────────────────────────────────────────────
 
@@ -150,15 +246,31 @@ function renderMarkdown(text) {
         return `<p>${p.replace(/\n/g, '<br>')}</p>`;
     }).join('');
 
-    // 8. Restore code blocks — use data attributes instead of onclick
+    // 8. Restore code blocks with optional syntax highlighting
     codeBlocks.forEach(({ lang, code }, i) => {
+        let highlighted = escHtml(code);
+
+        // Use highlight.js if available and the language is known
+        if (typeof window.hljs !== 'undefined' && lang) {
+            try {
+                const validLang = window.hljs.getLanguage(lang);
+                if (validLang) {
+                    highlighted = window.hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
+                } else {
+                    // Try auto-detection as fallback for unknown language tags
+                    const auto = window.hljs.highlightAuto(code, ['javascript','typescript','python','rust','go','java','bash','json']);
+                    if (auto.relevance > 5) { highlighted = auto.value; }
+                }
+            } catch { highlighted = escHtml(code); }
+        }
+
         const header = `<div class="code-header">` +
             `<span class="code-lang-label">${escHtml(lang || 'code')}</span>` +
             `<button class="copy-btn" data-copy-idx="${i}">Copy</button>` +
             `</div>`;
         text = text.replace(
             `\x01CB${i}\x01`,
-            `<div class="code-block" data-block-idx="${i}">${header}<pre>${escHtml(code)}</pre></div>`
+            `<div class="code-block" data-block-idx="${i}">${header}<pre class="hljs">${highlighted}</pre></div>`
         );
     });
 
@@ -234,6 +346,9 @@ const TOOL_ICONS = {
     rename_file:       '🔄',
     delete_file:       '🗑️',
     run_command:       '⚡',
+    memory_list:       '🧠',
+    memory_write:      '💡',
+    memory_delete:     '🗑️',
 };
 
 // ── Time helper ───────────────────────────────────────────────────────────────
@@ -452,20 +567,41 @@ function updateContextBar() {
             ` <span class="ctx-pill-toggle" data-toggle="selection">${ctx.includeSelection ? '×' : '+'}</span>`;
         contextBar.appendChild(pill);
     }
+
+    // @mention pills
+    mentionedFiles.forEach((f) => {
+        const pill = document.createElement('span');
+        pill.className = 'mention-pill';
+        pill.title = f.rel;
+        pill.innerHTML =
+            `${fileIcon(f.ext)} ${escHtml(f.display)}` +
+            ` <span class="mention-pill-remove" data-remove-rel="${escHtml(f.rel)}">×</span>`;
+        contextBar.appendChild(pill);
+    });
 }
 
 contextBar.addEventListener('click', (e) => {
-    const toggle = /** @type {HTMLElement} */ (e.target);
-    if (!toggle.dataset.toggle) { return; }
-    if (toggle.dataset.toggle === 'file') {
+    const el = /** @type {HTMLElement} */ (e.target);
+
+    // Handle @mention pill removal
+    if (el.dataset.removeRel) {
+        mentionedFiles = mentionedFiles.filter((f) => f.rel !== el.dataset.removeRel);
+        updateContextBar();
+        updateTokenIndicator();
+        return;
+    }
+
+    // Handle file/selection toggle
+    if (!el.dataset.toggle) { return; }
+    if (el.dataset.toggle === 'file') {
         ctx.includeFile = !ctx.includeFile;
-        // If activating file, deactivate selection to avoid duplication
         if (ctx.includeFile) { ctx.includeSelection = false; }
-    } else if (toggle.dataset.toggle === 'selection') {
+    } else if (el.dataset.toggle === 'selection') {
         ctx.includeSelection = !ctx.includeSelection;
         if (ctx.includeSelection) { ctx.includeFile = false; }
     }
     updateContextBar();
+    updateTokenIndicator();
 });
 
 // ── Command output blocks ─────────────────────────────────────────────────────
@@ -589,7 +725,14 @@ function sendMessage() {
     addUserMessage(text);
     promptEl.value = '';
     autoResize();
+    hideMentionDropdown();
     setStreaming(true);
+
+    const filesToSend = mentionedFiles.map((f) => f.rel);
+    // Clear mention state after send
+    mentionedFiles = [];
+    updateContextBar();
+    updateTokenIndicator();
 
     vscode.postMessage({
         command: 'sendMessage',
@@ -597,6 +740,7 @@ function sendMessage() {
         model: modelSelect.value,
         includeFile: ctx.includeFile,
         includeSelection: ctx.includeSelection,
+        mentionedFiles: filesToSend,
     });
 }
 
@@ -625,7 +769,118 @@ function autoResize() {
     promptEl.style.height = 'auto';
     promptEl.style.height = `${Math.min(promptEl.scrollHeight, 140)}px`;
 }
-promptEl.addEventListener('input', autoResize);
+promptEl.addEventListener('input', () => { autoResize(); updateTokenIndicator(); });
+
+// ── @mention autocomplete ─────────────────────────────────────────────────────
+
+const EXT_ICONS = {
+    ts:'🟦', tsx:'🟦', js:'🟨', jsx:'🟨', py:'🐍', rs:'🦀', go:'🐹',
+    java:'☕', kt:'🟪', cs:'🔷', cpp:'⚙️', c:'⚙️', rb:'💎', php:'🐘',
+    swift:'🍎', sh:'🖥️', bash:'🖥️', css:'🎨', scss:'🎨', html:'🌐',
+    json:'📋', yaml:'📋', yml:'📋', md:'📝', sql:'🗄️', xml:'📄',
+    toml:'📄', dockerfile:'🐳', lock:'🔒',
+};
+function fileIcon(ext) { return EXT_ICONS[ext] || '📄'; }
+
+function showMentionDropdown(results) {
+    mentionResults = results;
+    mentionSelectedIdx = 0;
+    mentionDropdown.innerHTML = '';
+
+    if (!results.length) {
+        mentionDropdown.style.display = 'none';
+        return;
+    }
+
+    results.forEach((f, i) => {
+        const item = document.createElement('div');
+        item.className = 'mention-item' + (i === 0 ? ' selected' : '');
+        item.dataset.idx = String(i);
+        item.innerHTML =
+            `<span class="mention-item-icon">${fileIcon(f.ext)}</span>` +
+            `<span class="mention-item-base">${escHtml(f.display)}</span>` +
+            `<span class="mention-item-rel">${escHtml(f.rel)}</span>`;
+        item.addEventListener('mousedown', (e) => {
+            e.preventDefault(); // keep textarea focused
+            selectMentionItem(i);
+        });
+        mentionDropdown.appendChild(item);
+    });
+
+    mentionDropdown.style.display = 'block';
+}
+
+function hideMentionDropdown() {
+    mentionDropdown.style.display = 'none';
+    mentionAtStart = -1;
+    mentionQuery = '';
+    mentionResults = [];
+}
+
+function selectMentionItem(idx) {
+    const file = mentionResults[idx];
+    if (!file) { return; }
+
+    // Replace @query in textarea with empty string (the pill takes its place)
+    const val = promptEl.value;
+    const before = val.slice(0, mentionAtStart);
+    const after  = val.slice(mentionAtStart + 1 + mentionQuery.length); // +1 for '@'
+    promptEl.value = before + after;
+    autoResize();
+
+    // Add to mentioned files (avoid duplicates)
+    if (!mentionedFiles.some((f) => f.rel === file.rel)) {
+        mentionedFiles.push(file);
+        updateContextBar();
+    }
+
+    hideMentionDropdown();
+    promptEl.focus();
+    updateTokenIndicator();
+}
+
+function navigateMentionDropdown(direction) {
+    if (!mentionResults.length) { return; }
+    const items = mentionDropdown.querySelectorAll('.mention-item');
+    items[mentionSelectedIdx]?.classList.remove('selected');
+    mentionSelectedIdx = (mentionSelectedIdx + direction + mentionResults.length) % mentionResults.length;
+    items[mentionSelectedIdx]?.classList.add('selected');
+    items[mentionSelectedIdx]?.scrollIntoView({ block: 'nearest' });
+}
+
+promptEl.addEventListener('input', () => {
+    const val = promptEl.value;
+    const pos = promptEl.selectionStart ?? val.length;
+
+    // Check if there's an active @ mention being typed
+    const before = val.slice(0, pos);
+    const atIdx = before.lastIndexOf('@');
+
+    if (atIdx >= 0) {
+        const fragment = before.slice(atIdx + 1);
+        // Only trigger if no space in the query (space = @mention ended)
+        if (!fragment.includes(' ') && !fragment.includes('\n')) {
+            mentionAtStart = atIdx;
+            mentionQuery = fragment;
+            vscode.postMessage({ command: 'searchFiles', query: fragment });
+            return;
+        }
+    }
+
+    // No active mention
+    hideMentionDropdown();
+    updateTokenIndicator();
+});
+
+promptEl.addEventListener('keydown', (e) => {
+    if (mentionDropdown.style.display !== 'none') {
+        if (e.key === 'ArrowDown')  { e.preventDefault(); navigateMentionDropdown(+1); return; }
+        if (e.key === 'ArrowUp')    { e.preventDefault(); navigateMentionDropdown(-1); return; }
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); selectMentionItem(mentionSelectedIdx); return; }
+        if (e.key === 'Escape')     { hideMentionDropdown(); return; }
+        if (e.key === 'Tab')        { e.preventDefault(); selectMentionItem(mentionSelectedIdx); return; }
+    }
+});
 
 // Hint chips (initial welcome screen)
 document.querySelectorAll('.hint-chip').forEach((btn) => {
@@ -717,10 +972,17 @@ window.addEventListener('message', (event) => {
             ctx.fileLines      = msg.fileLines ?? 0;
             ctx.language       = msg.language ?? '';
             ctx.selectionLines = msg.selectionLines ?? 0;
-            // Apply auto-include defaults from what was set (toggles preserved unless context changes)
             if (!ctx.file)           { ctx.includeFile = false; }
             if (!ctx.selectionLines) { ctx.includeSelection = false; }
             updateContextBar();
+            updateTokenIndicator();
+            break;
+
+        case 'fileSearchResults':
+            // Only apply if the query matches the current active mention
+            if (msg.query === mentionQuery) {
+                showMentionDropdown(msg.files ?? []);
+            }
             break;
     }
 });

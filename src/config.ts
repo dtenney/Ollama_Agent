@@ -14,6 +14,8 @@ export interface OllamaConfig {
     autoIncludeSelection: boolean;
     /** Maximum number of workspace files to auto-load as context. */
     maxContextFiles: number;
+    /** When true, inject a concise git diff into every message for change-aware context. */
+    injectGitDiff: boolean;
 }
 
 export function getConfig(): OllamaConfig {
@@ -34,6 +36,7 @@ export function getConfig(): OllamaConfig {
         autoIncludeFile:      c.get<boolean>('autoIncludeFile',      false),
         autoIncludeSelection: c.get<boolean>('autoIncludeSelection', true),
         maxContextFiles:      c.get<number> ('maxContextFiles',      5),
+        injectGitDiff:        c.get<boolean>('injectGitDiff',        false),
     };
 }
 
