@@ -8,6 +8,7 @@ import { streamChatRequest, OllamaMessage, OllamaToolCall, StreamResult, ToolsNo
 import { getConfig } from './config';
 import { logInfo, logError } from './logger';
 import { buildWorkspaceSummary, SKIP_DIRS } from './workspace';
+import { ProjectMemory } from './projectMemory';
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -167,6 +168,43 @@ export const TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        type: 'function',
+        function: {
+            name: 'memory_list',
+            description: 'List all saved project memory notes for this workspace. Use this to recall previously stored facts, decisions, or context about the project.',
+            parameters: { type: 'object', properties: {}, required: [] },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'memory_write',
+            description: 'Save a note to persistent project memory. Use this to store important facts, architectural decisions, known issues, or any context that should persist across conversations.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    content: { type: 'string', description: 'Note content to save (max 4000 chars)' },
+                    tag:     { type: 'string', description: 'Optional tag, e.g. "architecture", "bug", "todo", "decision"' },
+                },
+                required: ['content'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'memory_delete',
+            description: 'Delete a saved project memory note by its id. Use memory_list first to get the id.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    id: { type: 'string', description: 'Note id from memory_list output' },
+                },
+                required: ['id'],
+            },
+        },
+    },
 ];
 
 const DEFAULT_SYSTEM_PROMPT = `You are an expert AI coding assistant integrated into VS Code.
@@ -183,10 +221,15 @@ You have access to the user's workspace through the following tools:
   rename_file        — rename or move a file
   delete_file        — delete a file (destructive, use carefully)
   run_command        — execute shell commands (npm, git, etc.)
+  memory_list        — recall saved facts/decisions about this project
+  memory_write       — persist important facts, decisions, or context across sessions
+  memory_delete      — remove a stale memory note
 
 Guidelines:
 - Always call workspace_summary or read_file before proposing code changes.
 - Prefer edit_file over write_file for targeted modifications.
+- Call memory_list at the start of conversations to recall prior context.
+- Use memory_write to save architectural decisions, known bugs, or project-specific conventions.
 - Be concise and accurate. Format all code with markdown fenced code blocks.
 - Explain what you are doing before calling a tool.`;
 
@@ -220,6 +263,9 @@ Available tools and their argument schemas:
   rename_file         — {"old_path": "current", "new_path": "new name"}
   delete_file         — {"path": "path"}
   run_command         — {"command": "shell command"}
+  memory_list         — {}
+  memory_write        — {"content": "note text", "tag": "optional tag"}
+  memory_delete       — {"id": "note id from memory_list"}
 ═══════════════════`;
 
 /** Parse <tool>...</tool> blocks from text-mode model output. */
@@ -268,7 +314,10 @@ export class Agent {
      */
     private toolMode: 'native' | 'text' = 'native';
 
-    constructor(private workspaceRoot: string) {}
+    constructor(
+        private workspaceRoot: string,
+        private readonly memory: ProjectMemory | null = null
+    ) {}
 
     get historyLength(): number { return this.history.length; }
 
@@ -667,6 +716,31 @@ export class Agent {
                 if (action !== 'Run') { return 'Command cancelled by user.'; }
 
                 return this.runCommandStreaming(cmd, root, _toolId);
+            }
+
+            // ── memory_list ────────────────────────────────────────────────
+            case 'memory_list': {
+                if (!this.memory) { return '(project memory not available in this session)'; }
+                return `Project memory notes:\n\n${this.memory.formatAll()}`;
+            }
+
+            // ── memory_write ───────────────────────────────────────────────
+            case 'memory_write': {
+                if (!this.memory) { return '(project memory not available in this session)'; }
+                const content = String(args.content ?? '');
+                const tag     = args.tag ? String(args.tag) : undefined;
+                if (!content.trim()) { throw new Error('content is required'); }
+                const note = this.memory.add(content, tag);
+                return `Note saved (id: ${note.id}). Use memory_list to view all notes.`;
+            }
+
+            // ── memory_delete ──────────────────────────────────────────────
+            case 'memory_delete': {
+                if (!this.memory) { return '(project memory not available in this session)'; }
+                const id = String(args.id ?? '');
+                if (!id) { throw new Error('id is required'); }
+                const ok = this.memory.delete(id);
+                return ok ? `Deleted note ${id}.` : `Note ${id} not found. Use memory_list to see current notes.`;
             }
 
             default:
