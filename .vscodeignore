@@ -8,6 +8,7 @@ node_modules/**
 tsconfig.json
 .vscode/**
 .github/**
+scripts/**
 
 # ── Git ───────────────────────────────────────────────────────────────────────
 .gitignore

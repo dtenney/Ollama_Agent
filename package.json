@@ -1,7 +1,7 @@
 {
   "name": "ollamapilot",
   "displayName": "OllamaPilot",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Your offline AI co-pilot powered by Ollama — 100% local, no telemetry, no internet required",
   "publisher": "kchikech",
   "author": {
@@ -19,22 +19,43 @@
   "sponsor": {
     "url": "https://github.com/sponsors/kchikech"
   },
-  "keywords": ["ollama", "ai", "llm", "offline", "coding-assistant", "agent", "local-ai"],
-  "categories": ["Machine Learning", "Other"],
-  "engines": { "vscode": "^1.80.0" },
+  "keywords": [
+    "ollama",
+    "ai",
+    "llm",
+    "offline",
+    "coding-assistant",
+    "agent",
+    "local-ai"
+  ],
+  "categories": [
+    "Machine Learning",
+    "Other"
+  ],
+  "icon": "images/logo.png",
+  "galleryBanner": {
+    "color": "#0D1117",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc",
+    "vendor": "node scripts/vendor-hljs.js",
+    "build": "npm run vendor && tsc",
     "vscode:prepublish": "npm run build"
   },
-  "dependencies": {},
   "devDependencies": {
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.80.0",
     "@vscode/vsce": "^2.22.0",
+    "highlight.js": "^11.11.1",
     "typescript": "^5.0.0"
   },
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -140,6 +161,11 @@
           "minimum": 1,
           "maximum": 20,
           "description": "Maximum number of workspace files to include when the agent auto-loads context. Higher values increase token usage."
+        },
+        "ollamaAgent.injectGitDiff": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "When enabled, injects a concise `git diff` of your uncommitted changes into every message. Helps the agent understand what you're currently working on. Only works in git repositories."
         }
       }
     }
