@@ -55,8 +55,9 @@ const MODEL_PRESETS = {
 /** Current preset selection ('' = custom) */
 let currentPreset = 'balanced';
 
-/** Flag to prevent circular preset/model updates */
-let updatingPreset = false;
+/** Flags to prevent circular preset/model updates */
+let updatingFromPreset = false;
+let updatingFromModel = false;
 
 /** Context state received from the extension. */
 const ctx = {
@@ -235,8 +236,9 @@ function populateModels(models, connected) {
 modelSelect.addEventListener('change', () => {
     updateTokenIndicator();
     // Skip if this change was triggered by a preset selection
-    if (updatingPreset) { return; }
+    if (updatingFromPreset) { return; }
     // If user manually changes model, detect matching preset or set Custom
+    updatingFromModel = true;
     const preset = findPresetForModel(modelSelect.value);
     if (preset) {
         currentPreset = preset;
@@ -246,19 +248,23 @@ modelSelect.addEventListener('change', () => {
         presetSelect.value = '';
     }
     vscode.postMessage({ command: 'setPreset', preset: currentPreset });
+    updatingFromModel = false;
 });
 
 // Handle preset selection
 presetSelect.addEventListener('change', () => {
+    // Skip if this change was triggered by model selection
+    if (updatingFromModel) { return; }
+    
     const preset = presetSelect.value;
     currentPreset = preset;
     
     if (preset && MODEL_PRESETS[preset]) {
         const config = MODEL_PRESETS[preset];
-        // Set flag to prevent modelSelect change handler from firing a duplicate setPreset
-        updatingPreset = true;
+        // Set flag to prevent modelSelect change handler from firing
+        updatingFromPreset = true;
         modelSelect.value = config.model;
-        updatingPreset = false;
+        updatingFromPreset = false;
         vscode.postMessage({ 
             command: 'setPreset', 
             preset,
@@ -1011,7 +1017,7 @@ templateSelect.addEventListener('change', () => {
     const template = templates.find(t => t.name === name);
     if (!template) return;
     
-    // Substitute variables
+    // Substitute variables with proper escaping to prevent corruption
     const values = {
         language: ctx.language || 'code',
         filename: ctx.file ? ctx.file.split('/').pop() : 'file',
@@ -1020,7 +1026,11 @@ templateSelect.addEventListener('change', () => {
     };
     
     let prompt = template.prompt;
-    for (const [key, value] of Object.entries(values)) {
+    // Sort keys by length (longest first) to prevent partial replacements
+    // e.g., replace {languageId} before {language}
+    const sortedKeys = Object.keys(values).sort((a, b) => b.length - a.length);
+    for (const key of sortedKeys) {
+        const value = values[key];
         prompt = prompt.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
     }
     
@@ -1092,11 +1102,17 @@ searchClearBtn.addEventListener('click', () => {
 function performSearch(query) {
     searchQuery = query.trim().toLowerCase();
     
-    // Clear previous highlights
-    document.querySelectorAll('.search-highlight').forEach(el => {
+    // Clear previous highlights efficiently
+    const highlights = document.querySelectorAll('.search-highlight');
+    highlights.forEach(el => {
         const parent = el.parentNode;
-        parent.replaceChild(document.createTextNode(el.textContent), el);
-        parent.normalize();
+        if (parent) {
+            parent.replaceChild(document.createTextNode(el.textContent || ''), el);
+        }
+    });
+    // Normalize all text nodes after clearing highlights
+    document.querySelectorAll('.msg-content').forEach(content => {
+        content.normalize();
     });
     
     searchMatches = [];
@@ -1230,11 +1246,17 @@ function clearSearch() {
     searchCurrentIndex = -1;
     searchResults.textContent = '';
     
-    // Remove all highlights
-    document.querySelectorAll('.search-highlight').forEach(el => {
+    // Remove all highlights efficiently
+    const highlights = document.querySelectorAll('.search-highlight');
+    highlights.forEach(el => {
         const parent = el.parentNode;
-        parent.replaceChild(document.createTextNode(el.textContent), el);
-        parent.normalize();
+        if (parent) {
+            parent.replaceChild(document.createTextNode(el.textContent || ''), el);
+        }
+    });
+    // Normalize all text nodes after clearing highlights
+    document.querySelectorAll('.msg-content').forEach(content => {
+        content.normalize();
     });
     
     // Show all messages
