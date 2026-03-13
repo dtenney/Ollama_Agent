@@ -8,23 +8,56 @@ node_modules/
 # ── Packaged extension ────────────────────────────────────────────────────────
 *.vsix
 
+# ── Generated vendor bundle (rebuilt by npm run vendor) ───────────────────────
+webview/vendor/highlight.bundle.js
+
+# ── Tests (dev-only) ─────────────────────────────────────────────────────────
+src/test/
+
+# ── Dev scripts (not needed by users) ─────────────────────────────────────────
+scripts/generate-banner.py
+
+# ── Session / planning docs (internal) ────────────────────────────────────────
+SESSION_FINAL_STATE.md
+IMPLEMENTATION_PLAN.md
+PHASE_*.md
+BUGFIXES*.md
+BUG_REPORT*.md
+BUG_FIXES*.md
+CODE_REVIEW*.md
+COMPREHENSIVE_FIXES*.md
+CONFIG_UPDATES*.md
+CONTEXT_*.md
+CURRENT_*.md
+FINAL_FIXES*.md
+INSTALL_GUIDE*.md
+MEMORY_IMPROVEMENTS*.md
+QUICKFIX*.md
+QUICK_START*.md
+REVIEW_*.md
+SEARCH_FILES_FIX*.md
+TEXT_MODE_*.md
+ENHANCEMENT_*.md
+FEATURE_*.md
+CLEANUP_*.md
+RESUME_*.md
+PRE_PUBLISH*.md
+PROMPT_*.txt
+*.tmp
+
 # ── VS Code local settings ────────────────────────────────────────────────────
 .vscode/*
 !.vscode/extensions.json
 !.vscode/launch.json
 !.vscode/tasks.json
 
-# ── macOS ─────────────────────────────────────────────────────────────────────
+# ── OS artefacts ──────────────────────────────────────────────────────────────
 .DS_Store
 .AppleDouble
 .LSOverride
-
-# ── Windows ───────────────────────────────────────────────────────────────────
 Thumbs.db
 ehthumbs.db
 Desktop.ini
-
-# ── Linux ─────────────────────────────────────────────────────────────────────
 *~
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
@@ -43,36 +76,14 @@ npm-debug.log*
 coverage/
 .nyc_output/
 
-# ── Temporary documentation ───────────────────────────────────────────────────
-PHASE_*.md
-BUGFIXES*.md
-BUG_REPORT*.md
-CODE_REVIEW*.md
-COMPREHENSIVE_FIXES*.md
-CONFIG_UPDATES*.md
-CONTEXT_*.md
-CURRENT_WORK*.md
-FINAL_FIXES*.md
-IMPLEMENTATION_*.md
-INSTALL_GUIDE*.md
-MEMORY_IMPROVEMENTS*.md
-QUICKFIX*.md
-QUICK_START*.md
-REVIEW_*.md
-SEARCH_FILES_FIX*.md
-TEXT_MODE_*.md
-PROMPT_*.txt
-*.tmp
-
-# ── IDE and editor ────────────────────────────────────────────────────────────
+# ── IDE ───────────────────────────────────────────────────────────────────────
 .idea/
 *.swp
 *.swo
-*~
 
-# ── Qdrant data (local development) ───────────────────────────────────────────
+# ── Qdrant data (local development) ──────────────────────────────────────────
 qdrant_storage/
 .qdrant/
 
-# ── User-specific configuration ───────────────────────────────────────────────
-.ollamapilot/
+# ── User-specific MCP config ─────────────────────────────────────────────────
+.ollamapilot/mcp.json
