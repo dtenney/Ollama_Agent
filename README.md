@@ -9,7 +9,7 @@ A fully local, offline AI coding assistant for VS Code — powered by Ollama.
 
 [![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/kchikech.ollamapilot?label=Marketplace&color=007ACC&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
 [![Installs](https://img.shields.io/visual-studio-marketplace/i/kchikech.ollamapilot?label=Installs&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
-[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/dtenney/Ollama_Agent/releases)
+[![Version](https://img.shields.io/badge/version-0.3.0--alpha-blue.svg)](https://github.com/dtenney/Ollama_Agent/releases)
 [![VS Code](https://img.shields.io/badge/VS%20Code-%5E1.80.0-007ACC.svg)](https://code.visualstudio.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
@@ -114,14 +114,14 @@ ollama serve
 1. Download the latest `.vsix` from the [Releases page](https://github.com/dtenney/Ollama_Agent/releases)
 2. Open VS Code
 3. Press `Ctrl+Shift+P` / `Cmd+Shift+P` → type **"Install from VSIX"**
-4. Select the downloaded `ollamapilot-0.2.0.vsix` file
+4. Select the downloaded `ollamapilot-0.3.0-alpha.vsix` file
 5. Reload VS Code when prompted
 
 ### Option B — Install via command line
 
 ```bash
 # Download the .vsix file from releases, then:
-code --install-extension ollamapilot-0.2.0.vsix
+code --install-extension ollamapilot-0.3.0-alpha.vsix
 ```
 
 ### Option C — Build from source
@@ -141,7 +141,7 @@ npm run build
 npx vsce package
 
 # 5. Install the extension
-code --install-extension ollamapilot-0.2.0.vsix
+code --install-extension ollamapilot-0.3.0-alpha.vsix
 ```
 
 ---
@@ -224,10 +224,36 @@ That's it. The agent will start responding immediately.
 ### ⚙️ Settings
 - Configurable **Ollama base URL** (supports remote Ollama instances)
 - Per-session **model selection** via the header dropdown
+- **Model presets** — fast/balanced/quality presets with one click
 - **Temperature** control
 - **Custom system prompt** override
 - Optional **git diff context** injection
 - All settings accessible via `Settings → Extensions → Ollama Agent`
+
+### 🎯 Code Actions & Quick Fixes
+- **Right-click code actions** — Explain, Comment, Refactor, Find Bugs, Add Tests, Generate Docs
+- **Error quick fixes** — Click lightbulb on errors to get AI explanations with context
+- **Explain selection shortcut** — `Ctrl+Shift+E` / `Cmd+Shift+E` to instantly explain selected code
+
+### 📝 Prompt Templates
+- **6 built-in templates** — Add Tests, JSDoc, Explain Error, Refactor, Type Hints, Optimize
+- **Custom templates** — Create and manage your own reusable prompts
+- **Variable substitution** — Templates support `{{selection}}`, `{{language}}`, `{{filename}}` placeholders
+- **Template manager** — Access via command palette: "Ollama: Manage Prompt Templates"
+
+### 🧠 Smart Context Selection
+- **Auto-include related files** — Automatically detects and includes imported/related files
+- **Import parsing** — Supports TypeScript, JavaScript, Python, Java, Go
+- **Git-aware** — Prioritizes recently modified files
+- **Relevance scoring** — Intelligently ranks files by importance
+- **Configurable limit** — Respects `maxContextFiles` setting
+
+### 🔍 Search in Chat
+- **Find in conversation** — Search across all messages in current session
+- **Highlight matches** — Visual highlighting of search results
+- **Navigate results** — Previous/next buttons to jump between matches
+- **Match counter** — Shows current match position (e.g., "2 of 5")
+- **Case-insensitive** — Finds matches regardless of capitalization
 
 ---
 
@@ -444,6 +470,7 @@ Open `Settings` (`Ctrl+,` / `Cmd+,`) and search for **"Ollama"** to see all opti
 | Shortcut | Action |
 |---|---|
 | `Cmd+Shift+O` / `Ctrl+Shift+O` | Open the OllamaPilot chat panel |
+| `Cmd+Shift+E` / `Ctrl+Shift+E` | Explain selected code |
 | `Enter` | Send message |
 | `Shift+Enter` | New line in the message input |
 | `@` | Trigger file mention autocomplete |
@@ -657,7 +684,7 @@ This tests HTTP connectivity, lists models, and runs a streaming test. Output ap
 - [x] `git diff` context injection (opt-in via setting)
 - [x] Persistent project memory / notes (per-workspace)
 
-### v0.2.0 — Multi-Tiered Memory & MCP Support ✅ *current*
+### v0.2.0 — Multi-Tiered Memory & MCP Support ✅
 - [x] **Multi-tiered memory system** with 6 tiers (Critical → Archive)
 - [x] **Semantic search** via Qdrant vector database integration
 - [x] **Memory UI panel** in sidebar for browsing and managing entries
@@ -670,10 +697,14 @@ This tests HTTP connectivity, lists models, and runs a streaming test. Output ap
 - [x] Enhanced text-mode tool parser for better model compatibility
 - [x] Automatic Qdrant dimension validation and collection recreation
 
-### v0.3.0 — UX Polish
+### v0.3.0 — UX Polish ✅ *current*
+- [x] **Explain selection shortcut** — `Ctrl+Shift+E` to instantly explain code
+- [x] **Model presets** — fast/balanced/quality presets with auto-sync
+- [x] **Code actions provider** — 6 right-click actions + error quick fixes
+- [x] **Prompt templates** — 6 built-in + custom template management
+- [x] **Smart context selection** — auto-include related/imported files
+- [x] **Search in chat** — find/highlight/navigate within conversations
 - [ ] Export chat as Markdown
-- [ ] Message search within a session
-- [ ] Configurable keyboard shortcut
 - [ ] Extension icon and Marketplace banner image
 
 ### v0.4.0 — Code Intelligence
