@@ -157,6 +157,14 @@
       {
         "command": "ollamaAgent.triggerInlineCompletion",
         "title": "Ollama: Trigger Inline Completion"
+      },
+      {
+        "command": "ollamaAgent.exportChatMarkdown",
+        "title": "Ollama: Export Chat as Markdown"
+      },
+      {
+        "command": "ollamaAgent.exportChatJSON",
+        "title": "Ollama: Export Chat as JSON"
       }
     ],
     "menus": {

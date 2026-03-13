@@ -12,6 +12,7 @@ import { EmbeddingService } from './embeddingService';
 import { MemoryViewProvider, MemoryTreeItem } from './memoryViewProvider';
 import { OllamaCodeActionsProvider } from './codeActionsProvider';
 import { OllamaInlineCompletionProvider } from './inlineCompletionProvider';
+import { ChatExporter } from './chatExporter';
 import { showManageTemplatesUI } from './promptTemplates';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -546,6 +547,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(
         vscode.commands.registerCommand('ollamaAgent.triggerInlineCompletion', async () => {
             await vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.exportChatMarkdown', async () => {
+            const messages = provider.getCurrentChatMessages();
+            const title = provider.getCurrentChatTitle();
+            await ChatExporter.exportToMarkdown(messages, title);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.exportChatJSON', async () => {
+            const messages = provider.getCurrentChatMessages();
+            const title = provider.getCurrentChatTitle();
+            await ChatExporter.exportToJSON(messages, title);
         })
     );
 

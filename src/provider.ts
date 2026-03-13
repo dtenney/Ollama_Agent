@@ -516,6 +516,23 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         return this.templateManager;
     }
 
+    /** Get current chat messages for export. */
+    getCurrentChatMessages(): Array<{ role: 'user' | 'assistant' | 'system'; content: string; timestamp?: number }> {
+        if (!this._agent) {
+            return [];
+        }
+        return this._agent.conversationHistory.map(msg => ({
+            role: msg.role as 'user' | 'assistant' | 'system',
+            content: msg.content,
+            timestamp: Date.now()
+        }));
+    }
+
+    /** Get current chat title. */
+    getCurrentChatTitle(): string {
+        return this.currentSession.title || 'Untitled Chat';
+    }
+
     dispose(): void {
         this._editorListener?.dispose();
         this._workspaceListener?.dispose();
