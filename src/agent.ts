@@ -340,18 +340,18 @@ When user provides complex information, BREAK IT DOWN into atomic entries:
 4. DO NOT combine multiple concepts into one entry
 5. DO NOT output text about saving - JUST CALL THE TOOLS
 
-EXAMPLE - User says "Add to memory: Dev server is 10.0.10.5, prod is 10.0.10.4, we use Flask, deploy with deploy.sh":
+EXAMPLE - User says "Add to memory: Dev server is 192.168.1.100, prod is 192.168.1.200, we use Flask, deploy with deploy.sh":
 CORRECT approach:
-<tool>{"name": "memory_tier_write", "tier": 0, "content": "Development server: 10.0.10.5", "tags": ["server", "infrastructure"]}</tool>
+<tool>{"name": "memory_tier_write", "tier": 0, "content": "Development server: 192.168.1.100", "tags": ["server", "infrastructure"]}</tool>
 [wait for result]
-<tool>{"name": "memory_tier_write", "tier": 0, "content": "Production server: 10.0.10.4", "tags": ["server", "infrastructure"]}</tool>
+<tool>{"name": "memory_tier_write", "tier": 0, "content": "Production server: 192.168.1.200", "tags": ["server", "infrastructure"]}</tool>
 [wait for result]
 <tool>{"name": "memory_tier_write", "tier": 1, "content": "Framework: Flask", "tags": ["framework"]}</tool>
 [wait for result]
 <tool>{"name": "memory_tier_write", "tier": 1, "content": "Deployment: deploy.sh script", "tags": ["deployment"]}</tool>
 
 WRONG approach:
-<tool>{"name": "memory_tier_write", "tier": 1, "content": "Dev server is 10.0.10.5, prod is 10.0.10.4, we use Flask, deploy with deploy.sh"}</tool>
+<tool>{"name": "memory_tier_write", "tier": 1, "content": "Dev server is 192.168.1.100, prod is 192.168.1.200, we use Flask, deploy with deploy.sh"}</tool>
 (This combines multiple tiers and concepts into one entry)`
         : '';
 
@@ -380,10 +380,10 @@ WRONG: "Saved to memory tier 0: test"
 WRONG: "I will save that to memory"
 CORRECT: <tool>{"name": "memory_tier_write", "arguments": {"tier": 0, "content": "test"}}</tool>
 
-EXAMPLE - User says "Add to memory: server is at 10.0.10.5":
+EXAMPLE - User says "Add to memory: server is at 192.168.1.100":
 WRONG: Calling memory_list to show existing memory
 WRONG: "I'll add that to memory"
-CORRECT: <tool>{"name": "memory_tier_write", "tier": 0, "content": "Server IP: 10.0.10.5", "tags": ["server"]}</tool>
+CORRECT: <tool>{"name": "memory_tier_write", "tier": 0, "content": "Server IP: 192.168.1.100", "tags": ["server"]}</tool>
 
 EXAMPLE - User says "Add to memory: We use PostgreSQL on port 5432 and deploy with deploy.sh":
 WRONG: <tool>{"name": "memory_tier_write", "tier": 1, "content": "We use PostgreSQL on port 5432 and deploy with deploy.sh"}</tool>
