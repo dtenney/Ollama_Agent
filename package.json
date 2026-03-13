@@ -94,6 +94,10 @@
         "title": "Ollama: Generate Code (selection)"
       },
       {
+        "command": "ollamaAgent.explainSelection",
+        "title": "Ollama: Explain Selection"
+      },
+      {
         "command": "ollamaAgent.diagnose",
         "title": "Ollama: Run Diagnostics"
       },
@@ -180,6 +184,12 @@
         "command": "ollamaAgent.openChat",
         "key": "ctrl+shift+o",
         "mac": "cmd+shift+o"
+      },
+      {
+        "command": "ollamaAgent.explainSelection",
+        "key": "ctrl+shift+e",
+        "mac": "cmd+shift+e",
+        "when": "editorHasSelection"
       }
     ],
     "configuration": {

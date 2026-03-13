@@ -383,6 +383,22 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         this._view?.webview.postMessage({ type: 'clearChat' });
     }
 
+    /** Called from commands to send a message programmatically (e.g., Explain Selection). */
+    sendMessageFromCommand(text: string, includeFile: boolean, includeSelection: boolean): void {
+        if (!this._view) {
+            logError('[provider] Cannot send message - webview not initialized');
+            return;
+        }
+        
+        // Send the message through the webview as if user typed it
+        this._view.webview.postMessage({
+            type: 'sendFromCommand',
+            text,
+            includeFile,
+            includeSelection
+        });
+    }
+
     dispose(): void {
         this._editorListener?.dispose();
         this._workspaceListener?.dispose();

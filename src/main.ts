@@ -194,6 +194,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     );
 
     context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.explainSelection', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                vscode.window.showWarningMessage('No active editor.');
+                return;
+            }
+            
+            const selection = editor.selection;
+            const selectedText = editor.document.getText(selection);
+            
+            if (!selectedText) {
+                vscode.window.showWarningMessage('Please select code to explain.');
+                return;
+            }
+            
+            // Get language and filename for context
+            const language = editor.document.languageId;
+            const filename = editor.document.fileName.split(/[\\\/]/).pop() || 'file';
+            
+            // Open chat and send explain prompt
+            await vscode.commands.executeCommand('ollamaAgent.chatView.focus');
+            
+            // Send message to provider with selection context
+            const prompt = `Explain this ${language} code from ${filename}:\n\n\`\`\`${language}\n${selectedText}\n\`\`\``;
+            provider.sendMessageFromCommand(prompt, true, true);
+        })
+    );
+
+    context.subscriptions.push(
         vscode.commands.registerCommand('ollamaAgent.diagnose', () => runDiagnostics())
     );
 
