@@ -75,6 +75,7 @@ const ctx = {
 /** Files the user has explicitly mentioned via @. [{rel, display, ext}] */
 /** @type {Array<{rel: string, display: string, ext: string}>} */
 let mentionedFiles = [];
+let mentionedSymbols = [];
 /** Position in textarea where the current @ query started (-1 = not active). */
 let mentionAtStart = -1;
 /** Current autocomplete query (text after @). */
@@ -839,8 +840,10 @@ function sendMessage() {
     setStreaming(true);
 
     const filesToSend = mentionedFiles.map((f) => f.rel);
+    const symbolsToSend = mentionedSymbols.map((s) => ({ name: s.name, filePath: s.filePath }));
     // Clear mention state after send
     mentionedFiles = [];
+    mentionedSymbols = [];
     updateContextBar();
     updateTokenIndicator();
 
@@ -851,6 +854,7 @@ function sendMessage() {
         includeFile: ctx.includeFile,
         includeSelection: ctx.includeSelection,
         mentionedFiles: filesToSend,
+        mentionedSymbols: symbolsToSend,
     });
 }
 

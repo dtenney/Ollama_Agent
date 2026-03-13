@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { Agent, PostFn } from './agent';
 import { fetchModels, rawGet, streamChatRequest } from './ollamaClient';
 import { getConfig } from './config';
@@ -11,11 +12,12 @@ import { ProjectMemory } from './projectMemory';
 import { TieredMemoryManager } from './memoryCore';
 import { TemplateManager } from './promptTemplates';
 import { SmartContextManager } from './smartContext';
+import { SymbolProvider } from './symbolProvider';
 
 // ── Message shapes (webview → extension) ─────────────────────────────────────
 
 interface MsgGetModels     { command: 'getModels' }
-interface MsgSendMessage   { command: 'sendMessage'; text: string; model: string; includeFile: boolean; includeSelection: boolean; mentionedFiles?: string[]; }
+interface MsgSendMessage   { command: 'sendMessage'; text: string; model: string; includeFile: boolean; includeSelection: boolean; mentionedFiles?: string[]; mentionedSymbols?: Array<{ name: string; filePath: string; }>; }
 interface MsgNewChat       { command: 'newChat' }
 interface MsgStopGen       { command: 'stopGeneration' }
 interface MsgRetryLast     { command: 'retryLast'; model: string }
@@ -33,7 +35,8 @@ type WebviewMsg =
     | MsgGetModels | MsgSendMessage  | MsgNewChat      | MsgStopGen
     | MsgRetryLast | MsgGetContext   | MsgListSessions  | MsgLoadSession
     | MsgDeleteSession | MsgClearSessions | MsgSearchFiles | MsgSetPreset
-    | MsgGetTemplates | MsgToggleSmartContext;
+    | MsgGetTemplates | MsgToggleSmartContext
+    | { command: 'searchSymbols'; query: string };
 
 // ── Serialised session summary sent to the webview ───────────────────────────
 
@@ -72,6 +75,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
     private readonly memory: ProjectMemory | TieredMemoryManager;
     private readonly templateManager: TemplateManager;
     private readonly smartContext: SmartContextManager;
+    private readonly symbolProvider: SymbolProvider;
     private currentSession: ChatSession;
     /** Cached workspace file index for @mention autocomplete. Rebuilt on new workspace. */
     private _fileIndex: ReturnType<typeof indexWorkspaceFiles> = [];
@@ -88,6 +92,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         // Use tiered memory if provided, otherwise fall back to legacy ProjectMemory
         this.memory = memoryManager ?? new ProjectMemory(context);
         this.templateManager = new TemplateManager(context);
+        this.symbolProvider = new SymbolProvider();
         this.smartContext = new SmartContextManager();
         // Bootstrap: restore the last session or start fresh
         const sessions = this.storage.list();
@@ -237,6 +242,24 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         ? buildMentionContext(raw.mentionedFiles, workspaceRoot, new Set([autoAttachedFile]))
                         : '';
 
+                    // Resolve @mentioned symbols
+                    let symbolCtx = '';
+                    if (raw.mentionedSymbols?.length) {
+                        symbolCtx = '\n\n<symbol-mentions>\n';
+                        for (const sym of raw.mentionedSymbols) {
+                            try {
+                                const uri = vscode.Uri.file(path.join(workspaceRoot, sym.filePath));
+                                const symbols = await this.symbolProvider.getFileSymbols(uri);
+                                const match = symbols.find(s => s.name === sym.name);
+                                if (match) {
+                                    const content = await this.symbolProvider.getSymbolContent(match);
+                                    symbolCtx += `Symbol: ${sym.name} (${sym.filePath})\n\`\`\`\n${content}\n\`\`\`\n\n`;
+                                }
+                            } catch { /* skip unresolvable symbols */ }
+                        }
+                        symbolCtx += '</symbol-mentions>';
+                    }
+
                     // Get config for smart context and git diff
                     const cfg = getConfig();
 
@@ -274,8 +297,8 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         ? await buildGitDiffContext(workspaceRoot)
                         : '';
 
-                    const fullMessage = ctx || mentionCtx || smartCtx || gitCtx
-                        ? `${text}${ctx}${mentionCtx}${smartCtx}${gitCtx}`
+                    const fullMessage = ctx || mentionCtx || symbolCtx || smartCtx || gitCtx
+                        ? `${text}${ctx}${mentionCtx}${symbolCtx}${smartCtx}${gitCtx}`
                         : text;
 
                     // Wrap post() to capture streamed tokens → save assistant message
@@ -418,6 +441,21 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     const q = (raw as MsgSearchFiles).query ?? '';
                     const matches = fuzzySearchFiles(this._fileIndex, q, 12);
                     post({ type: 'fileSearchResults', query: q, files: matches.map((f) => ({ rel: f.rel, display: f.display, ext: f.ext })) });
+                    break;
+                }
+
+                // ── Search symbols ────────────────────────────────────────
+                case 'searchSymbols': {
+                    const q = (raw as any).query ?? '';
+                    const symbols = await this.symbolProvider.getWorkspaceSymbols(q);
+                    const results = symbols.slice(0, 12).map(s => ({
+                        name: s.name,
+                        kind: s.kind,
+                        containerName: s.containerName,
+                        filePath: vscode.workspace.asRelativePath(s.location.uri),
+                        display: this.symbolProvider.formatSymbolForDisplay(s)
+                    }));
+                    post({ type: 'symbolSearchResults', query: q, symbols: results });
                     break;
                 }
 
