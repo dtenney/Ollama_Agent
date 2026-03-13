@@ -13,6 +13,7 @@ import { MemoryViewProvider, MemoryTreeItem } from './memoryViewProvider';
 import { OllamaCodeActionsProvider } from './codeActionsProvider';
 import { OllamaInlineCompletionProvider } from './inlineCompletionProvider';
 import { ChatExporter } from './chatExporter';
+import { MultiWorkspaceManager } from './multiWorkspace';
 import { showManageTemplatesUI } from './promptTemplates';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -137,8 +138,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         logInfo('[memory] Multi-tiered memory disabled in settings');
     }
 
+    // ── Multi-Workspace Manager ──────────────────────────────────────────────
+    const workspaceManager = new MultiWorkspaceManager(context, memoryManager);
+    await workspaceManager.initialize();
+    context.subscriptions.push({ dispose: () => workspaceManager.dispose() });
+
+    context.subscriptions.push(
+        vscode.workspace.onDidChangeWorkspaceFolders(async (event) => {
+            for (const folder of event.added) {
+                await workspaceManager.addWorkspace(folder);
+            }
+            for (const folder of event.removed) {
+                workspaceManager.removeWorkspace(folder);
+            }
+            if (workspaceManager.isMultiWorkspace()) {
+                logInfo(`[workspace] Now managing ${workspaceManager.getWorkspaceCount()} folders`);
+            }
+        })
+    );
+
     // ── Sidebar provider ─────────────────────────────────────────────────────
-    const provider = new OllamaAgentProvider(context, memoryManager);
+    const provider = new OllamaAgentProvider(context, memoryManager, workspaceManager);
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider('ollamaAgent.chatView', provider, {
             webviewOptions: { retainContextWhenHidden: true },
@@ -563,6 +583,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             const messages = provider.getCurrentChatMessages();
             const title = provider.getCurrentChatTitle();
             await ChatExporter.exportToJSON(messages, title);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.switchWorkspace', async () => {
+            const switched = await workspaceManager.showWorkspacePicker();
+            if (switched) {
+                vscode.window.showInformationMessage('Workspace switched. Start a new chat to use the new workspace.');
+            }
         })
     );
 

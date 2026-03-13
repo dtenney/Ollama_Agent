@@ -165,6 +165,10 @@
       {
         "command": "ollamaAgent.exportChatJSON",
         "title": "Ollama: Export Chat as JSON"
+      },
+      {
+        "command": "ollamaAgent.switchWorkspace",
+        "title": "Ollama: Switch Workspace Folder"
       }
     ],
     "menus": {

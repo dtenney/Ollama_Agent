@@ -86,7 +86,8 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
     constructor(
         private readonly context: vscode.ExtensionContext,
-        memoryManager?: TieredMemoryManager | null
+        memoryManager?: TieredMemoryManager | null,
+        private readonly workspaceManager?: any
     ) {
         this.storage = new ChatStorage(context);
         // Use tiered memory if provided, otherwise fall back to legacy ProjectMemory
