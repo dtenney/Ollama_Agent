@@ -4,18 +4,91 @@ src/**
 !dist/**
 
 # ── Dev tooling ───────────────────────────────────────────────────────────────
-# Include all production dependencies (MCP SDK + transitive deps)
-# Exclude only devDependencies
-node_modules/@types/**
-node_modules/@vscode/**
-node_modules/@azure/**
-node_modules/@typespec/**
-node_modules/typescript/**
-node_modules/highlight.js/**
 tsconfig.json
 .vscode/**
 .github/**
 scripts/**
+
+# ── Dev dependencies (and their transitive deps) ─────────────────────────────
+node_modules/@types/**
+node_modules/@vscode/**
+node_modules/typescript/**
+node_modules/highlight.js/**
+# Test framework
+node_modules/mocha/**
+node_modules/sinon/**
+node_modules/@sinonjs/**
+node_modules/nise/**
+node_modules/just-extend/**
+node_modules/type-detect/**
+node_modules/diff/**
+node_modules/workerpool/**
+node_modules/yargs/**
+node_modules/yargs-parser/**
+node_modules/yargs-unparser/**
+node_modules/serialize-javascript/**
+node_modules/flat/**
+node_modules/he/**
+node_modules/log-symbols/**
+node_modules/browser-stdout/**
+node_modules/chokidar/**
+node_modules/anymatch/**
+node_modules/readdirp/**
+# vsce packaging tool
+node_modules/@azure/**
+node_modules/@typespec/**
+node_modules/azure-devops-node-api/**
+node_modules/typed-rest-client/**
+node_modules/cheerio/**
+node_modules/cheerio-select/**
+node_modules/css-select/**
+node_modules/css-what/**
+node_modules/dom-serializer/**
+node_modules/domelementtype/**
+node_modules/domhandler/**
+node_modules/domutils/**
+node_modules/htmlparser2/**
+node_modules/entities/**
+node_modules/nth-check/**
+node_modules/boolbase/**
+node_modules/parse5/**
+node_modules/parse5-htmlparser2-tree-adapter/**
+node_modules/parse5-parser-stream/**
+node_modules/xml2js/**
+node_modules/xmlbuilder/**
+node_modules/sax/**
+node_modules/keytar/**
+node_modules/prebuild-install/**
+node_modules/node-abi/**
+node_modules/tar-fs/**
+node_modules/tar-stream/**
+node_modules/yauzl/**
+node_modules/yazl/**
+node_modules/fd-slicer/**
+node_modules/buffer-crc32/**
+node_modules/leven/**
+node_modules/markdown-it/**
+node_modules/linkify-it/**
+node_modules/mdurl/**
+node_modules/uc.micro/**
+node_modules/argparse/**
+node_modules/cockatiel/**
+node_modules/hosted-git-info/**
+node_modules/jsonc-parser/**
+node_modules/parse-semver/**
+node_modules/tmp/**
+node_modules/underscore/**
+node_modules/url-join/**
+
+# ── Docs not needed in VSIX ──────────────────────────────────────────────────
+IMPLEMENTATION_PLAN.md
+SESSION_FINAL_STATE.md
+CHANGELOG.md
+CONTRIBUTING.md
+.ollamapilot/**
+
+# ── Build artefacts ──────────────────────────────────────────────────────────
+*.vsix
 
 # ── Git ───────────────────────────────────────────────────────────────────────
 .gitignore
@@ -32,10 +105,9 @@ coverage/**
 Thumbs.db
 
 # ── Keep these in the VSIX ────────────────────────────────────────────────────
-# dist/**        ← included (compiled extension)
-# webview/**     ← included (chat UI)
-# images/**      ← included (sidebar icon)
-# package.json   ← included (manifest)
-# README.md      ← included (Marketplace description)
-# CONTRIBUTING.md← included
-# LICENSE        ← included
+# dist/**        ← compiled extension
+# webview/**     ← chat UI
+# images/**      ← logo, banner, sidebar icon, demo gif
+# package.json   ← manifest
+# README.md      ← Marketplace description
+# LICENSE
