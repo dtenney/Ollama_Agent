@@ -12,6 +12,7 @@ import { ProjectMemory } from './projectMemory';
 import { TieredMemoryManager } from './memoryCore';
 import { isMCPTool, parseMCPToolName, callMCPTool, mcpToolsToOllamaFormat } from './mcpClient';
 import { calculateContextStats, compactHistory, ContextLevel } from './contextCalculator';
+import { DiffViewManager } from './diffView';
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -680,14 +681,22 @@ export class Agent {
     /** Current model being used (for accurate context calculations) */
     private currentModel: string = '';
 
+    private diffViewManager: DiffViewManager;
+
     constructor(
         private workspaceRoot: string,
         private readonly memory: ProjectMemory | TieredMemoryManager | null = null
-    ) {}
+    ) {
+        this.diffViewManager = new DiffViewManager();
+    }
 
     get historyLength(): number { return this.history.length; }
 
-    reset(): void { this.history = []; }
+    reset(): void { 
+        this.history = [];
+        this.diffViewManager.dispose();
+        this.diffViewManager = new DiffViewManager();
+    }
 
     stop(): void { this.stopRef.stop = true; }
 
@@ -1223,31 +1232,10 @@ This memory persists across all conversations. Use memory_write to add new infor
 
                 const newContent = original.replace(oldString, newString);
 
-                // Open VS Code diff view so the user can review the change visually
-                const tmpPath = path.join(os.tmpdir(), `ollama-edit-${Date.now()}${path.extname(rel)}`);
-                fs.writeFileSync(tmpPath, newContent, 'utf8');
+                // Show enhanced diff view with accept/reject options
+                const diffResult = await this.diffViewManager.showDiff(full, original, newContent);
 
-                try {
-                    await vscode.commands.executeCommand(
-                        'vscode.diff',
-                        vscode.Uri.file(full),
-                        vscode.Uri.file(tmpPath),
-                        `Ollama Agent — Edit: ${rel}`
-                    );
-                } catch { /* diff view is optional; proceed to confirmation */ }
-
-                const action = await vscode.window.showWarningMessage(
-                    `Apply edit to "${rel}"? (${oldString.split('\n').length} line(s) → ${newString.split('\n').length} line(s))`,
-                    { modal: true }, 'Apply', 'Cancel'
-                );
-
-                // Clean up temp file and close diff tab
-                try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-                try {
-                    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
-                } catch { /* ignore */ }
-
-                if (action !== 'Apply') { return 'Edit cancelled by user.'; }
+                if (!diffResult.accepted) { return 'Edit cancelled by user.'; }
 
                 fs.writeFileSync(full, newContent, 'utf8');
                 this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
