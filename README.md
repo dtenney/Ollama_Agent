@@ -751,6 +751,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ## 🙏 Acknowledgements
 
+- **Original OllamaPilot** by [Hamza Kchikech](https://github.com/kchikech) - The foundation this fork builds upon
 - [Ollama](https://ollama.com) — for making local LLMs accessible to everyone
 - [highlight.js](https://highlightjs.org) — for the offline syntax highlighting engine
 - [VS Code Extension API](https://code.visualstudio.com/api) — for the powerful webview and workspace APIs
