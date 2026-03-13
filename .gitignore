@@ -73,3 +73,6 @@ PROMPT_*.txt
 # ── Qdrant data (local development) ───────────────────────────────────────────
 qdrant_storage/
 .qdrant/
+
+# ── User-specific configuration ───────────────────────────────────────────────
+.ollamapilot/
