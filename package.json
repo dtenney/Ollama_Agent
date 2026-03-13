@@ -44,13 +44,20 @@
   "scripts": {
     "vendor": "node scripts/vendor-hljs.js",
     "build": "npm run vendor && tsc",
-    "vscode:prepublish": "npm run build"
+    "vscode:prepublish": "npm run build",
+    "test": "npm run build && node ./dist/test/runTests.js",
+    "test:unit": "npm run build && mocha dist/test/unit/**/*.test.js"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.6",
     "@types/node": "^18.0.0",
+    "@types/sinon": "^17.0.3",
     "@types/vscode": "^1.80.0",
+    "@vscode/test-electron": "^2.3.9",
     "@vscode/vsce": "^2.22.0",
     "highlight.js": "^11.11.1",
+    "mocha": "^10.3.0",
+    "sinon": "^17.0.1",
     "typescript": "^5.0.0"
   },
   "activationEvents": [
@@ -418,7 +425,10 @@
         },
         "ollamaAgent.inlineCompletions.triggerMode": {
           "type": "string",
-          "enum": ["automatic", "manual"],
+          "enum": [
+            "automatic",
+            "manual"
+          ],
           "default": "automatic",
           "markdownDescription": "How to trigger inline completions: `automatic` (as you type) or `manual` (only when you press the shortcut)."
         },
