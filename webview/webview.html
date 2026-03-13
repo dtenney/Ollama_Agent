@@ -42,6 +42,18 @@
       overflow: hidden;
       text-overflow: ellipsis;
     }
+    #preset-select {
+      font-size: 11px;
+      background: var(--vscode-dropdown-background, #3c3c3c);
+      color: var(--vscode-dropdown-foreground, #ccc);
+      border: 1px solid var(--vscode-dropdown-border, #555);
+      border-radius: 3px;
+      padding: 2px 6px;
+      max-width: 90px;
+      cursor: pointer;
+      outline: none;
+    }
+    #preset-select:focus { border-color: var(--vscode-focusBorder, #0078d4); }
     #model-select {
       font-size: 11px;
       background: var(--vscode-dropdown-background, #3c3c3c);
@@ -674,6 +686,20 @@
     .hljs-emphasis                { font-style: italic; }
     .hljs-strong                  { font-weight: bold; }
 
+    /* ── Search highlighting ──────────────────────────────────────────────────────────── */
+    .search-highlight {
+      background: rgba(255, 200, 0, 0.3);
+      border-radius: 2px;
+      padding: 1px 2px;
+    }
+    .search-highlight.current {
+      background: rgba(255, 150, 0, 0.5);
+      outline: 1px solid rgba(255, 150, 0, 0.8);
+    }
+    .message.search-hidden {
+      display: none !important;
+    }
+
     /* ── @mention dropdown ───────────────────────────────────────────────── */
     #mention-dropdown {
       position: absolute;
@@ -748,9 +774,27 @@
   <!-- Header -->
   <div id="header">
     <span class="header-title">Ollama Agent</span>
+    <select id="preset-select" title="Model Preset">
+      <option value="">Custom</option>
+      <option value="fast">⚡ Fast</option>
+      <option value="balanced" selected>⚖️ Balanced</option>
+      <option value="quality">💎 Quality</option>
+    </select>
     <select id="model-select"><option value="" disabled selected>Loading…</option></select>
+    <button id="search-btn" class="header-btn" title="Search in chat">🔍</button>
     <button id="history-btn" class="header-btn" title="Chat History">🕐</button>
     <button id="new-chat-btn" class="header-btn" title="New Chat">＋</button>
+  </div>
+
+  <!-- Search panel -->
+  <div id="search-panel" style="display:none;border-bottom:1px solid var(--vscode-panel-border,rgba(128,128,128,0.2));background:var(--vscode-sideBarSectionHeader-background,rgba(0,0,0,0.12));padding:6px 10px;">
+    <div style="display:flex;align-items:center;gap:6px;">
+      <input type="text" id="search-input" placeholder="Search messages..." style="flex:1;font-size:12px;background:var(--vscode-input-background,#3c3c3c);color:var(--vscode-input-foreground,#ccc);border:1px solid var(--vscode-input-border,transparent);border-radius:3px;padding:4px 8px;outline:none;">
+      <span id="search-results" style="font-size:11px;color:var(--vscode-descriptionForeground,#888);white-space:nowrap;"></span>
+      <button id="search-prev" class="header-btn" title="Previous result" style="font-size:13px;">▲</button>
+      <button id="search-next" class="header-btn" title="Next result" style="font-size:13px;">▼</button>
+      <button id="search-clear" class="header-btn" title="Clear search">✕</button>
+    </div>
   </div>
 
   <!-- History panel (overlays messages) -->
@@ -782,6 +826,19 @@
   <!-- Input -->
   <div id="input-container">
     <div id="context-bar"></div>
+    <!-- Smart context toggle -->
+    <div style="padding:4px 0;display:flex;align-items:center;gap:6px;">
+      <label style="font-size:11px;color:var(--vscode-descriptionForeground,#888);display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;">
+        <input type="checkbox" id="smart-context-toggle" style="cursor:pointer;">
+        <span>🧠 Auto-include related files</span>
+      </label>
+    </div>
+    <!-- Template selector -->
+    <div id="template-bar" style="display:none;padding:4px 0;">
+      <select id="template-select" style="font-size:11px;background:var(--vscode-dropdown-background,#3c3c3c);color:var(--vscode-dropdown-foreground,#ccc);border:1px solid var(--vscode-dropdown-border,#555);border-radius:3px;padding:2px 6px;width:100%;cursor:pointer;">
+        <option value="">Select a template...</option>
+      </select>
+    </div>
     <!-- @mention autocomplete dropdown -->
     <div id="mention-dropdown" style="display:none"></div>
     <div id="input-box" style="margin-top: 5px;">
@@ -792,6 +849,7 @@
       <div id="status-row">
         <span id="status-dot" class="checking"></span>
         <span id="status-text">Connecting…</span>
+        <button id="template-toggle-btn" style="margin-left:8px;font-size:10px;background:none;border:1px solid var(--vscode-panel-border,rgba(128,128,128,0.3));color:var(--vscode-descriptionForeground,#888);border-radius:3px;padding:2px 7px;cursor:pointer;font-family:inherit;" title="Toggle templates">📝 Templates</button>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <span id="token-indicator"></span>

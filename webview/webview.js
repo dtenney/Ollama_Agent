@@ -10,6 +10,7 @@ const promptEl         = /** @type {HTMLTextAreaElement} */ (document.getElement
 const sendBtn          = /** @type {HTMLButtonElement}  */ (document.getElementById('send-btn'));
 const stopBtn          = /** @type {HTMLButtonElement}  */ (document.getElementById('stop-btn'));
 const newChatBtn       = /** @type {HTMLButtonElement}  */ (document.getElementById('new-chat-btn'));
+const presetSelect     = /** @type {HTMLSelectElement}  */ (document.getElementById('preset-select'));
 const modelSelect      = /** @type {HTMLSelectElement}  */ (document.getElementById('model-select'));
 const statusDot        = /** @type {HTMLSpanElement}    */ (document.getElementById('status-dot'));
 const statusText       = /** @type {HTMLSpanElement}    */ (document.getElementById('status-text'));
@@ -22,6 +23,17 @@ const historyCloseBtn  = /** @type {HTMLButtonElement}  */ (document.getElementB
 const historyClearBtn  = /** @type {HTMLButtonElement}  */ (document.getElementById('history-clear-btn'));
 const mentionDropdown  = /** @type {HTMLDivElement}     */ (document.getElementById('mention-dropdown'));
 const tokenIndicator   = /** @type {HTMLSpanElement}    */ (document.getElementById('token-indicator'));
+const templateBar      = /** @type {HTMLDivElement}     */ (document.getElementById('template-bar'));
+const templateSelect   = /** @type {HTMLSelectElement}  */ (document.getElementById('template-select'));
+const templateToggleBtn = /** @type {HTMLButtonElement} */ (document.getElementById('template-toggle-btn'));
+const smartContextToggle = /** @type {HTMLInputElement} */ (document.getElementById('smart-context-toggle'));
+const searchBtn        = /** @type {HTMLButtonElement} */ (document.getElementById('search-btn'));
+const searchPanel      = /** @type {HTMLDivElement}    */ (document.getElementById('search-panel'));
+const searchInput      = /** @type {HTMLInputElement}  */ (document.getElementById('search-input'));
+const searchResults    = /** @type {HTMLSpanElement}   */ (document.getElementById('search-results'));
+const searchPrevBtn    = /** @type {HTMLButtonElement} */ (document.getElementById('search-prev'));
+const searchNextBtn    = /** @type {HTMLButtonElement} */ (document.getElementById('search-next'));
+const searchClearBtn   = /** @type {HTMLButtonElement} */ (document.getElementById('search-clear'));
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -32,6 +44,19 @@ let currentRaw = '';
 let streaming = false;
 /** True when the user has manually scrolled away from the bottom. */
 let userScrolledUp = false;
+
+/** Model presets configuration */
+const MODEL_PRESETS = {
+    fast: { model: 'qwen2.5-coder:1.5b', temperature: 0.5 },
+    balanced: { model: 'qwen2.5-coder:7b', temperature: 0.7 },
+    quality: { model: 'llama3.1:8b', temperature: 0.8 }
+};
+
+/** Current preset selection ('' = custom) */
+let currentPreset = 'balanced';
+
+/** Flag to prevent circular preset/model updates */
+let updatingPreset = false;
 
 /** Context state received from the extension. */
 const ctx = {
@@ -58,6 +83,30 @@ let mentionSelectedIdx = 0;
 /** File results from the last searchFiles response. */
 /** @type {Array<{rel: string, display: string, ext: string}>} */
 let mentionResults = [];
+
+// ── Template state ────────────────────────────────────────────────────────────
+
+/** Available templates (built-in + custom). */
+/** @type {Array<{name: string, prompt: string, variables: string[], builtin?: boolean}>} */
+let templates = [];
+/** Whether template bar is visible. */
+let templateBarVisible = false;
+
+// ── Smart context state ────────────────────────────────────────────────────────────
+
+/** Smart context files included in last message. */
+/** @type {string[]} */
+let smartContextFiles = [];
+
+// ── Search state ──────────────────────────────────────────────────────────────
+
+/** Current search query. */
+let searchQuery = '';
+/** Array of message elements that match search. */
+/** @type {HTMLElement[]} */
+let searchMatches = [];
+/** Current match index. */
+let searchCurrentIndex = -1;
 
 // ── Token estimation state ────────────────────────────────────────────────────
 
@@ -167,6 +216,15 @@ function populateModels(models, connected) {
         if (i === 0) { o.selected = true; }
         modelSelect.appendChild(o);
     });
+    
+    // Apply current preset if it exists and model is available
+    if (currentPreset && MODEL_PRESETS[currentPreset]) {
+        const config = MODEL_PRESETS[currentPreset];
+        if (models.includes(config.model)) {
+            modelSelect.value = config.model;
+        }
+    }
+    
     setStatus('connected', `${models.length} model${models.length > 1 ? 's' : ''} available`);
     sendBtn.disabled = false;
     promptEl.focus();
@@ -174,7 +232,53 @@ function populateModels(models, connected) {
 }
 
 // Update token indicator when model changes (context window changes)
-modelSelect.addEventListener('change', updateTokenIndicator);
+modelSelect.addEventListener('change', () => {
+    updateTokenIndicator();
+    // Skip if this change was triggered by a preset selection
+    if (updatingPreset) { return; }
+    // If user manually changes model, detect matching preset or set Custom
+    const preset = findPresetForModel(modelSelect.value);
+    if (preset) {
+        currentPreset = preset;
+        presetSelect.value = preset;
+    } else {
+        currentPreset = '';
+        presetSelect.value = '';
+    }
+    vscode.postMessage({ command: 'setPreset', preset: currentPreset });
+});
+
+// Handle preset selection
+presetSelect.addEventListener('change', () => {
+    const preset = presetSelect.value;
+    currentPreset = preset;
+    
+    if (preset && MODEL_PRESETS[preset]) {
+        const config = MODEL_PRESETS[preset];
+        // Set flag to prevent modelSelect change handler from firing a duplicate setPreset
+        updatingPreset = true;
+        modelSelect.value = config.model;
+        updatingPreset = false;
+        vscode.postMessage({ 
+            command: 'setPreset', 
+            preset,
+            model: config.model,
+            temperature: config.temperature
+        });
+    } else {
+        vscode.postMessage({ command: 'setPreset', preset: '' });
+    }
+    
+    updateTokenIndicator();
+});
+
+/** Find preset name for a given model, or null if custom */
+function findPresetForModel(model) {
+    for (const [name, config] of Object.entries(MODEL_PRESETS)) {
+        if (config.model === model) { return name; }
+    }
+    return null;
+}
 
 // ── Markdown renderer ─────────────────────────────────────────────────────────
 
@@ -890,6 +994,255 @@ document.querySelectorAll('.hint-chip').forEach((btn) => {
     });
 });
 
+// ── Template handling ────────────────────────────────────────────────────────────
+
+templateToggleBtn.addEventListener('click', () => {
+    templateBarVisible = !templateBarVisible;
+    templateBar.style.display = templateBarVisible ? 'block' : 'none';
+    if (templateBarVisible) {
+        vscode.postMessage({ command: 'getTemplates' });
+    }
+});
+
+templateSelect.addEventListener('change', () => {
+    const name = templateSelect.value;
+    if (!name) return;
+    
+    const template = templates.find(t => t.name === name);
+    if (!template) return;
+    
+    // Substitute variables
+    const values = {
+        language: ctx.language || 'code',
+        filename: ctx.file ? ctx.file.split('/').pop() : 'file',
+        selection: ctx.selectionLines > 0 ? '(selected code)' : '(no selection)',
+        error: '(error details)'
+    };
+    
+    let prompt = template.prompt;
+    for (const [key, value] of Object.entries(values)) {
+        prompt = prompt.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
+    }
+    
+    promptEl.value = prompt;
+    autoResize();
+    updateTokenIndicator();
+    templateSelect.value = ''; // Reset dropdown
+    promptEl.focus();
+});
+
+function populateTemplates(templateList) {
+    templates = templateList;
+    templateSelect.innerHTML = '<option value="">Select a template...</option>';
+    
+    templateList.forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = t.name;
+        opt.textContent = t.builtin ? `⭐ ${t.name}` : t.name;
+        templateSelect.appendChild(opt);
+    });
+}
+
+// ── Smart context handling ────────────────────────────────────────────────────────────
+
+smartContextToggle.addEventListener('change', () => {
+    vscode.postMessage({ 
+        command: 'toggleSmartContext', 
+        enabled: smartContextToggle.checked 
+    });
+});
+
+// ── Search handling ──────────────────────────────────────────────────────────────
+
+searchBtn.addEventListener('click', () => {
+    const isVisible = searchPanel.style.display !== 'none';
+    searchPanel.style.display = isVisible ? 'none' : 'block';
+    if (!isVisible) {
+        searchInput.focus();
+    } else {
+        clearSearch();
+    }
+});
+
+searchInput.addEventListener('input', () => {
+    performSearch(searchInput.value);
+});
+
+searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+        e.preventDefault();
+        if (e.shiftKey) {
+            navigateSearch(-1);
+        } else {
+            navigateSearch(1);
+        }
+    } else if (e.key === 'Escape') {
+        clearSearch();
+        searchPanel.style.display = 'none';
+    }
+});
+
+searchPrevBtn.addEventListener('click', () => navigateSearch(-1));
+searchNextBtn.addEventListener('click', () => navigateSearch(1));
+searchClearBtn.addEventListener('click', () => {
+    clearSearch();
+    searchPanel.style.display = 'none';
+});
+
+function performSearch(query) {
+    searchQuery = query.trim().toLowerCase();
+    
+    // Clear previous highlights
+    document.querySelectorAll('.search-highlight').forEach(el => {
+        const parent = el.parentNode;
+        parent.replaceChild(document.createTextNode(el.textContent), el);
+        parent.normalize();
+    });
+    
+    searchMatches = [];
+    searchCurrentIndex = -1;
+    
+    if (!searchQuery) {
+        // Show all messages
+        document.querySelectorAll('.message').forEach(msg => {
+            msg.classList.remove('search-hidden');
+        });
+        searchResults.textContent = '';
+        return;
+    }
+    
+    // Search through messages
+    const messages = document.querySelectorAll('.message');
+    messages.forEach(msg => {
+        const content = msg.querySelector('.msg-content');
+        if (!content) return;
+        
+        const text = content.textContent.toLowerCase();
+        if (text.includes(searchQuery)) {
+            searchMatches.push(msg);
+            msg.classList.remove('search-hidden');
+            highlightInElement(content, searchQuery);
+        } else {
+            msg.classList.add('search-hidden');
+        }
+    });
+    
+    // Update results counter
+    if (searchMatches.length > 0) {
+        searchCurrentIndex = 0;
+        updateSearchResults();
+        scrollToCurrentMatch();
+    } else {
+        searchResults.textContent = 'No results';
+    }
+}
+
+function highlightInElement(element, query) {
+    const walker = document.createTreeWalker(
+        element,
+        NodeFilter.SHOW_TEXT,
+        null
+    );
+    
+    const nodesToReplace = [];
+    let node;
+    while (node = walker.nextNode()) {
+        const text = node.textContent.toLowerCase();
+        if (text.includes(query)) {
+            nodesToReplace.push(node);
+        }
+    }
+    
+    nodesToReplace.forEach(node => {
+        const text = node.textContent;
+        const lowerText = text.toLowerCase();
+        const fragments = [];
+        let lastIndex = 0;
+        let index = lowerText.indexOf(query);
+        
+        while (index !== -1) {
+            // Add text before match
+            if (index > lastIndex) {
+                fragments.push(document.createTextNode(text.substring(lastIndex, index)));
+            }
+            
+            // Add highlighted match
+            const span = document.createElement('span');
+            span.className = 'search-highlight';
+            span.textContent = text.substring(index, index + query.length);
+            fragments.push(span);
+            
+            lastIndex = index + query.length;
+            index = lowerText.indexOf(query, lastIndex);
+        }
+        
+        // Add remaining text
+        if (lastIndex < text.length) {
+            fragments.push(document.createTextNode(text.substring(lastIndex)));
+        }
+        
+        // Replace node with fragments
+        const parent = node.parentNode;
+        fragments.forEach(frag => parent.insertBefore(frag, node));
+        parent.removeChild(node);
+    });
+}
+
+function navigateSearch(direction) {
+    if (searchMatches.length === 0) return;
+    
+    searchCurrentIndex = (searchCurrentIndex + direction + searchMatches.length) % searchMatches.length;
+    updateSearchResults();
+    scrollToCurrentMatch();
+}
+
+function updateSearchResults() {
+    if (searchMatches.length === 0) {
+        searchResults.textContent = 'No results';
+        return;
+    }
+    
+    searchResults.textContent = `${searchCurrentIndex + 1} of ${searchMatches.length}`;
+    
+    // Update current highlight
+    document.querySelectorAll('.search-highlight.current').forEach(el => {
+        el.classList.remove('current');
+    });
+    
+    const currentMsg = searchMatches[searchCurrentIndex];
+    const firstHighlight = currentMsg.querySelector('.search-highlight');
+    if (firstHighlight) {
+        firstHighlight.classList.add('current');
+    }
+}
+
+function scrollToCurrentMatch() {
+    if (searchCurrentIndex < 0 || searchCurrentIndex >= searchMatches.length) return;
+    
+    const currentMsg = searchMatches[searchCurrentIndex];
+    currentMsg.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function clearSearch() {
+    searchInput.value = '';
+    searchQuery = '';
+    searchMatches = [];
+    searchCurrentIndex = -1;
+    searchResults.textContent = '';
+    
+    // Remove all highlights
+    document.querySelectorAll('.search-highlight').forEach(el => {
+        const parent = el.parentNode;
+        parent.replaceChild(document.createTextNode(el.textContent), el);
+        parent.normalize();
+    });
+    
+    // Show all messages
+    document.querySelectorAll('.message').forEach(msg => {
+        msg.classList.remove('search-hidden');
+    });
+}
+
 // ── Message handler (extension → webview) ────────────────────────────────────
 
 window.addEventListener('message', (event) => {
@@ -982,6 +1335,49 @@ window.addEventListener('message', (event) => {
             // Only apply if the query matches the current active mention
             if (msg.query === mentionQuery) {
                 showMentionDropdown(msg.files ?? []);
+            }
+            break;
+
+        case 'presetRestored':
+            // Restore preset selection from workspace state
+            if (msg.preset && MODEL_PRESETS[msg.preset]) {
+                currentPreset = msg.preset;
+                presetSelect.value = msg.preset;
+                const config = MODEL_PRESETS[msg.preset];
+                // Update model dropdown if it matches (only if models are loaded)
+                const modelExists = Array.from(modelSelect.options).some(opt => opt.value === config.model);
+                if (modelExists && (modelSelect.value === config.model || modelSelect.value === '')) {
+                    modelSelect.value = config.model;
+                } else if (!modelExists) {
+                    // Model not available yet - will be set when models load
+                    console.log(`[preset] Model ${config.model} not loaded yet, will apply when available`);
+                }
+            }
+            break;
+
+        case 'sendFromCommand':
+            // Handle programmatic message send (e.g., from Explain Selection)
+            promptEl.value = msg.text;
+            ctx.includeFile = msg.includeFile ?? false;
+            ctx.includeSelection = msg.includeSelection ?? false;
+            updateContextBar();
+            sendMessage();
+            break;
+
+        case 'templates':
+            populateTemplates(msg.templates ?? []);
+            break;
+
+        case 'smartContextRestored':
+            smartContextToggle.checked = msg.enabled ?? false;
+            break;
+
+        case 'smartContextFiles':
+            smartContextFiles = msg.files ?? [];
+            // Show notification about included files
+            if (smartContextFiles.length > 0) {
+                const fileList = smartContextFiles.join(', ');
+                console.log(`[smart-context] Auto-included: ${fileList}`);
             }
             break;
     }

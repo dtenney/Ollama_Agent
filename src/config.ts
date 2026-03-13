@@ -2,6 +2,36 @@ import * as vscode from 'vscode';
 
 const SECTION = 'ollamaAgent';
 
+// ── Model Presets ─────────────────────────────────────────────────────────────
+
+export interface ModelPreset {
+    name: string;
+    model: string;
+    temperature: number;
+    description: string;
+}
+
+export const MODEL_PRESETS: Record<string, ModelPreset> = {
+    fast: {
+        name: 'Fast',
+        model: 'qwen2.5-coder:1.5b',
+        temperature: 0.5,
+        description: 'Quick responses, lower quality'
+    },
+    balanced: {
+        name: 'Balanced',
+        model: 'qwen2.5-coder:7b',
+        temperature: 0.7,
+        description: 'Good balance of speed and quality'
+    },
+    quality: {
+        name: 'Quality',
+        model: 'llama3.1:8b',
+        temperature: 0.8,
+        description: 'Best quality, slower responses'
+    }
+};
+
 export interface OllamaConfig {
     /** Explicit base URL, e.g. "http://localhost:11434". Overrides host + port when set. */
     baseUrl: string;

@@ -98,6 +98,14 @@
         "title": "Ollama: Explain Selection"
       },
       {
+        "command": "ollamaAgent.codeAction",
+        "title": "Ollama: Code Action"
+      },
+      {
+        "command": "ollamaAgent.explainError",
+        "title": "Ollama: Explain Error"
+      },
+      {
         "command": "ollamaAgent.diagnose",
         "title": "Ollama: Run Diagnostics"
       },
@@ -141,6 +149,10 @@
         "command": "ollamaAgent.showMemoryStats",
         "title": "Ollama: Show Memory Statistics",
         "icon": "$(graph)"
+      },
+      {
+        "command": "ollamaAgent.manageTemplates",
+        "title": "Ollama: Manage Prompt Templates"
       }
     ],
     "menus": {

@@ -9,6 +9,8 @@ import { indexWorkspaceFiles, fuzzySearchFiles, buildMentionContext } from './me
 import { buildGitDiffContext } from './gitContext';
 import { ProjectMemory } from './projectMemory';
 import { TieredMemoryManager } from './memoryCore';
+import { TemplateManager } from './promptTemplates';
+import { SmartContextManager } from './smartContext';
 
 // ── Message shapes (webview → extension) ─────────────────────────────────────
 
@@ -23,11 +25,15 @@ interface MsgLoadSession   { command: 'loadSession';   id: string }
 interface MsgDeleteSession { command: 'deleteSession'; id: string }
 interface MsgClearSessions { command: 'clearAllSessions' }
 interface MsgSearchFiles   { command: 'searchFiles'; query: string }
+interface MsgSetPreset     { command: 'setPreset'; preset: string; model?: string; temperature?: number }
+interface MsgGetTemplates  { command: 'getTemplates' }
+interface MsgToggleSmartContext { command: 'toggleSmartContext'; enabled: boolean }
 
 type WebviewMsg =
     | MsgGetModels | MsgSendMessage  | MsgNewChat      | MsgStopGen
     | MsgRetryLast | MsgGetContext   | MsgListSessions  | MsgLoadSession
-    | MsgDeleteSession | MsgClearSessions | MsgSearchFiles;
+    | MsgDeleteSession | MsgClearSessions | MsgSearchFiles | MsgSetPreset
+    | MsgGetTemplates | MsgToggleSmartContext;
 
 // ── Serialised session summary sent to the webview ───────────────────────────
 
@@ -62,9 +68,15 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
     private readonly storage: ChatStorage;
     private readonly memory: ProjectMemory | TieredMemoryManager;
+    private readonly templateManager: TemplateManager;
+    private readonly smartContext: SmartContextManager;
     private currentSession: ChatSession;
     /** Cached workspace file index for @mention autocomplete. Rebuilt on new workspace. */
     private _fileIndex: ReturnType<typeof indexWorkspaceFiles> = [];
+    /** Current active preset name (persisted in workspace state). */
+    private _activePreset: string = 'balanced';
+    /** Smart context enabled state (persisted in workspace state). */
+    private _smartContextEnabled: boolean = false;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -73,9 +85,15 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         this.storage = new ChatStorage(context);
         // Use tiered memory if provided, otherwise fall back to legacy ProjectMemory
         this.memory = memoryManager ?? new ProjectMemory(context);
+        this.templateManager = new TemplateManager(context);
+        this.smartContext = new SmartContextManager();
         // Bootstrap: restore the last session or start fresh
         const sessions = this.storage.list();
         this.currentSession = sessions[0] ?? this.storage.createNew(getConfig().model);
+        // Restore active preset from workspace state
+        this._activePreset = context.workspaceState.get('ollamaAgent.activePreset', 'balanced');
+        // Restore smart context enabled state
+        this._smartContextEnabled = context.workspaceState.get('ollamaAgent.smartContextEnabled', false);
         logInfo(`[provider] Loaded session "${this.currentSession.title}" (${this.currentSession.messages.length} msgs)`);
     }
 
@@ -189,14 +207,43 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         ? buildMentionContext(raw.mentionedFiles, workspaceRoot, new Set([autoAttachedFile]))
                         : '';
 
+                    // Smart context: auto-include related files
+                    let smartCtx = '';
+                    if (this._smartContextEnabled && vscode.window.activeTextEditor) {
+                        const relatedFiles = await this.smartContext.getRelatedFiles(
+                            vscode.window.activeTextEditor.document,
+                            5
+                        );
+                        if (relatedFiles.length > 0) {
+                            const alreadyIncluded = new Set([autoAttachedFile, ...(raw.mentionedFiles || [])]);
+                            const filesToInclude = relatedFiles.filter(f => !alreadyIncluded.has(f.relativePath));
+                            
+                            if (filesToInclude.length > 0) {
+                                smartCtx = '\n\n<smart-context>\n';
+                                smartCtx += `Auto-included ${filesToInclude.length} related file(s):\n\n`;
+                                for (const file of filesToInclude) {
+                                    try {
+                                        const content = await vscode.workspace.fs.readFile(vscode.Uri.file(file.path));
+                                        const text = Buffer.from(content).toString('utf8');
+                                        smartCtx += `File: ${file.relativePath} (${file.reason})\n\`\`\`\n${text.slice(0, 10000)}\n\`\`\`\n\n`;
+                                    } catch { /* skip unreadable files */ }
+                                }
+                                smartCtx += '</smart-context>';
+                                
+                                // Send related files to webview for display
+                                post({ type: 'smartContextFiles', files: filesToInclude.map(f => f.relativePath) });
+                            }
+                        }
+                    }
+
                     // Optionally inject git diff context
                     const cfg = getConfig();
                     const gitCtx = cfg.injectGitDiff && workspaceRoot
                         ? await buildGitDiffContext(workspaceRoot)
                         : '';
 
-                    const fullMessage = ctx || mentionCtx || gitCtx
-                        ? `${text}${ctx}${mentionCtx}${gitCtx}`
+                    const fullMessage = ctx || mentionCtx || smartCtx || gitCtx
+                        ? `${text}${ctx}${mentionCtx}${smartCtx}${gitCtx}`
                         : text;
 
                     // Wrap post() to capture streamed tokens → save assistant message
@@ -340,6 +387,32 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     post({ type: 'fileSearchResults', query: q, files: matches.map((f) => ({ rel: f.rel, display: f.display, ext: f.ext })) });
                     break;
                 }
+
+                // ── Model preset selection ────────────────────────────────
+                case 'setPreset': {
+                    const msg = raw as MsgSetPreset;
+                    this._activePreset = msg.preset || '';
+                    // Persist to workspace state
+                    this.context.workspaceState.update('ollamaAgent.activePreset', this._activePreset);
+                    logInfo(`[provider] Preset changed to: ${this._activePreset || 'custom'}`);
+                    break;
+                }
+
+                // ── Get templates ─────────────────────────────────────────
+                case 'getTemplates': {
+                    const templates = this.templateManager.getAll();
+                    post({ type: 'templates', templates });
+                    break;
+                }
+
+                // ── Toggle smart context ──────────────────────────────────
+                case 'toggleSmartContext': {
+                    const msg = raw as MsgToggleSmartContext;
+                    this._smartContextEnabled = msg.enabled;
+                    this.context.workspaceState.update('ollamaAgent.smartContextEnabled', this._smartContextEnabled);
+                    logInfo(`[provider] Smart context ${this._smartContextEnabled ? 'enabled' : 'disabled'}`);
+                    break;
+                }
             }
         });
 
@@ -372,6 +445,12 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     });
                 }, 300); // small delay so the webview JS has time to initialise
             }
+
+            // Restore active preset
+            setTimeout(() => {
+                post({ type: 'presetRestored', preset: this._activePreset });
+                post({ type: 'smartContextRestored', enabled: this._smartContextEnabled });
+            }, 400);
         } catch (err) {
             logError(`[provider] Failed to build webview: ${(err as Error).message}`);
         }
@@ -397,6 +476,11 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
             includeFile,
             includeSelection
         });
+    }
+
+    /** Get the template manager instance. */
+    getTemplateManager(): TemplateManager {
+        return this.templateManager;
     }
 
     dispose(): void {

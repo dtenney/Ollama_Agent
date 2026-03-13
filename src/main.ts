@@ -10,6 +10,8 @@ import { getMemoryConfig } from './memoryConfig';
 import { QdrantClient } from './qdrantClient';
 import { EmbeddingService } from './embeddingService';
 import { MemoryViewProvider, MemoryTreeItem } from './memoryViewProvider';
+import { OllamaCodeActionsProvider } from './codeActionsProvider';
+import { showManageTemplatesUI } from './promptTemplates';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -141,6 +143,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         })
     );
 
+    // ── Code Actions Provider (right-click menu) ───────────────────────────
+    const codeActionsProvider = new OllamaCodeActionsProvider();
+    context.subscriptions.push(
+        vscode.languages.registerCodeActionsProvider(
+            { scheme: 'file' },
+            codeActionsProvider,
+            { providedCodeActionKinds: [vscode.CodeActionKind.RefactorRewrite, vscode.CodeActionKind.QuickFix] }
+        )
+    );
+
     // ── Memory View Provider ─────────────────────────────────────────────────
     let memoryViewProvider: MemoryViewProvider | undefined;
     if (memoryManager) {
@@ -219,6 +231,62 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             // Send message to provider with selection context
             const prompt = `Explain this ${language} code from ${filename}:\n\n\`\`\`${language}\n${selectedText}\n\`\`\``;
             provider.sendMessageFromCommand(prompt, true, true);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.codeAction', async (args: {
+            type: string;
+            selection: string;
+            language: string;
+            filename: string;
+        }) => {
+            await vscode.commands.executeCommand('ollamaAgent.chatView.focus');
+            
+            let prompt = '';
+            switch (args.type) {
+                case 'explain':
+                    prompt = `Explain this ${args.language} code from ${args.filename}:\n\n\`\`\`${args.language}\n${args.selection}\n\`\`\``;
+                    break;
+                case 'comment':
+                    prompt = `Add inline comments to this ${args.language} code:\n\n\`\`\`${args.language}\n${args.selection}\n\`\`\``;
+                    break;
+                case 'refactor':
+                    prompt = `Suggest refactoring improvements for this ${args.language} code:\n\n\`\`\`${args.language}\n${args.selection}\n\`\`\``;
+                    break;
+                case 'bugs':
+                    prompt = `Analyze this ${args.language} code for potential bugs and issues:\n\n\`\`\`${args.language}\n${args.selection}\n\`\`\``;
+                    break;
+                case 'tests':
+                    prompt = `Generate unit tests for this ${args.language} code:\n\n\`\`\`${args.language}\n${args.selection}\n\`\`\``;
+                    break;
+                case 'docs':
+                    prompt = `Add ${args.language === 'python' ? 'docstring' : 'JSDoc'} documentation to this code:\n\n\`\`\`${args.language}\n${args.selection}\n\`\`\``;
+                    break;
+                default:
+                    prompt = `Help with this ${args.language} code:\n\n\`\`\`${args.language}\n${args.selection}\n\`\`\``;
+            }
+            
+            provider.sendMessageFromCommand(prompt, false, true);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.explainError', async (args: {
+            error: string;
+            code: string;
+            language: string;
+            filename: string;
+            line: number;
+            severity: string;
+        }) => {
+            await vscode.commands.executeCommand('ollamaAgent.chatView.focus');
+            
+            const prompt = `Explain this ${args.severity} in ${args.filename} (line ${args.line}) and suggest a fix:\n\n` +
+                `**Error:** ${args.error}\n\n` +
+                `**Code:**\n\`\`\`${args.language}\n${args.code}\n\`\`\``;
+            
+            provider.sendMessageFromCommand(prompt, false, false);
         })
     );
 
@@ -451,6 +519,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             });
             
             panel.webview.html = html;
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.manageTemplates', async () => {
+            const templateManager = provider.getTemplateManager();
+            await showManageTemplatesUI(templateManager);
         })
     );
 
