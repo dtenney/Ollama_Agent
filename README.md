@@ -9,7 +9,7 @@ A fully local, offline AI coding assistant for VS Code — powered by Ollama.
 
 [![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/kchikech.ollamapilot?label=Marketplace&color=007ACC&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
 [![Installs](https://img.shields.io/visual-studio-marketplace/i/kchikech.ollamapilot?label=Installs&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
-[![Version](https://img.shields.io/badge/version-0.3.0--alpha-blue.svg)](https://github.com/dtenney/Ollama_Agent/releases)
+[![Version](https://img.shields.io/badge/version-0.4.0--alpha-blue.svg)](https://github.com/dtenney/Ollama_Agent/releases)
 [![VS Code](https://img.shields.io/badge/VS%20Code-%5E1.80.0-007ACC.svg)](https://code.visualstudio.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
@@ -114,14 +114,14 @@ ollama serve
 1. Download the latest `.vsix` from the [Releases page](https://github.com/dtenney/Ollama_Agent/releases)
 2. Open VS Code
 3. Press `Ctrl+Shift+P` / `Cmd+Shift+P` → type **"Install from VSIX"**
-4. Select the downloaded `ollamapilot-0.3.0-alpha.vsix` file
+4. Select the downloaded `ollamapilot-0.4.0-alpha.vsix` file
 5. Reload VS Code when prompted
 
 ### Option B — Install via command line
 
 ```bash
 # Download the .vsix file from releases, then:
-code --install-extension ollamapilot-0.3.0-alpha.vsix
+code --install-extension ollamapilot-0.4.0-alpha.vsix
 ```
 
 ### Option C — Build from source
@@ -141,7 +141,7 @@ npm run build
 npx vsce package
 
 # 5. Install the extension
-code --install-extension ollamapilot-0.3.0-alpha.vsix
+code --install-extension ollamapilot-0.4.0-alpha.vsix
 ```
 
 ---
@@ -727,7 +727,7 @@ This tests HTTP connectivity, lists models, and runs a streaming test. Output ap
 - [x] **Export chat as Markdown** — save conversations for documentation
 - [ ] Extension icon and Marketplace banner image
 
-### v0.4.0 — Code Intelligence (Phase 2)
+### v0.4.0 — Code Intelligence ✅ *current*
 - [x] **Enhanced diff view** — accept/reject options with keyboard shortcuts (Alt+A/Alt+R)
 - [x] **Inline code completions** — automatic suggestions as you type (Alt+C)
 - [x] **Multi-file refactoring** — coordinated changes across multiple files with preview
