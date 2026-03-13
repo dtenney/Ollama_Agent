@@ -153,6 +153,10 @@
       {
         "command": "ollamaAgent.manageTemplates",
         "title": "Ollama: Manage Prompt Templates"
+      },
+      {
+        "command": "ollamaAgent.triggerInlineCompletion",
+        "title": "Ollama: Trigger Inline Completion"
       }
     ],
     "menus": {
@@ -214,6 +218,12 @@
         "key": "alt+r",
         "mac": "alt+r",
         "when": "diffEditorVisible"
+      },
+      {
+        "command": "ollamaAgent.triggerInlineCompletion",
+        "key": "alt+c",
+        "mac": "alt+c",
+        "when": "editorTextFocus"
       }
     ],
     "configuration": {
@@ -388,6 +398,24 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Automatically compact conversation history when context reaches 99% of model's limit. You'll be alerted at 70% usage and reminded until 99%, then auto-compact will trigger if enabled."
+        },
+        "ollamaAgent.inlineCompletions.enabled": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Enable inline code completions (similar to GitHub Copilot). Suggestions appear automatically as you type. **Note:** This feature uses your local Ollama model and may slow down typing on slower machines."
+        },
+        "ollamaAgent.inlineCompletions.triggerMode": {
+          "type": "string",
+          "enum": ["automatic", "manual"],
+          "default": "automatic",
+          "markdownDescription": "How to trigger inline completions: `automatic` (as you type) or `manual` (only when you press the shortcut)."
+        },
+        "ollamaAgent.inlineCompletions.debounceMs": {
+          "type": "number",
+          "default": 500,
+          "minimum": 100,
+          "maximum": 5000,
+          "markdownDescription": "Milliseconds to wait after typing stops before generating a completion. Higher values reduce API calls but increase latency."
         }
       }
     }

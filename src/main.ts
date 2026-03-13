@@ -11,6 +11,7 @@ import { QdrantClient } from './qdrantClient';
 import { EmbeddingService } from './embeddingService';
 import { MemoryViewProvider, MemoryTreeItem } from './memoryViewProvider';
 import { OllamaCodeActionsProvider } from './codeActionsProvider';
+import { OllamaInlineCompletionProvider } from './inlineCompletionProvider';
 import { showManageTemplatesUI } from './promptTemplates';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -152,6 +153,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             { providedCodeActionKinds: [vscode.CodeActionKind.RefactorRewrite, vscode.CodeActionKind.QuickFix] }
         )
     );
+
+    // ── Inline Completion Provider ──────────────────────────────────────────
+    const inlineConfig = vscode.workspace.getConfiguration('ollamaAgent');
+    if (inlineConfig.get<boolean>('inlineCompletions.enabled', false)) {
+        const inlineProvider = new OllamaInlineCompletionProvider();
+        context.subscriptions.push(
+            vscode.languages.registerInlineCompletionItemProvider(
+                { pattern: '**' },
+                inlineProvider
+            )
+        );
+        logInfo('[inline] Inline completion provider registered');
+    }
 
     // ── Memory View Provider ─────────────────────────────────────────────────
     let memoryViewProvider: MemoryViewProvider | undefined;
@@ -526,6 +540,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         vscode.commands.registerCommand('ollamaAgent.manageTemplates', async () => {
             const templateManager = provider.getTemplateManager();
             await showManageTemplatesUI(templateManager);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.triggerInlineCompletion', async () => {
+            await vscode.commands.executeCommand('editor.action.inlineSuggest.trigger');
         })
     );
 
