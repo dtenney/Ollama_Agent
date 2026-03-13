@@ -683,6 +683,16 @@ npx vsce package
 5. Update the system prompt in `DEFAULT_SYSTEM_PROMPT` in `src/agent.ts`
 6. Add the tool to this README's [Agent Tools](#-agent-tools) table
 
+### Running tests
+
+```bash
+# Run all unit tests
+npm run test:unit
+
+# Run full test suite (including VS Code integration tests)
+npm test
+```
+
 ### Running diagnostics
 
 Use the built-in diagnostic command to verify your Ollama connection:
@@ -717,7 +727,7 @@ This tests HTTP connectivity, lists models, and runs a streaming test. Output ap
 - [x] Enhanced text-mode tool parser for better model compatibility
 - [x] Automatic Qdrant dimension validation and collection recreation
 
-### v0.3.0 — UX Polish ✅ *current*
+### v0.3.0 — UX Polish ✅
 - [x] **Explain selection shortcut** — `Ctrl+Shift+E` to instantly explain code
 - [x] **Model presets** — fast/balanced/quality presets with auto-sync
 - [x] **Code actions provider** — 6 right-click actions + error quick fixes
@@ -725,20 +735,20 @@ This tests HTTP connectivity, lists models, and runs a streaming test. Output ap
 - [x] **Smart context selection** — auto-include related/imported files
 - [x] **Search in chat** — find/highlight/navigate within conversations
 - [x] **Export chat as Markdown** — save conversations for documentation
-- [ ] Extension icon and Marketplace banner image
 
-### v0.4.0 — Code Intelligence ✅ *current*
+### v0.4.0 — Code Intelligence ✅
 - [x] **Enhanced diff view** — accept/reject options with keyboard shortcuts (Alt+A/Alt+R)
 - [x] **Inline code completions** — automatic suggestions as you type (Alt+C)
 - [x] **Multi-file refactoring** — coordinated changes across multiple files with preview
 - [x] **Export chat** — save conversations as Markdown or JSON
-- [ ] Multi-workspace folder support
-- [ ] `@symbol` mention to attach a specific function or class
+- [x] **Multi-workspace folder support** — isolated agents per workspace
+- [x] **`@symbol` mention** — attach a specific function or class
 
-### v1.0.0 — Stability
-- [ ] Comprehensive test suite
-- [ ] Memory UI panel (browse/edit notes without the agent)
-- [ ] Export / import project memory
+### v1.0.0 — Stability 🚧 *in progress*
+- [x] **Comprehensive test suite** — 147 unit tests across 11 modules
+- [x] **Extension icon** — professional marketplace icon
+- [x] **Marketplace banner** — 1280×640 dark-themed banner
+- [ ] Final version bump and marketplace publish
 
 > Have a feature idea? [Open an issue](https://github.com/dtenney/Ollama_Agent/issues/new?labels=enhancement) — community feedback drives the roadmap.
 

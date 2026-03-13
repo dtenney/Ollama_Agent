@@ -5,6 +5,43 @@ All notable changes to OllamaPilot will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0-alpha] - 2026-03-13
+
+### Added
+- **Enhanced diff view** with accept/reject options and keyboard shortcuts (Alt+A/Alt+R)
+- **Inline code completions** — automatic suggestions as you type, manual trigger with Alt+C
+- **Multi-file refactoring** — coordinated changes across multiple files with preview UI
+- **Export chat** — save conversations as Markdown or JSON
+- **@symbol mentions** — attach workspace symbols (functions, classes) to messages
+- **Multi-workspace folder support** — isolated agents per workspace folder
+- **Comprehensive test suite** — 147 unit tests across 11 modules (Mocha + Sinon)
+- **Marketplace banner** — 1280×640 dark-themed banner image
+- `npm test` and `npm run test:unit` scripts
+
+### Changed
+- Cleaned up 17 intermediate session/status markdown files
+- Updated roadmap to reflect all completed features
+
+## [0.3.0-alpha] - 2026-03-13
+
+### Added
+- **Explain selection shortcut** — `Ctrl+Shift+E` / `Cmd+Shift+E` to instantly explain selected code
+- **Model presets** — fast/balanced/quality presets with bidirectional sync
+- **Code actions provider** — 6 right-click actions (Explain, Comment, Refactor, Bugs, Tests, Docs)
+- **Error quick fixes** — click lightbulb on errors to get AI explanations with surrounding context
+- **Prompt templates** — 6 built-in templates + custom template management with variable substitution
+- **Smart context selection** — auto-include imported/related files with relevance scoring
+- **Search in chat** — find, highlight, and navigate matches within conversations
+
+### Fixed
+- Memory leak in search highlight DOM manipulation
+- Memory leak in Agent history (explicit disposal in 4 locations)
+- Race condition in preset/model circular updates (dual-flag pattern)
+- Race condition in workspace change detection (mutex)
+- Race condition in file index rebuild (immediate indexing)
+- Race condition in smart context file limit (uses config)
+- Template variable substitution sorts keys by length to prevent partial replacements
+
 ## [0.2.0] - 2026-03-12
 
 ### Added
