@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memory Statistics</title>
+    <style>
+        body {
+            padding: 20px;
+            color: var(--vscode-foreground);
+            font-family: var(--vscode-font-family);
+        }
+        h1 { font-size: 24px; margin-bottom: 20px; }
+        h2 { font-size: 18px; margin-top: 30px; margin-bottom: 15px; }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        .stat-card {
+            background: var(--vscode-editor-background);
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
+            padding: 15px;
+        }
+        .stat-label {
+            font-size: 12px;
+            opacity: 0.7;
+            margin-bottom: 5px;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+        }
+        .tier-bar {
+            margin-bottom: 15px;
+        }
+        .tier-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 13px;
+        }
+        .tier-progress {
+            height: 20px;
+            background: var(--vscode-editor-background);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .tier-fill {
+            height: 100%;
+            transition: width 0.3s;
+        }
+        .tier-0 { background: #e74c3c; }
+        .tier-1 { background: #e67e22; }
+        .tier-2 { background: #f39c12; }
+        .tier-3 { background: #3498db; }
+        .tier-4 { background: #9b59b6; }
+        .tier-5 { background: #95a5a6; }
+        .actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 30px;
+        }
+        button {
+            background: var(--vscode-button-background);
+            color: var(--vscode-button-foreground);
+            border: none;
+            padding: 8px 16px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        button:hover {
+            background: var(--vscode-button-hoverBackground);
+        }
+        .secondary {
+            background: var(--vscode-button-secondaryBackground);
+            color: var(--vscode-button-secondaryForeground);
+        }
+        .secondary:hover {
+            background: var(--vscode-button-secondaryHoverBackground);
+        }
+        input[type="file"] { display: none; }
+    </style>
+</head>
+<body>
+    <h1>Memory Statistics</h1>
+    
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-label">Total Entries</div>
+            <div class="stat-value" id="totalEntries">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Auto-Loaded</div>
+            <div class="stat-value" id="autoLoaded">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">In Qdrant</div>
+            <div class="stat-value" id="inQdrant">0</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Total Accesses</div>
+            <div class="stat-value" id="totalAccesses">0</div>
+        </div>
+    </div>
+
+    <h2>Tier Distribution</h2>
+    <div id="tierBars"></div>
+
+    <div class="actions">
+        <button onclick="exportMemory()">Export Memory</button>
+        <button class="secondary" onclick="document.getElementById('importFile').click()">Import Memory</button>
+        <input type="file" id="importFile" accept=".json" onchange="importMemory(event)">
+    </div>
+
+    <script>
+        const vscode = acquireVsCodeApi();
+        const tierNames = ['Critical', 'Essential', 'Operational', 'Collaboration', 'References', 'Archive'];
+
+        window.addEventListener('message', event => {
+            const message = event.data;
+            if (message.type === 'stats') {
+                renderStats(message.stats);
+            }
+        });
+
+        function renderStats(stats) {
+            document.getElementById('totalEntries').textContent = stats.totalEntries;
+            document.getElementById('autoLoaded').textContent = stats.tierCounts[0] + stats.tierCounts[1] + stats.tierCounts[2];
+            document.getElementById('inQdrant').textContent = stats.tierCounts[4] + stats.tierCounts[5];
+            document.getElementById('totalAccesses').textContent = stats.totalAccesses;
+
+            const maxCount = Math.max(...stats.tierCounts, 1);
+            const barsHtml = stats.tierCounts.map((count, tier) => {
+                const percentage = (count / maxCount) * 100;
+                return `
+                    <div class="tier-bar">
+                        <div class="tier-label">
+                            <span>Tier ${tier}: ${tierNames[tier]}</span>
+                            <span>${count} entries</span>
+                        </div>
+                        <div class="tier-progress">
+                            <div class="tier-fill tier-${tier}" style="width: ${percentage}%"></div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+            document.getElementById('tierBars').innerHTML = barsHtml;
+        }
+
+        function exportMemory() {
+            vscode.postMessage({ command: 'export' });
+        }
+
+        function importMemory(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = e => {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    vscode.postMessage({ command: 'import', data });
+                } catch (err) {
+                    vscode.postMessage({ command: 'error', message: 'Invalid JSON file' });
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        // Request initial stats
+        vscode.postMessage({ command: 'ready' });
+    </script>
+</body>
+</html>

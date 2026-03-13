@@ -31,17 +31,23 @@ export interface ChatSession {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const STORAGE_KEY  = 'ollamaAgent.sessions.v1';
+const STORAGE_KEY_PREFIX = 'ollamaAgent.sessions.v1';
 const MAX_SESSIONS = 50;
 
 // ── Storage service ───────────────────────────────────────────────────────────
 
 export class ChatStorage {
     constructor(private readonly context: vscode.ExtensionContext) {}
+    
+    /** Get workspace-specific storage key */
+    private getStorageKey(): string {
+        const workspaceName = vscode.workspace.name || vscode.workspace.workspaceFolders?.[0]?.name || 'default';
+        return `${STORAGE_KEY_PREFIX}.${workspaceName}`;
+    }
 
-    /** All sessions, sorted newest-first. */
+    /** All sessions for current workspace, sorted newest-first. */
     list(): ChatSession[] {
-        return (this.context.globalState.get<ChatSession[]>(STORAGE_KEY) ?? [])
+        return (this.context.globalState.get<ChatSession[]>(this.getStorageKey()) ?? [])
             .sort((a, b) => b.updatedAt - a.updatedAt);
     }
 
@@ -55,7 +61,7 @@ export class ChatStorage {
         try {
             const rest = this.list().filter((s) => s.id !== session.id);
             const toSave = [{ ...session, updatedAt: Date.now() }, ...rest].slice(0, MAX_SESSIONS);
-            this.context.globalState.update(STORAGE_KEY, toSave);
+            this.context.globalState.update(this.getStorageKey(), toSave);
             logInfo(`[storage] Saved "${session.title}" — ${session.messages.length} messages`);
         } catch (err) {
             logError(`[storage] Failed to save session: ${(err as Error).message}`);
@@ -65,13 +71,13 @@ export class ChatStorage {
     /** Remove a single session. */
     delete(id: string): void {
         const rest = this.list().filter((s) => s.id !== id);
-        this.context.globalState.update(STORAGE_KEY, rest);
+        this.context.globalState.update(this.getStorageKey(), rest);
         logInfo(`[storage] Deleted session ${id}`);
     }
 
-    /** Wipe every saved session. */
+    /** Wipe every saved session for current workspace. */
     clearAll(): void {
-        this.context.globalState.update(STORAGE_KEY, []);
+        this.context.globalState.update(this.getStorageKey(), []);
         logInfo('[storage] All sessions cleared');
     }
 

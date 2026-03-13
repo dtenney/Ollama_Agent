@@ -8,6 +8,7 @@ import { ChatStorage, ChatSession, StoredMessage, deriveTitle, relativeTime } fr
 import { indexWorkspaceFiles, fuzzySearchFiles, buildMentionContext } from './mentions';
 import { buildGitDiffContext } from './gitContext';
 import { ProjectMemory } from './projectMemory';
+import { TieredMemoryManager } from './memoryCore';
 
 // ── Message shapes (webview → extension) ─────────────────────────────────────
 
@@ -56,16 +57,22 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
     private _agent?: Agent;
     private _editorListener?: vscode.Disposable;
+    private _workspaceListener?: vscode.Disposable;
+    private _currentWorkspaceRoot?: string;
 
     private readonly storage: ChatStorage;
-    private readonly memory: ProjectMemory;
+    private readonly memory: ProjectMemory | TieredMemoryManager;
     private currentSession: ChatSession;
     /** Cached workspace file index for @mention autocomplete. Rebuilt on new workspace. */
     private _fileIndex: ReturnType<typeof indexWorkspaceFiles> = [];
 
-    constructor(private readonly context: vscode.ExtensionContext) {
+    constructor(
+        private readonly context: vscode.ExtensionContext,
+        memoryManager?: TieredMemoryManager | null
+    ) {
         this.storage = new ChatStorage(context);
-        this.memory  = new ProjectMemory(context);
+        // Use tiered memory if provided, otherwise fall back to legacy ProjectMemory
+        this.memory = memoryManager ?? new ProjectMemory(context);
         // Bootstrap: restore the last session or start fresh
         const sessions = this.storage.list();
         this.currentSession = sessions[0] ?? this.storage.createNew(getConfig().model);
@@ -76,7 +83,33 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         this._view = webviewView;
 
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        this._currentWorkspaceRoot = workspaceRoot;
         this._agent = new Agent(workspaceRoot, this.memory);
+
+        // Listen for workspace folder changes
+        this._workspaceListener?.dispose();
+        this._workspaceListener = vscode.workspace.onDidChangeWorkspaceFolders(() => {
+            const newRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+            if (newRoot !== this._currentWorkspaceRoot) {
+                logInfo(`[provider] Workspace changed: ${this._currentWorkspaceRoot} → ${newRoot}`);
+                this._currentWorkspaceRoot = newRoot;
+                
+                // Recreate agent with new workspace root
+                this._agent = new Agent(newRoot, this.memory);
+                
+                // Clear file index - will be rebuilt on next use
+                this._fileIndex = [];
+                
+                // Start a new session for the new workspace
+                this.startNewSession({});
+                this._view?.webview.postMessage({ type: 'clearChat' });
+                this._view?.webview.postMessage({ 
+                    type: 'info', 
+                    text: `Switched to workspace: ${vscode.workspace.name || 'Unknown'}` 
+                });
+            }
+        });
+        this.context.subscriptions.push(this._workspaceListener);
 
         // Build file index for @mention autocomplete (async, non-blocking)
         if (workspaceRoot) {
@@ -114,6 +147,31 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     if (!text) { break; }
 
                     logInfo(`[user] ${text.slice(0, 120)}${text.length > 120 ? '…' : ''}`);
+                    
+                    // Check if workspace has changed since agent was created
+                    const currentRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+                    if (currentRoot !== this._currentWorkspaceRoot) {
+                        logInfo(`[provider] Workspace changed detected: ${this._currentWorkspaceRoot} → ${currentRoot}`);
+                        this._currentWorkspaceRoot = currentRoot;
+                        
+                        // Create new agent with fresh memory context for new workspace
+                        this._agent = new Agent(currentRoot, this.memory);
+                        
+                        // Clear file index
+                        this._fileIndex = [];
+                        
+                        // Start a completely new session for the new workspace
+                        this.startNewSession({ model });
+                        
+                        // Clear the chat UI
+                        post({ type: 'clearChat' });
+                        
+                        // Notify user
+                        const workspaceName = vscode.workspace.name || 'Unknown';
+                        post({ type: 'info', text: `Switched to workspace: ${workspaceName}` });
+                        
+                        logInfo(`[provider] New session started for workspace: ${workspaceName}`);
+                    }
 
                     // Record user message (display text only, no injected context)
                     this.appendToSession({ role: 'user', content: text, timestamp: Date.now() });
@@ -327,6 +385,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
     dispose(): void {
         this._editorListener?.dispose();
+        this._workspaceListener?.dispose();
     }
 
     // ── Session helpers ───────────────────────────────────────────────────────
@@ -335,12 +394,17 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         const model = opts.model ?? getConfig().model;
         this.currentSession = this.storage.createNew(model);
         const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+        
+        // IMPORTANT: Create new agent with current workspace root
+        // Memory is workspace-scoped, so agent needs fresh memory context
         this._agent = new Agent(root, this.memory);
+        
         // Re-index files for the new session (workspace may have changed)
         if (root && !this._fileIndex.length) {
             try { this._fileIndex = indexWorkspaceFiles(root); } catch { /* best-effort */ }
         }
         logInfo(`[provider] New session: ${this.currentSession.id}`);
+        logInfo(`[provider] Workspace root: ${root || '(none)'}`);
     }
 
     private appendToSession(msg: StoredMessage): void {

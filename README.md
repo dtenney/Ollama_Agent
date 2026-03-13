@@ -3,6 +3,7 @@
 <img src="images/logo.png" alt="OllamaPilot Logo" width="160" />
 
 # OllamaPilot
+A fully local, offline AI coding assistant for VS Code — powered by Ollama.
 
 ### A fully local, offline AI coding assistant for VS Code — powered by Ollama
 

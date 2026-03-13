@@ -4,7 +4,14 @@ src/**
 !dist/**
 
 # ── Dev tooling ───────────────────────────────────────────────────────────────
-node_modules/**
+# Include all production dependencies (MCP SDK + transitive deps)
+# Exclude only devDependencies
+node_modules/@types/**
+node_modules/@vscode/**
+node_modules/@azure/**
+node_modules/@typespec/**
+node_modules/typescript/**
+node_modules/highlight.js/**
 tsconfig.json
 .vscode/**
 .github/**

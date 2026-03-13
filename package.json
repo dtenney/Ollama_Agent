@@ -1,8 +1,8 @@
 {
   "name": "ollamapilot",
-  "displayName": "OllamaPilot",
-  "version": "0.1.0",
-  "description": "Your offline AI co-pilot powered by Ollama — 100% local, no telemetry, no internet required",
+  "displayName": "OllamaPilot (MCP Edition)",
+  "version": "0.2.0",
+  "description": "Your offline AI co-pilot powered by Ollama with MCP support — 100% local, no telemetry, no internet required",
   "publisher": "kchikech",
   "author": {
     "name": "Hamza Kchikech",
@@ -72,6 +72,10 @@
           "type": "webview",
           "id": "ollamaAgent.chatView",
           "name": "Chat"
+        },
+        {
+          "id": "ollamaAgent.memoryView",
+          "name": "Memory"
         }
       ]
     },
@@ -92,6 +96,47 @@
       {
         "command": "ollamaAgent.diagnose",
         "title": "Ollama: Run Diagnostics"
+      },
+      {
+        "command": "ollamaAgent.createMCPConfig",
+        "title": "Ollama: Create MCP Config File"
+      },
+      {
+        "command": "ollamaAgent.runMemoryMaintenance",
+        "title": "Ollama: Run Memory Maintenance"
+      },
+      {
+        "command": "ollamaAgent.refreshMemory",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "ollamaAgent.promoteEntry",
+        "title": "Promote to Higher Tier",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "ollamaAgent.demoteEntry",
+        "title": "Demote to Lower Tier",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "ollamaAgent.deleteMemoryEntry",
+        "title": "Delete Entry",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "ollamaAgent.exportMemory",
+        "title": "Ollama: Export Memory"
+      },
+      {
+        "command": "ollamaAgent.importMemory",
+        "title": "Ollama: Import Memory"
+      },
+      {
+        "command": "ollamaAgent.showMemoryStats",
+        "title": "Ollama: Show Memory Statistics",
+        "icon": "$(graph)"
       }
     ],
     "menus": {
@@ -100,6 +145,33 @@
           "command": "ollamaAgent.newChat",
           "when": "view == ollamaAgent.chatView",
           "group": "navigation"
+        },
+        {
+          "command": "ollamaAgent.refreshMemory",
+          "when": "view == ollamaAgent.memoryView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ollamaAgent.showMemoryStats",
+          "when": "view == ollamaAgent.memoryView",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "ollamaAgent.promoteEntry",
+          "when": "view == ollamaAgent.memoryView && viewItem == memoryEntry",
+          "group": "inline@1"
+        },
+        {
+          "command": "ollamaAgent.demoteEntry",
+          "when": "view == ollamaAgent.memoryView && viewItem == memoryEntry",
+          "group": "inline@2"
+        },
+        {
+          "command": "ollamaAgent.deleteMemoryEntry",
+          "when": "view == ollamaAgent.memoryView && viewItem == memoryEntry",
+          "group": "inline@3"
         }
       ]
     },
@@ -166,8 +238,128 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "When enabled, injects a concise `git diff` of your uncommitted changes into every message. Helps the agent understand what you're currently working on. Only works in git repositories."
+        },
+        "ollamaAgent.mcpServers": {
+          "type": "array",
+          "default": [],
+          "markdownDescription": "MCP (Model Context Protocol) servers to connect to. Each server provides additional tools for the agent. Example: `[{\"name\": \"filesystem\", \"command\": \"npx\", \"args\": [\"-y\", \"@modelcontextprotocol/server-filesystem\", \"/path/to/workspace\"]}]`",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Server name"
+              },
+              "command": {
+                "type": "string",
+                "description": "Command to run"
+              },
+              "args": {
+                "type": "array",
+                "description": "Command arguments",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "env": {
+                "type": "object",
+                "description": "Environment variables"
+              }
+            },
+            "required": [
+              "name",
+              "command",
+              "args"
+            ]
+          }
+        },
+        "ollamaAgent.memory.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable multi-tiered memory system for persistent project knowledge."
+        },
+        "ollamaAgent.memory.qdrantUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Qdrant server URL for semantic search (e.g., `http://localhost:6333`). Leave empty to automatically use Ollama host with port 6333."
+        },
+        "ollamaAgent.memory.qdrantHost": {
+          "type": "string",
+          "default": "",
+          "description": "Qdrant hostname. Leave empty to use Ollama host."
+        },
+        "ollamaAgent.memory.qdrantPort": {
+          "type": "number",
+          "default": 6333,
+          "description": "Qdrant port (default: 6333)."
+        },
+        "ollamaAgent.memory.embeddingModel": {
+          "type": "string",
+          "default": "nomic-embed-text",
+          "description": "Ollama embedding model for semantic search (e.g., nomic-embed-text, mxbai-embed-large)."
+        },
+        "ollamaAgent.memory.embeddingUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Ollama URL for embeddings. Leave empty to use main Ollama URL."
+        },
+        "ollamaAgent.memory.autoLoadTiers": {
+          "type": "array",
+          "default": [
+            0,
+            1,
+            2
+          ],
+          "description": "Memory tiers to auto-load on session start (0=critical, 1=essential, 2=operational).",
+          "items": {
+            "type": "number"
+          }
+        },
+        "ollamaAgent.memory.demotionThresholdDays": {
+          "type": "number",
+          "default": 30,
+          "description": "Days before demoting stale memories to lower tier."
+        },
+        "ollamaAgent.memory.promotionAccessCount": {
+          "type": "number",
+          "default": 5,
+          "description": "Number of accesses before promoting memory to higher tier."
+        },
+        "ollamaAgent.memory.archiveThresholdDays": {
+          "type": "number",
+          "default": 90,
+          "description": "Days before archiving old memories to Tier 5."
+        },
+        "ollamaAgent.memory.maxContextTokens": {
+          "type": "number",
+          "default": 4000,
+          "description": "Maximum tokens for memory context in prompts."
+        },
+        "ollamaAgent.memory.semanticSearchLimit": {
+          "type": "number",
+          "default": 5,
+          "description": "Default number of results for semantic search queries."
+        },
+        "ollamaAgent.memory.fallbackToLocal": {
+          "type": "boolean",
+          "default": true,
+          "description": "Fall back to local storage if Qdrant is unavailable."
+        },
+        "ollamaAgent.memory.autoSave": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically save important information to memory as the AI discovers it (IPs, frameworks, tasks, solutions). The AI will proactively store context without being asked."
+        },
+        "ollamaAgent.autoCompactContext": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically compact conversation history when context reaches 99% of model's limit. You'll be alerted at 70% usage and reminded until 99%, then auto-compact will trigger if enabled."
         }
       }
     }
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "axios": "^1.13.6"
   }
 }

@@ -16,6 +16,10 @@ export interface OllamaConfig {
     maxContextFiles: number;
     /** When true, inject a concise git diff into every message for change-aware context. */
     injectGitDiff: boolean;
+    /** When true, AI automatically saves important information to memory as it discovers it. */
+    autoSaveMemory: boolean;
+    /** When true, automatically compact context when it reaches 99% of model's limit. */
+    autoCompactContext: boolean;
 }
 
 export function getConfig(): OllamaConfig {
@@ -37,6 +41,8 @@ export function getConfig(): OllamaConfig {
         autoIncludeSelection: c.get<boolean>('autoIncludeSelection', true),
         maxContextFiles:      c.get<number> ('maxContextFiles',      5),
         injectGitDiff:        c.get<boolean>('injectGitDiff',        false),
+        autoSaveMemory:       c.get<boolean>('memory.autoSave',      true),
+        autoCompactContext:   c.get<boolean>('autoCompactContext',   true),
     };
 }
 
