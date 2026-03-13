@@ -13,6 +13,7 @@ import { TieredMemoryManager } from './memoryCore';
 import { isMCPTool, parseMCPToolName, callMCPTool, mcpToolsToOllamaFormat } from './mcpClient';
 import { calculateContextStats, compactHistory, ContextLevel } from './contextCalculator';
 import { DiffViewManager } from './diffView';
+import { MultiFileRefactoringManager, RefactoringPlan } from './multiFileRefactor';
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -261,6 +262,35 @@ export const TOOL_DEFINITIONS = [
             name: 'memory_stats',
             description: 'Get memory statistics showing entry count and token usage per tier.',
             parameters: { type: 'object', properties: {}, required: [] },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'refactor_multi_file',
+            description: 'Propose coordinated changes across multiple files. Use this when a refactoring affects multiple files (e.g., renaming a function used in many places, restructuring modules). Shows a preview of all changes before applying.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    title: { type: 'string', description: 'Short title for the refactoring (e.g., "Rename getUserData to fetchUserData")' },
+                    description: { type: 'string', description: 'Explanation of what changes are being made and why' },
+                    changes: {
+                        type: 'array',
+                        description: 'Array of file changes',
+                        items: {
+                            type: 'object',
+                            properties: {
+                                path: { type: 'string', description: 'File path relative to workspace root' },
+                                old_content: { type: 'string', description: 'Current file content (must match exactly)' },
+                                new_content: { type: 'string', description: 'New file content after refactoring' },
+                                description: { type: 'string', description: 'Optional: what changed in this file' },
+                            },
+                            required: ['path', 'old_content', 'new_content'],
+                        },
+                    },
+                },
+                required: ['title', 'description', 'changes'],
+            },
         },
     },
 ];
@@ -682,12 +712,14 @@ export class Agent {
     private currentModel: string = '';
 
     private diffViewManager: DiffViewManager;
+    private refactorManager: MultiFileRefactoringManager;
 
     constructor(
         private workspaceRoot: string,
         private readonly memory: ProjectMemory | TieredMemoryManager | null = null
     ) {
         this.diffViewManager = new DiffViewManager();
+        this.refactorManager = new MultiFileRefactoringManager();
     }
 
     get historyLength(): number { return this.history.length; }
@@ -1463,6 +1495,65 @@ This memory persists across all conversations. Use memory_write to add new infor
                     const tokens = notes.reduce((sum, n) => sum + Math.ceil(n.content.length / 4), 0);
                     return `Memory Statistics:\n\nTotal: ${notes.length} entries, ~${tokens} tokens`;
                 }
+            }
+
+            // ── refactor_multi_file ────────────────────────────────────────────
+            case 'refactor_multi_file': {
+                const title = String(args.title ?? '');
+                const description = String(args.description ?? '');
+                const changes = args.changes as any[];
+
+                if (!title || !description || !changes || !Array.isArray(changes)) {
+                    throw new Error('title, description, and changes array are required');
+                }
+
+                if (changes.length === 0) {
+                    throw new Error('changes array cannot be empty');
+                }
+
+                // Build refactoring plan
+                const plan: RefactoringPlan = {
+                    title,
+                    description,
+                    changes: changes.map(c => ({
+                        path: String(c.path ?? ''),
+                        oldContent: String(c.old_content ?? ''),
+                        newContent: String(c.new_content ?? ''),
+                        description: c.description ? String(c.description) : undefined,
+                    })),
+                };
+
+                // Validate all paths
+                for (const change of plan.changes) {
+                    if (!change.path) {
+                        throw new Error('Each change must have a path');
+                    }
+                    const fullPath = this.safePath(root, change.path);
+                    if (!fs.existsSync(fullPath)) {
+                        throw new Error(`File not found: ${change.path}`);
+                    }
+                }
+
+                // Show preview and get approval
+                const approved = await this.refactorManager.showRefactoringPlan(plan);
+
+                if (!approved) {
+                    return 'Multi-file refactoring cancelled by user.';
+                }
+
+                // Apply changes
+                const result = await this.refactorManager.applyRefactoring(plan, root);
+
+                if (result.failed > 0) {
+                    return `Refactoring partially applied: ${result.success} succeeded, ${result.failed} failed. Check the output for details.`;
+                }
+
+                // Notify about file changes
+                plan.changes.forEach(c => {
+                    this.postFn({ type: 'fileChanged', path: c.path, action: 'refactored' });
+                });
+
+                return `Refactoring complete: ${result.success} file(s) modified successfully.`;
             }
 
             default:
