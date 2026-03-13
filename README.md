@@ -9,7 +9,7 @@ A fully local, offline AI coding assistant for VS Code — powered by Ollama.
 
 [![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/kchikech.ollamapilot?label=Marketplace&color=007ACC&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
 [![Installs](https://img.shields.io/visual-studio-marketplace/i/kchikech.ollamapilot?label=Installs&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/kchikech/Ollama_Agent/releases)
+[![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)](https://github.com/dtenney/Ollama_Agent/releases)
 [![VS Code](https://img.shields.io/badge/VS%20Code-%5E1.80.0-007ACC.svg)](https://code.visualstudio.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
@@ -37,7 +37,10 @@ OllamaPilot is a free, open-source VS Code extension that brings a **Cursor-like
 - 📎 **@file mentions** — attach any workspace file to your message with `@filename`
 - 🎨 **Syntax highlighting** — offline code highlighting for 30+ languages (no CDN)
 - 📊 **Token estimation** — see context usage before sending, with model-aware limits
-- 🧠 **Project memory** — the AI can persist notes about your project across sessions
+- 🧠 **Multi-tiered memory** — intelligent 6-tier memory system with semantic search
+- 🔌 **MCP support** — connect to external tools via Model Context Protocol
+- 🎯 **Auto-save memory** — AI proactively captures important project information
+- 📊 **Memory UI panel** — browse, manage, and organize memory entries visually
 - 🔀 **Git diff context** — optionally inject uncommitted changes for change-aware assistance
 - 🕐 **Chat history** — conversations are saved and restored across VS Code sessions
 - 🖥️ **Cursor-like UI** — modern sidebar chat panel that fits right into VS Code
@@ -130,7 +133,7 @@ Or via Quick Open:
 ### Option C — Install via command line
 
 ```bash
-code --install-extension ollamapilot-0.1.0.vsix
+code --install-extension ollamapilot-0.2.0.vsix
 ```
 
 ---
@@ -240,6 +243,10 @@ The AI can autonomously call the following tools during a conversation:
 | `memory_list` | Recall all saved project notes for this workspace | — |
 | `memory_write` | Save a persistent note (fact, decision, convention) about the project | — |
 | `memory_delete` | Delete a saved note by id | — |
+| `memory_search` | Search past memories using semantic similarity | — |
+| `memory_tier_write` | Save to specific tier (0=critical, 1=essential, 2=operational, 3=collaboration, 4=references) | — |
+| `memory_tier_list` | List memories from specific tiers | — |
+| `memory_stats` | Get memory statistics (entry count and tokens per tier) | — |
 
 > **Safety:** All file modifications and command executions require explicit confirmation via a VS Code dialog. Paths are validated to stay within the workspace root. Dangerous command patterns (`rm -rf /`, `mkfs`, etc.) are blocked before the confirmation dialog even appears.
 
@@ -280,17 +287,42 @@ Agent: → memory_list()                 (recall any prior project notes)
 
 ---
 
-## 🧠 Project Memory
+## 🧠 Multi-Tiered Memory System
 
-Project memory lets the AI save and recall notes about your workspace — **persisted across all sessions**, scoped per workspace folder.
+**NEW in v0.2.0:** OllamaPilot now features an intelligent 6-tier memory system with semantic search capabilities.
 
-The AI uses three tools to manage memory automatically:
+### Memory Tiers
+
+| Tier | Name | Purpose | Auto-loaded |
+|---|---|---|---|
+| 0 | Critical | IPs, URLs, ports, paths, credentials | ✅ |
+| 1 | Essential | Frameworks, tools, deployment processes | ✅ |
+| 2 | Operational | Current tasks, bugs, recent decisions | ✅ |
+| 3 | Collaboration | Team conventions, workflows, standards | ❌ |
+| 4 | References | Past solutions, troubleshooting guides | ❌ |
+| 5 | Archive | Old/stale information | ❌ |
+
+### Features
+
+- **Semantic Search** — Find relevant memories using natural language queries (requires Qdrant)
+- **Auto-save** — AI proactively stores important information as it discovers it
+- **Memory UI Panel** — Browse, promote, demote, and delete entries visually
+- **Auto-maintenance** — Automatically promotes frequently accessed entries and demotes stale ones
+- **Export/Import** — Backup and share memory across workspaces
+
+### Memory Tools
+
+The AI uses these tools to manage memory automatically:
 
 | Tool | What it does |
 |---|---|
 | `memory_list` | Reads all saved notes at the start of a conversation |
 | `memory_write` | Saves a note with optional tag (e.g. `architecture`, `bug`, `decision`) |
 | `memory_delete` | Removes a stale or incorrect note by its id |
+| `memory_search` | Search past memories using semantic similarity |
+| `memory_tier_write` | Save to specific tier (0-5) with tags |
+| `memory_tier_list` | List memories from specific tiers |
+| `memory_stats` | Get statistics about memory usage |
 
 **Example use cases:**
 
@@ -610,20 +642,33 @@ This tests HTTP connectivity, lists models, and runs a streaming test. Output ap
 
 ## 🗺️ Roadmap
 
-### v0.1.0 — Enhanced Context ✅ *current*
+### v0.1.0 — Enhanced Context ✅
 - [x] `@filename` mention in the prompt to attach specific files
 - [x] Token count indicator showing context size before sending
 - [x] Offline syntax highlighting (highlight.js, 30+ languages)
 - [x] `git diff` context injection (opt-in via setting)
 - [x] Persistent project memory / notes (per-workspace)
 
-### v0.2.0 — UX Polish
+### v0.2.0 — Multi-Tiered Memory & MCP Support ✅ *current*
+- [x] **Multi-tiered memory system** with 6 tiers (Critical → Archive)
+- [x] **Semantic search** via Qdrant vector database integration
+- [x] **Memory UI panel** in sidebar for browsing and managing entries
+- [x] **MCP (Model Context Protocol)** support for external tool servers
+- [x] **Auto-save memory** to proactively capture important information
+- [x] **Auto-compact context** to prevent hitting model limits
+- [x] **Memory maintenance** command for automatic cleanup
+- [x] **Export/import memory** for backup and sharing
+- [x] **Memory statistics** view showing usage across tiers
+- [x] Enhanced text-mode tool parser for better model compatibility
+- [x] Automatic Qdrant dimension validation and collection recreation
+
+### v0.3.0 — UX Polish
 - [ ] Export chat as Markdown
 - [ ] Message search within a session
 - [ ] Configurable keyboard shortcut
 - [ ] Extension icon and Marketplace banner image
 
-### v0.3.0 — Code Intelligence
+### v0.4.0 — Code Intelligence
 - [ ] Inline diff application directly in the editor
 - [ ] Multi-workspace folder support
 - [ ] `@symbol` mention to attach a specific function or class
@@ -658,7 +703,13 @@ A: Yes. Set `ollamaAgent.baseUrl` to the remote URL (e.g. `http://192.168.1.100:
 A: In VS Code's global extension storage (`globalState`). They are not stored in your filesystem or committed to git. Use the "Delete all" button in the history panel to remove them.
 
 **Q: Where is project memory stored?**
-A: In VS Code's workspace-scoped storage (`workspaceState`) — automatically isolated per workspace folder, not in your filesystem, not committed to git.
+A: In VS Code's workspace-scoped storage (`workspaceState`) for basic memory, and optionally in Qdrant vector database for semantic search. Neither is committed to git.
+
+**Q: What is Qdrant and do I need it?**
+A: Qdrant is an optional vector database that enables semantic search in your memory. Without it, memory still works but you won't have semantic search capabilities. Install with: `docker run -p 6333:6333 qdrant/qdrant`
+
+**Q: What is MCP support?**
+A: Model Context Protocol (MCP) allows OllamaPilot to connect to external tool servers, extending the AI's capabilities beyond the built-in tools. Configure MCP servers in settings or `.ollamapilot/mcp.json`.
 
 **Q: The token counter seems off — is it accurate?**
 A: It's an approximation using the 4 characters ≈ 1 token heuristic, which is standard for English and code. It won't be exact (exact tokenisation requires the model's tokenizer), but it's close enough to warn you before you hit context limits.
