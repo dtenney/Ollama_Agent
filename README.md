@@ -109,30 +109,38 @@ ollama serve
 
 ## 🚀 Installation
 
-### Option A — Install from VS Code Marketplace *(recommended)*
+### Option A — Install from GitHub Release *(recommended)*
 
-**One-click install:**
-[➡ Install OllamaPilot on the VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
-
-Or via Quick Open:
-1. Open VS Code
-2. Press `Ctrl+P` / `Cmd+P` and type:
-   ```
-   ext install kchikech.ollamapilot
-   ```
-3. Press Enter
-
-### Option B — Install from `.vsix` file
-
-1. Download the latest `.vsix` from the [Releases page](https://github.com/kchikech/Ollama_Agent/releases)
+1. Download the latest `.vsix` from the [Releases page](https://github.com/dtenney/Ollama_Agent/releases)
 2. Open VS Code
 3. Press `Ctrl+Shift+P` / `Cmd+Shift+P` → type **"Install from VSIX"**
-4. Select the downloaded `.vsix` file
+4. Select the downloaded `ollamapilot-0.2.0.vsix` file
 5. Reload VS Code when prompted
 
-### Option C — Install via command line
+### Option B — Install via command line
 
 ```bash
+# Download the .vsix file from releases, then:
+code --install-extension ollamapilot-0.2.0.vsix
+```
+
+### Option C — Build from source
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/dtenney/Ollama_Agent.git
+cd Ollama_Agent
+
+# 2. Install dependencies
+npm install
+
+# 3. Build the extension
+npm run build
+
+# 4. Package as .vsix
+npx vsce package
+
+# 5. Install the extension
 code --install-extension ollamapilot-0.2.0.vsix
 ```
 
@@ -561,7 +569,7 @@ Contributions are warmly welcome! Whether it's a bug fix, a new feature, better 
 
 ### Ways to contribute
 
-- 🐛 **Report bugs** — open an [Issue](https://github.com/kchikech/Ollama_Agent/issues) with reproduction steps
+- 🐛 **Report bugs** — open an [Issue](https://github.com/dtenney/Ollama_Agent/issues) with reproduction steps
 - 💡 **Suggest features** — open an Issue with the `enhancement` label
 - 🔧 **Submit a PR** — see [Development Setup](#-development-setup) below
 - 📖 **Improve docs** — typos, clarity, missing info
@@ -586,7 +594,7 @@ Be kind, be constructive. We follow the [Contributor Covenant](https://www.contr
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/kchikech/Ollama_Agent.git
+git clone https://github.com/dtenney/Ollama_Agent.git
 cd Ollama_Agent
 
 # 2. Install dev dependencies
@@ -678,7 +686,7 @@ This tests HTTP connectivity, lists models, and runs a streaming test. Output ap
 - [ ] Memory UI panel (browse/edit notes without the agent)
 - [ ] Export / import project memory
 
-> Have a feature idea? [Open an issue](https://github.com/kchikech/Ollama_Agent/issues/new?labels=enhancement) — community feedback drives the roadmap.
+> Have a feature idea? [Open an issue](https://github.com/dtenney/Ollama_Agent/issues/new?labels=enhancement) — community feedback drives the roadmap.
 
 ---
 
@@ -754,7 +762,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 **Made with ❤️ by the open-source community**
 
-[Report a Bug](https://github.com/kchikech/Ollama_Agent/issues) · [Request a Feature](https://github.com/kchikech/Ollama_Agent/issues) · [Contribute](CONTRIBUTING.md)
+[Report a Bug](https://github.com/dtenney/Ollama_Agent/issues) · [Request a Feature](https://github.com/dtenney/Ollama_Agent/issues) · [Contribute](CONTRIBUTING.md)
 
 ⭐ Star this repo if you find it useful!
 
