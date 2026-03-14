@@ -42,7 +42,8 @@ type WebviewMsg =
     | { command: 'updatePinnedFiles'; files: string[] }
     | { command: 'compactContext' }
     | { command: 'undoLastTool' }
-    | { command: 'applyCodeBlock'; code: string; lang: string };
+    | { command: 'applyCodeBlock'; code: string; lang: string }
+    | { command: 'webviewError'; text: string };
 
 // ── Serialised session summary sent to the webview ───────────────────────────
 
@@ -309,7 +310,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     // Optionally inject git diff context
                     // Optionally inject git diff context
                     const gitCtx = cfg.injectGitDiff && this._currentWorkspaceRoot
-                        ? await buildGitDiffContext(this._currentWorkspaceRoot)
+                        ? await buildGitDiffContext(this._currentWorkspaceRoot, text)
                         : '';
 
                     const fullMessage = ctx || mentionCtx || symbolCtx || smartCtx || gitCtx
@@ -566,6 +567,13 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                 case 'applyCodeBlock': {
                     const applyMsg = raw as { command: 'applyCodeBlock'; code: string; lang: string };
                     await this.applyCodeBlock(applyMsg.code, applyMsg.lang);
+                    break;
+                }
+
+                // ── Webview JS error reporting ────────────────────────────────
+                case 'webviewError': {
+                    const errMsg = raw as { command: 'webviewError'; text: string };
+                    logError(errMsg.text);
                     break;
                 }
             }

@@ -109,11 +109,30 @@ export async function getGitDiff(root: string): Promise<GitDiffResult | null> {
     }
 }
 
+// ── Smart diff relevance ──────────────────────────────────────────────────────
+
+/** Keywords that suggest the user is asking about recent changes. */
+const CHANGE_KEYWORDS = /\b(change[ds]?|diff|commit|uncommitted|staged|unstaged|modified|broke|break|breaking|fail|failing|error|bug|regress|recent|last\s+edit|what\s+did\s+i|review\s+(my|the|code)|what('s|\s+is)\s+(wrong|different)|fix(ed|ing)?|undo|revert|working\s+on)\b/i;
+
+/** Returns true if the user message appears to be about code changes. */
+export function isChangeRelated(message: string): boolean {
+    return CHANGE_KEYWORDS.test(message);
+}
+
 /**
  * Build the context block to inject into the user message.
+ * When `userMessage` is provided, only injects the diff if the message
+ * appears to be about recent changes (smart mode). Pass `undefined` to
+ * always inject (legacy behaviour).
  * Returns an empty string if there are no changes or git is unavailable.
  */
-export async function buildGitDiffContext(root: string): Promise<string> {
+export async function buildGitDiffContext(root: string, userMessage?: string): Promise<string> {
+    // Smart filtering: skip diff when the message isn't change-related
+    if (userMessage !== undefined && !isChangeRelated(userMessage)) {
+        logInfo('[gitContext] Message not change-related — skipping diff injection');
+        return '';
+    }
+
     const result = await getGitDiff(root);
     if (!result || result.clean || !result.diff) { return ''; }
 

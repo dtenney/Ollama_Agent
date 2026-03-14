@@ -3,6 +3,16 @@
 
 const vscode = acquireVsCodeApi();
 
+// ── Debug: catch and report any JS errors back to the extension ───────────────
+window.onerror = function(msg, src, line, col, err) {
+    const detail = `[webview error] ${msg} at line ${line}:${col}\n${err?.stack || ''}`;
+    try { vscode.postMessage({ command: 'webviewError', text: detail }); } catch(_) {}
+    // Also show in the UI so user can see it
+    const el = document.getElementById('status-text');
+    if (el) { el.textContent = 'JS Error — check Output panel'; el.style.color = '#f44747'; }
+    console.error(detail);
+};
+
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const messagesEl       = /** @type {HTMLDivElement}     */ (document.getElementById('messages'));
 const welcomeEl        = /** @type {HTMLDivElement}     */ (document.getElementById('welcome'));
@@ -1972,7 +1982,13 @@ function addUserMessage(text, timestamp) {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 
-setStatus('checking', 'Connecting…');
-// Request models + current editor context
-vscode.postMessage({ command: 'getModels' });
-vscode.postMessage({ command: 'getContext' });
+try {
+    setStatus('checking', 'Connecting…');
+    // Request models + current editor context
+    vscode.postMessage({ command: 'getModels' });
+    vscode.postMessage({ command: 'getContext' });
+} catch (initErr) {
+    const el = document.getElementById('status-text');
+    if (el) { el.textContent = 'Init error: ' + initErr.message; el.style.color = '#f44747'; }
+    try { vscode.postMessage({ command: 'webviewError', text: '[webview init] ' + initErr.stack }); } catch(_) {}
+}
