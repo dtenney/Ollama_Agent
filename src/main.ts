@@ -11,6 +11,7 @@ import { QdrantClient } from './qdrantClient';
 import { EmbeddingService } from './embeddingService';
 import { MemoryViewProvider, MemoryTreeItem } from './memoryViewProvider';
 import { OllamaCodeActionsProvider } from './codeActionsProvider';
+import { OllamaCodeLensProvider } from './codeLensProvider';
 import { OllamaInlineCompletionProvider } from './inlineCompletionProvider';
 import { ChatExporter } from './chatExporter';
 import { MultiWorkspaceManager } from './multiWorkspace';
@@ -176,6 +177,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         )
     );
 
+    // ── Code Lens Provider ("✨ Explain" above functions) ────────────────────
+    const codeLensConfig = vscode.workspace.getConfiguration('ollamaAgent');
+    if (codeLensConfig.get<boolean>('codeLens.enabled', false)) {
+        const codeLensProvider = new OllamaCodeLensProvider();
+        context.subscriptions.push(
+            vscode.languages.registerCodeLensProvider(
+                { scheme: 'file' },
+                codeLensProvider
+            )
+        );
+        logInfo('[codeLens] Code lens provider registered');
+    }
+
     // ── Inline Completion Provider ──────────────────────────────────────────
     const inlineConfig = vscode.workspace.getConfiguration('ollamaAgent');
     if (inlineConfig.get<boolean>('inlineCompletions.enabled', false)) {
@@ -293,12 +307,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 case 'bugs':
                     prompt = `Analyze this ${args.language} code for potential bugs and issues:\n\n\`\`\`${args.language}\n${args.selection}\n\`\`\``;
                     break;
-                case 'tests':
-                    prompt = `Generate unit tests for this ${args.language} code:\n\n\`\`\`${args.language}\n${args.selection}\n\`\`\``;
+                case 'tests': {
+                    const testFramework: Record<string, string> = {
+                        python: 'pytest', javascript: 'Jest', typescript: 'Jest',
+                        java: 'JUnit', kotlin: 'JUnit', go: 'testing package',
+                        rust: '#[test]', csharp: 'xUnit', ruby: 'RSpec', php: 'PHPUnit',
+                    };
+                    const fw = testFramework[args.language] || 'the standard test framework';
+                    prompt = `Generate unit tests for this ${args.language} code using ${fw}. Cover edge cases and error paths. Create the test file using create_file:\n\n\`\`\`${args.language}\n${args.selection}\n\`\`\``;
                     break;
-                case 'docs':
-                    prompt = `Add ${args.language === 'python' ? 'docstring' : 'JSDoc'} documentation to this code:\n\n\`\`\`${args.language}\n${args.selection}\n\`\`\``;
+                }
+                case 'docs': {
+                    const docStyle: Record<string, string> = {
+                        python: 'Google-style docstrings',
+                        javascript: 'JSDoc', typescript: 'JSDoc/TSDoc',
+                        java: 'Javadoc', kotlin: 'KDoc',
+                        rust: '/// doc comments', go: 'Go doc comments',
+                        csharp: 'XML doc comments', php: 'PHPDoc',
+                        ruby: 'YARD', c: 'Doxygen', cpp: 'Doxygen',
+                    };
+                    const style = docStyle[args.language] || 'appropriate documentation comments';
+                    prompt = `Add ${style} to every function/class/method in this ${args.language} code. Include parameter types, return types, and descriptions. Use edit_file to apply the changes to ${args.filename}:\n\n\`\`\`${args.language}\n${args.selection}\n\`\`\``;
                     break;
+                }
                 default:
                     prompt = `Help with this ${args.language} code:\n\n\`\`\`${args.language}\n${args.selection}\n\`\`\``;
             }

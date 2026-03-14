@@ -11,15 +11,16 @@ node_modules/
 # ── Generated vendor bundle (rebuilt by npm run vendor) ───────────────────────
 webview/vendor/highlight.bundle.js
 
-# ── Tests (dev-only) ─────────────────────────────────────────────────────────
-src/test/
-
 # ── Dev scripts (not needed by users) ─────────────────────────────────────────
 scripts/generate-banner.py
 
 # ── Session / planning docs (internal) ────────────────────────────────────────
+SESSION_STATE.md
 SESSION_FINAL_STATE.md
 IMPLEMENTATION_PLAN.md
+SYNERGY_AUDIT.md
+PYTHON_TOOLING_TODO.md
+CONTEXT_MANAGEMENT_TODO.md
 PHASE_*.md
 BUGFIXES*.md
 BUG_REPORT*.md

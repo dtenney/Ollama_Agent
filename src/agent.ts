@@ -7,7 +7,7 @@ import { spawn } from 'child_process';
 import { streamChatRequest, OllamaMessage, OllamaToolCall, StreamResult, ToolsNotSupportedError } from './ollamaClient';
 import { getConfig } from './config';
 import { logInfo, logError, logWarn } from './logger';
-import { buildWorkspaceSummary, SKIP_DIRS } from './workspace';
+import { buildWorkspaceSummary, SKIP_DIRS, detectPythonEnvironment, formatPythonEnvironment, PythonEnvironment } from './workspace';
 import { ProjectMemory } from './projectMemory';
 import { TieredMemoryManager } from './memoryCore';
 import { isMCPTool, parseMCPToolName, callMCPTool, mcpToolsToOllamaFormat } from './mcpClient';
@@ -163,7 +163,7 @@ export const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'run_command',
-            description: 'Run a shell command in the workspace directory. Output streams live to the chat. Requires user confirmation.',
+            description: 'Run a shell command in the workspace directory. Output streams live to the chat. Requires user confirmation. Use this for: running tests (pytest, npm test), linting (ruff, eslint), type checking (mypy, tsc), installing dependencies, running scripts, git operations, and any other CLI tool.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -295,7 +295,59 @@ export const TOOL_DEFINITIONS = [
     },
 ];
 
-function buildSystemPrompt(autoSaveMemory: boolean): string {
+function buildProjectTypeGuidance(workspaceRoot: string): string {
+    const pyEnv = detectPythonEnvironment(workspaceRoot);
+    if (!pyEnv) { return ''; }
+
+    const lines: string[] = ['\n## Python Project Environment', 'This is a Python project. Use run_command for these tasks:'];
+
+    // Test command
+    if (pyEnv.testFramework === 'pytest') {
+        lines.push('- Run tests: `python -m pytest -v` (or `pytest -v`)');
+    } else {
+        lines.push('- Run tests: `python -m unittest discover`');
+    }
+
+    // Lint command
+    if (pyEnv.linter) {
+        const cmd = pyEnv.linter === 'ruff' ? 'ruff check .' : pyEnv.linter === 'flake8' ? 'flake8 .' : 'pylint .';
+        lines.push(`- Lint code: \`${cmd}\``);
+    }
+
+    // Type checker
+    if (pyEnv.typeChecker) {
+        lines.push(`- Type check: \`${pyEnv.typeChecker} .\``);
+    }
+
+    // Formatter
+    if (pyEnv.formatter) {
+        lines.push(`- Format code: \`${pyEnv.formatter} .\``);
+    }
+
+    // Install deps
+    const installCmd = {
+        pip: 'pip install -r requirements.txt',
+        poetry: 'poetry install',
+        pipenv: 'pipenv install',
+        uv: 'uv sync',
+    }[pyEnv.packageManager] ?? 'pip install -r requirements.txt';
+    lines.push(`- Install deps: \`${installCmd}\``);
+    lines.push('- Run scripts: `python <script.py>`');
+    lines.push('- Check syntax: `python -m py_compile <file.py>`');
+
+    // Detected tools summary
+    const tools: string[] = [pyEnv.packageManager];
+    if (pyEnv.linter) { tools.push(pyEnv.linter); }
+    if (pyEnv.typeChecker) { tools.push(pyEnv.typeChecker); }
+    if (pyEnv.testFramework) { tools.push(pyEnv.testFramework); }
+    if (pyEnv.formatter && pyEnv.formatter !== pyEnv.linter) { tools.push(pyEnv.formatter); }
+    lines.push(`\nDetected tools: ${tools.join(', ')}`);
+    if (pyEnv.venvPath) { lines.push(`Virtual env: ${pyEnv.venvPath}`); }
+
+    return lines.join('\n');
+}
+
+function buildSystemPrompt(autoSaveMemory: boolean, workspaceRoot?: string): string {
     const memoryGuidelines = autoSaveMemory
         ? `- AUTOMATICALLY save important information to memory as you discover it:
   * When you discover server URLs, IPs, ports → immediately save to Tier 0 (critical)
@@ -328,7 +380,7 @@ You have access to the user's workspace through the following tools:
   append_to_file     — append text to a file
   rename_file        — rename or move a file
   delete_file        — delete a file (destructive, use carefully)
-  run_command        — execute shell commands (npm, git, etc.)
+  run_command        — execute shell commands (tests, linters, type checkers, package managers, git, etc.)
   memory_list        — recall saved facts/decisions about this project
   memory_write       — persist important facts, decisions, or context across sessions
   memory_delete      — remove a stale memory note
@@ -344,7 +396,8 @@ Guidelines:
 - Your persistent memory is automatically loaded (Tiers 0-2) and shown above.
 ${memoryGuidelines}
 - Use memory_search to find relevant past solutions without loading all memories.
-- Be concise and accurate. Format all code with markdown fenced code blocks.`;
+- Be concise and accurate. Format all code with markdown fenced code blocks.
+${workspaceRoot ? buildProjectTypeGuidance(workspaceRoot) : ''}`;
 }
 
 // ── Text-mode tool calling (fallback for models without native tool support) ──
@@ -429,6 +482,12 @@ EXAMPLE - User asks "find README":
 WRONG: "You can call search_files with query README"
 WRONG: Showing JSON in a code block
 CORRECT: <tool>{"name": "search_files", "arguments": {"query": "README"}}</tool>
+
+EXAMPLE - User says "run the tests":
+CORRECT: <tool>{"name": "run_command", "arguments": {"command": "python -m pytest -v"}}</tool>
+
+EXAMPLE - User says "check for lint errors":
+CORRECT: <tool>{"name": "run_command", "arguments": {"command": "ruff check ."}}</tool>
 
 Available tools and their argument schemas:
   workspace_summary   — {}
@@ -704,6 +763,9 @@ export class Agent {
     /** Track consecutive failed tool calls to prevent infinite loops */
     private consecutiveFailures = 0;
     private readonly MAX_CONSECUTIVE_FAILURES = 3;
+    /** Track mode-switch retries to prevent infinite retry loops */
+    private modeSwitchRetries = 0;
+    private readonly MAX_MODE_SWITCH_RETRIES = 2;
     /** Maximum number of messages to keep in history to prevent memory leaks */
     private readonly MAX_HISTORY_MESSAGES = 100;
     /** Track last context warning level to avoid duplicate alerts */
@@ -713,6 +775,8 @@ export class Agent {
 
     private diffViewManager: DiffViewManager;
     private refactorManager: MultiFileRefactoringManager;
+    /** Last file operation for undo support */
+    private _lastFileOp: { path: string; originalContent: string | null; action: string } | null = null;
 
     constructor(
         private workspaceRoot: string,
@@ -794,6 +858,36 @@ export class Agent {
         };
     }
 
+    /** Undo the last file-modifying tool execution. Returns a description or null if nothing to undo. */
+    undoLastTool(): string | null {
+        if (!this._lastFileOp) { return null; }
+        const op = this._lastFileOp;
+        this._lastFileOp = null;
+        const full = path.resolve(this.workspaceRoot, op.path);
+        try {
+            if (op.action === 'created') {
+                if (fs.existsSync(full)) { fs.unlinkSync(full); }
+                return `Undone: removed created file ${op.path}`;
+            }
+            if (op.action === 'deleted' && op.originalContent !== null) {
+                fs.mkdirSync(path.dirname(full), { recursive: true });
+                fs.writeFileSync(full, op.originalContent, 'utf8');
+                return `Undone: restored deleted file ${op.path}`;
+            }
+            if (op.originalContent !== null) {
+                fs.writeFileSync(full, op.originalContent, 'utf8');
+                return `Undone: reverted ${op.path} to previous content`;
+            }
+            return null;
+        } catch (err) {
+            logError(`[agent] Undo failed: ${(err as Error).message}`);
+            return null;
+        }
+    }
+
+    /** Whether an undo operation is available */
+    get canUndo(): boolean { return this._lastFileOp !== null; }
+
     async run(userMessage: string, model: string, post: PostFn): Promise<void> {
         this.stopRef = { stop: false };
         this.postFn  = post;
@@ -811,7 +905,7 @@ export class Agent {
         logInfo(`Agent run — model: ${model}, mode: ${this.toolMode}, history: ${this.history.length}`);
 
         const cfg = getConfig();
-        const baseSystemContent = cfg.systemPrompt.trim() || buildSystemPrompt(cfg.autoSaveMemory);
+        const baseSystemContent = cfg.systemPrompt.trim() || buildSystemPrompt(cfg.autoSaveMemory, this.workspaceRoot);
         
         // Build memory context from auto-load tiers
         let memoryContext = '';
@@ -830,7 +924,9 @@ export class Agent {
             }
         }
 
-        const MAX_TURNS = 10;
+        const MAX_TURNS = 5;
+        this.modeSwitchRetries = 0;
+        let loopExhausted = true;
         for (let turn = 0; turn < MAX_TURNS; turn++) {
             if (this.stopRef.stop) { break; }
 
@@ -941,13 +1037,16 @@ This memory persists across all conversations. Use memory_write to add new infor
                     post({ type: 'streamEnd' });
                     post({ type: 'removeLastAssistant' });
                     post({ type: 'modeSwitch', mode: 'text', model });
-                    turn--; // retry this turn in text mode
+                    if (++this.modeSwitchRetries <= this.MAX_MODE_SWITCH_RETRIES) {
+                        turn--; // retry this turn in text mode
+                    }
                     continue;
                 }
 
                 const msg = (err as Error).message;
                 logError(`Agent stream error (turn ${turn}): ${msg}`);
                 post({ type: 'error', text: this.friendlyError(msg) });
+                loopExhausted = false;
                 break;
             }
 
@@ -993,7 +1092,9 @@ This memory persists across all conversations. Use memory_write to add new infor
                         post({ type: 'streamEnd' });
                         post({ type: 'removeLastAssistant' });
                         post({ type: 'modeSwitch', mode: 'text', model });
-                        turn--;
+                        if (++this.modeSwitchRetries <= this.MAX_MODE_SWITCH_RETRIES) {
+                            turn--;
+                        }
                         continue;
                     }
                 }
@@ -1006,7 +1107,23 @@ This memory persists across all conversations. Use memory_write to add new infor
                 ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
             });
 
-            if (!toolCalls.length) { break; }
+            if (!toolCalls.length) {
+                // Post final context stats so webview can show running %
+                const finalStats = calculateContextStats(
+                    this.history,
+                    systemContent,
+                    memoryContext,
+                    model
+                );
+                post({
+                    type: 'contextStats',
+                    percentage: finalStats.usagePercentage,
+                    totalTokens: finalStats.totalTokens,
+                    modelLimit: finalStats.modelLimit
+                });
+                loopExhausted = false;
+                break;
+            }
 
             // ── Execute tool calls ────────────────────────────────────────────
             for (const tc of toolCalls) {
@@ -1054,6 +1171,12 @@ This memory persists across all conversations. Use memory_write to add new infor
                     this.history.push({ role: 'tool', content: toolResult });
                 }
             }
+        }
+
+        // If we exhausted all turns without the model producing a final answer, tell the user
+        if (loopExhausted && !this.stopRef.stop) {
+            logWarn(`[agent] Loop exhausted after ${MAX_TURNS} turns without a final response`);
+            post({ type: 'error', text: `Agent stopped after ${MAX_TURNS} tool rounds without a final answer. Try rephrasing your request or start a new chat.` });
         }
     }
 
@@ -1225,6 +1348,7 @@ This memory persists across all conversations. Use memory_write to add new infor
                 }
                 fs.mkdirSync(path.dirname(full), { recursive: true });
                 fs.writeFileSync(full, content, 'utf8');
+                this._lastFileOp = { path: rel, originalContent: null, action: 'created' };
                 this.postFn({ type: 'fileChanged', path: rel, action: 'created' });
                 return `Created: ${rel} (${content.split('\n').length} lines)`;
             }
@@ -1270,6 +1394,7 @@ This memory persists across all conversations. Use memory_write to add new infor
                 if (!diffResult.accepted) { return 'Edit cancelled by user.'; }
 
                 fs.writeFileSync(full, newContent, 'utf8');
+                this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
                 this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
                 return `Edited: ${rel} — ${oldString.split('\n').length} line(s) replaced with ${newString.split('\n').length} line(s)`;
             }
@@ -1280,6 +1405,7 @@ This memory persists across all conversations. Use memory_write to add new infor
                 const content = String(args.content ?? '');
                 if (!rel) { throw new Error('path is required'); }
                 const full = this.safePath(root, rel);
+                const originalContent = fs.existsSync(full) ? fs.readFileSync(full, 'utf8') : null;
 
                 const action = await vscode.window.showWarningMessage(
                     `Ollama Agent wants to overwrite "${rel}" (${content.split('\n').length} lines)`,
@@ -1289,6 +1415,7 @@ This memory persists across all conversations. Use memory_write to add new infor
 
                 fs.mkdirSync(path.dirname(full), { recursive: true });
                 fs.writeFileSync(full, content, 'utf8');
+                this._lastFileOp = { path: rel, originalContent, action: 'written' };
                 this.postFn({ type: 'fileChanged', path: rel, action: 'written' });
                 return `Written: ${rel} (${content.split('\n').length} lines)`;
             }
@@ -1302,7 +1429,9 @@ This memory persists across all conversations. Use memory_write to add new infor
                 if (!fs.existsSync(full)) {
                     throw new Error(`File not found: ${rel}. Use create_file instead.`);
                 }
+                const beforeAppend = fs.readFileSync(full, 'utf8');
                 fs.appendFileSync(full, content, 'utf8');
+                this._lastFileOp = { path: rel, originalContent: beforeAppend, action: 'appended' };
                 this.postFn({ type: 'fileChanged', path: rel, action: 'appended' });
                 return `Appended ${content.length} chars to ${rel}`;
             }
@@ -1332,6 +1461,7 @@ This memory persists across all conversations. Use memory_write to add new infor
                 const rel = String(args.path ?? '');
                 if (!rel) { throw new Error('path is required'); }
                 const full = this.safePath(root, rel);
+                const originalContent = fs.readFileSync(full, 'utf8');
 
                 const action = await vscode.window.showWarningMessage(
                     `Ollama Agent wants to DELETE "${rel}". This cannot be undone.`,
@@ -1340,6 +1470,7 @@ This memory persists across all conversations. Use memory_write to add new infor
                 if (action !== 'Delete') { return 'Delete cancelled by user.'; }
 
                 fs.unlinkSync(full);
+                this._lastFileOp = { path: rel, originalContent, action: 'deleted' };
                 this.postFn({ type: 'fileChanged', path: rel, action: 'deleted' });
                 return `Deleted: ${rel}`;
             }

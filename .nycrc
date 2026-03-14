@@ -1,0 +1,7 @@
+{
+  "include": ["dist/**/*.js"],
+  "exclude": ["dist/test/**", "dist/main.js", "dist/provider.js"],
+  "reporter": ["text", "text-summary", "html"],
+  "report-dir": "coverage",
+  "all": true
+}

@@ -34,6 +34,7 @@ const searchResults    = /** @type {HTMLSpanElement}   */ (document.getElementBy
 const searchPrevBtn    = /** @type {HTMLButtonElement} */ (document.getElementById('search-prev'));
 const searchNextBtn    = /** @type {HTMLButtonElement} */ (document.getElementById('search-next'));
 const searchClearBtn   = /** @type {HTMLButtonElement} */ (document.getElementById('search-clear'));
+const contextUsageEl   = /** @type {HTMLSpanElement}   */ (document.getElementById('context-usage'));
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -862,11 +863,83 @@ function addFileToast(filePath, action) {
     const div = document.createElement('div');
     const isEdit   = action === 'edited'  || action === 'written' || action === 'appended';
     const isDelete = action === 'deleted';
+    const isCreate = action === 'created';
     div.className = `file-toast${isEdit ? ' edited' : ''}${isDelete ? ' deleted' : ''}`;
     const icon = FILE_ACTION_ICONS[action] ?? '📁';
     div.innerHTML = `${icon} <span>${escHtml(action.charAt(0).toUpperCase() + action.slice(1))}: <strong>${escHtml(filePath)}</strong></span>`;
+    if (isEdit || isDelete || isCreate) {
+        const btn = document.createElement('button');
+        btn.className = 'compact-btn';
+        btn.textContent = '↩ Undo';
+        btn.addEventListener('click', () => {
+            vscode.postMessage({ command: 'undoLastTool' });
+            btn.disabled = true;
+            btn.textContent = 'Undoing…';
+        });
+        div.appendChild(btn);
+    }
     messagesEl.insertBefore(div, scrollBtn);
     scrollBottom();
+}
+
+// ── Context toast notifications ─────────────────────────────────────────────
+
+function addFileToastSimple(icon, text) {
+    const div = document.createElement('div');
+    div.className = 'file-toast';
+    div.innerHTML = `${icon} <span>${escHtml(text)}</span>`;
+    messagesEl.insertBefore(div, scrollBtn);
+    scrollBottom();
+}──
+
+/**
+ * Show a context warning/compacted/overflow toast in the chat.
+ * @param {'warning'|'compacted'|'overflow'} kind
+ * @param {string} text
+ * @param {boolean} showCompactBtn
+ */
+function addContextToast(kind, text, showCompactBtn) {
+    const icons = { warning: '⚠️', compacted: '📦', overflow: '🔴' };
+    const div = document.createElement('div');
+    div.className = `context-toast ${kind}`;
+    div.innerHTML = `${icons[kind] || '⚠️'} <span>${escHtml(text)}</span>`;
+    if (showCompactBtn) {
+        const btn = document.createElement('button');
+        btn.className = 'compact-btn';
+        btn.textContent = 'Compact Now';
+        btn.addEventListener('click', () => {
+            vscode.postMessage({ command: 'compactContext' });
+            btn.disabled = true;
+            btn.textContent = 'Compacting…';
+        });
+        div.appendChild(btn);
+    }
+    messagesEl.insertBefore(div, scrollBtn);
+    scrollBottom();
+}
+
+/**
+ * Update the running context usage indicator in the footer.
+ * @param {number} percentage
+ */
+function updateContextUsage(percentage) {
+    if (!contextUsageEl) return;
+    if (percentage <= 0) {
+        contextUsageEl.textContent = '';
+        contextUsageEl.className = '';
+        return;
+    }
+    const pct = Math.round(percentage);
+    contextUsageEl.textContent = `${pct}% context`;
+    if (percentage >= 99) {
+        contextUsageEl.className = 'over';
+    } else if (percentage >= 70) {
+        contextUsageEl.className = 'critical';
+    } else if (percentage >= 50) {
+        contextUsageEl.className = 'warn';
+    } else {
+        contextUsageEl.className = '';
+    }
 }
 
 // ── Mode-switch notice (native → text-mode tool calling) ─────────────────────
@@ -1473,6 +1546,35 @@ window.addEventListener('message', (event) => {
                 const fileList = smartContextFiles.join(', ');
                 console.log(`[smart-context] Auto-included: ${fileList}`);
             }
+            break;
+
+        case 'contextWarning':
+            addContextToast('warning',
+                `Context at ${Math.round(msg.percentage)}% — consider starting a new chat or compacting`,
+                true);
+            updateContextUsage(msg.percentage);
+            break;
+
+        case 'contextCompacted':
+            addContextToast('compacted',
+                `Context auto-compacted: removed ${msg.messagesRemoved} old message${msg.messagesRemoved !== 1 ? 's' : ''}`,
+                false);
+            updateContextUsage(msg.newPercentage);
+            break;
+
+        case 'contextOverflow':
+            addContextToast('overflow',
+                `Context at ${Math.round(msg.percentage)}% — responses may be truncated`,
+                true);
+            updateContextUsage(msg.percentage);
+            break;
+
+        case 'contextStats':
+            updateContextUsage(msg.percentage);
+            break;
+
+        case 'undoResult':
+            addFileToastSimple(msg.success ? '↩️' : '⚠️', msg.message);
             break;
     }
 });

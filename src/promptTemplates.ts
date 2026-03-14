@@ -91,13 +91,44 @@ export class TemplateManager {
         return [...new Set(matches.map(m => m.slice(1, -1)))];
     }
 
-    /** Substitute variables in a template prompt. */
+    /** Substitute variables in a template prompt. Supports:
+     *  - `{variable}` — simple replacement
+     *  - `{?variable}...{/variable}` — conditional block (included only if variable is non-empty)
+     */
     static substitute(prompt: string, values: Record<string, string>): string {
-        let result = prompt;
-        for (const [key, value] of Object.entries(values)) {
-            result = result.replace(new RegExp(`\\{${key}\\}`, 'g'), value);
+        // Process conditional blocks first: {?var}...{/var}
+        let result = prompt.replace(
+            /\{\?(\w+)\}([\s\S]*?)\{\/\1\}/g,
+            (_match, key, body) => (values[key]?.trim() ? body : '')
+        );
+        // Then simple variable replacement (longest keys first to prevent partial matches)
+        const keys = Object.keys(values).sort((a, b) => b.length - a.length);
+        for (const key of keys) {
+            result = result.replace(new RegExp(`\\{${key}\\}`, 'g'), values[key] ?? '');
         }
         return result;
+    }
+
+    /** Export all custom templates as JSON string. */
+    exportTemplates(): string {
+        const custom = this.getCustom();
+        return JSON.stringify({ version: 1, templates: custom }, null, 2);
+    }
+
+    /** Import templates from a JSON string. Returns count of imported templates. */
+    async importTemplates(json: string): Promise<number> {
+        const data = JSON.parse(json) as { templates?: PromptTemplate[] };
+        if (!data.templates || !Array.isArray(data.templates)) {
+            throw new Error('Invalid template file: missing templates array');
+        }
+        let count = 0;
+        for (const t of data.templates) {
+            if (t.name && t.prompt) {
+                await this.save({ ...t, builtin: false, variables: TemplateManager.extractVariables(t.prompt) });
+                count++;
+            }
+        }
+        return count;
     }
 }
 
@@ -110,7 +141,9 @@ export async function showManageTemplatesUI(manager: TemplateManager): Promise<v
         [
             { label: '$(add) Create New Template', action: 'create' },
             ...(custom.length > 0 ? [{ label: '$(edit) Edit Template', action: 'edit' }] : []),
-            ...(custom.length > 0 ? [{ label: '$(trash) Delete Template', action: 'delete' }] : [])
+            ...(custom.length > 0 ? [{ label: '$(trash) Delete Template', action: 'delete' }] : []),
+            ...(custom.length > 0 ? [{ label: '$(export) Export Templates', action: 'export' }] : []),
+            { label: '$(import) Import Templates', action: 'import' }
         ],
         { placeHolder: 'Manage Prompt Templates' }
     );
@@ -126,6 +159,12 @@ export async function showManageTemplatesUI(manager: TemplateManager): Promise<v
             break;
         case 'delete':
             await deleteTemplate(manager);
+            break;
+        case 'export':
+            await exportTemplates(manager);
+            break;
+        case 'import':
+            await importTemplates(manager);
             break;
     }
 }
@@ -185,4 +224,32 @@ async function deleteTemplate(manager: TemplateManager): Promise<void> {
 
     await manager.delete(selected.name);
     vscode.window.showInformationMessage(`Template "${selected.name}" deleted`);
+}
+
+async function exportTemplates(manager: TemplateManager): Promise<void> {
+    const json = manager.exportTemplates();
+    const uri = await vscode.window.showSaveDialog({
+        defaultUri: vscode.Uri.file('ollama-templates.json'),
+        filters: { 'JSON': ['json'] }
+    });
+    if (!uri) return;
+    const fs = await import('fs');
+    fs.writeFileSync(uri.fsPath, json, 'utf8');
+    vscode.window.showInformationMessage(`Exported ${manager.getCustom().length} template(s)`);
+}
+
+async function importTemplates(manager: TemplateManager): Promise<void> {
+    const uris = await vscode.window.showOpenDialog({
+        canSelectMany: false,
+        filters: { 'JSON': ['json'] }
+    });
+    if (!uris || uris.length === 0) return;
+    const fs = await import('fs');
+    const json = fs.readFileSync(uris[0].fsPath, 'utf8');
+    try {
+        const count = await manager.importTemplates(json);
+        vscode.window.showInformationMessage(`Imported ${count} template(s)`);
+    } catch (err) {
+        vscode.window.showErrorMessage(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
 }

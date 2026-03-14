@@ -798,6 +798,59 @@
     }
     #token-indicator.warn  { color: #e5c07b; opacity: 1; }
     #token-indicator.over  { color: #f44747; opacity: 1; }
+
+    /* ── Context usage indicator ─────────────────────────────────────────── */
+    #context-usage {
+      font-size: 10px;
+      color: var(--vscode-descriptionForeground, #888);
+      opacity: 0.65;
+      white-space: nowrap;
+      transition: color 0.2s;
+    }
+    #context-usage.warn  { color: #e5c07b; opacity: 1; }
+    #context-usage.critical { color: #f48771; opacity: 1; }
+    #context-usage.over  { color: #f44747; opacity: 1; font-weight: 600; }
+
+    /* ── Context toast notifications ─────────────────────────────────────── */
+    .context-toast {
+      margin: 2px 14px;
+      padding: 5px 10px;
+      font-size: 11px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .context-toast.warning {
+      background: rgba(229,192,123,0.1);
+      border: 1px solid rgba(229,192,123,0.35);
+      color: #e5c07b;
+    }
+    .context-toast.compacted {
+      background: rgba(79,193,255,0.08);
+      border: 1px solid rgba(79,193,255,0.3);
+      color: var(--vscode-textLink-foreground, #4fc1ff);
+    }
+    .context-toast.overflow {
+      background: rgba(244,71,71,0.1);
+      border: 1px solid rgba(244,71,71,0.35);
+      color: #f44747;
+    }
+    .context-toast .compact-btn {
+      font-size: 10px;
+      background: none;
+      border: 1px solid currentColor;
+      color: inherit;
+      border-radius: 3px;
+      padding: 1px 6px;
+      cursor: pointer;
+      margin-left: auto;
+      flex-shrink: 0;
+      font-family: inherit;
+    }
+    .context-toast .compact-btn:hover {
+      background: rgba(255,255,255,0.08);
+    }
   </style>
 </head>
 <body>
@@ -886,6 +939,7 @@
         <button id="template-toggle-btn" style="margin-left:8px;font-size:10px;background:none;border:1px solid var(--vscode-panel-border,rgba(128,128,128,0.3));color:var(--vscode-descriptionForeground,#888);border-radius:3px;padding:2px 7px;cursor:pointer;font-family:inherit;" title="Toggle templates">📝 Templates</button>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
+        <span id="context-usage"></span>
         <span id="token-indicator"></span>
         <button id="stop-btn">■ Stop</button>
       </div>

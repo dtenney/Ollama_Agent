@@ -5,20 +5,29 @@ All notable changes to OllamaPilot will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.1] - 2026-03-13
+## [0.3.1] - 2025-06-13
 
 ### Added
-- **Comprehensive test suite** — 147 unit tests across 11 modules (Mocha + Sinon)
-- **Marketplace banner** — 1280×640 dark-themed banner image
-- `npm test` and `npm run test:unit` scripts
-- Test running instructions in README
+- **Python tooling integration** — auto-detects Python environment (linter, formatter, test framework, type checker, package manager) and injects project-specific guidance into the system prompt
+- **Code Lens provider** — "✨ Explain" and "📝 Document" lenses above functions/classes for 12 languages (opt-in via `ollamaAgent.codeLens.enabled`)
+- **Undo last tool** — "↩ Undo" button on file operation toasts to revert create/edit/write/append/delete
+- **Language-aware documentation** — docs code action uses correct doc style per language (JSDoc, docstrings, Javadoc, KDoc, Doxygen, YARD, PHPDoc, etc.)
+- **Language-aware test generation** — tests code action uses correct framework per language (pytest, Jest, JUnit, xUnit, RSpec, PHPUnit, etc.)
+- **Advanced prompt templates** — conditional blocks `{?var}...{/var}`, export/import templates as JSON
+- **E2E tests** — 13 integration tests for workspace module (Python detection, file tree, etc.)
+- **Code coverage** — `npm run test:coverage` via nyc/istanbul
+- **esbuild bundling** — extension now ships as a single bundled file
 
 ### Changed
-- Removed 17 intermediate session/status markdown files
-- Updated CHANGELOG with v0.3.0-alpha and v0.4.0-alpha entries
-- Updated README roadmap: all features marked complete
+- **Package size reduced from 2,627 files (10.9 MB) to 14 files (6.9 MB)** via esbuild bundling
+- Test suite expanded to 160 tests across 12 modules
+- `run_command` tool description now mentions pytest, ruff, mypy, eslint, tsc
+- Text-mode tool instructions include Python-specific examples
 
-## [0.4.0-alpha] - 2026-03-13
+### Fixed
+- Unreachable `break` statement in code action switch (dead code removed)
+
+## [0.4.0-alpha] - 2025-03-13
 
 ### Added
 - **Enhanced diff view** with accept/reject options and keyboard shortcuts (Alt+A/Alt+R)
@@ -35,7 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cleaned up 17 intermediate session/status markdown files
 - Updated roadmap to reflect all completed features
 
-## [0.3.0-alpha] - 2026-03-13
+## [0.3.0-alpha] - 2025-03-13
 
 ### Added
 - **Explain selection shortcut** — `Ctrl+Shift+E` / `Cmd+Shift+E` to instantly explain selected code
@@ -55,7 +64,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Race condition in smart context file limit (uses config)
 - Template variable substitution sorts keys by length to prevent partial replacements
 
-## [0.2.0] - 2026-03-12
+## [0.2.0] - 2025-03-12
 
 ### Added
 - **Multi-tiered memory system** with 6 tiers (Critical → Archive) for intelligent context management
@@ -81,7 +90,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enhanced tool instructions for better multi-part information handling
 - Memory entries now stored with proper tier-based organization
 
-## [0.1.0] - 2026-03-01
+## [0.1.0] - 2025-03-01
 
 ### Added
 - Initial release

@@ -10,12 +10,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/kchikech/Ollama_Agent"
+    "url": "https://github.com/dtenney/Ollama_Agent"
   },
   "bugs": {
-    "url": "https://github.com/kchikech/Ollama_Agent/issues"
+    "url": "https://github.com/dtenney/Ollama_Agent/issues"
   },
-  "homepage": "https://github.com/kchikech/Ollama_Agent#readme",
+  "homepage": "https://github.com/dtenney/Ollama_Agent#readme",
   "sponsor": {
     "url": "https://github.com/sponsors/kchikech"
   },
@@ -43,10 +43,14 @@
   "main": "dist/main.js",
   "scripts": {
     "vendor": "node scripts/vendor-hljs.js",
-    "build": "npm run vendor && tsc",
-    "vscode:prepublish": "npm run build",
-    "test": "npm run build && node ./dist/test/runTests.js",
-    "test:unit": "npm run build && mocha dist/test/unit/**/*.test.js"
+    "compile": "npm run vendor && tsc",
+    "bundle": "npm run vendor && node esbuild.js",
+    "bundle:prod": "npm run vendor && node esbuild.js --production",
+    "build": "npm run compile",
+    "vscode:prepublish": "npm run bundle:prod",
+    "test": "npm run compile && node ./dist/test/runTests.js",
+    "test:unit": "npm run compile && mocha dist/test/unit/**/*.test.js",
+    "test:coverage": "npm run compile && nyc mocha dist/test/unit/**/*.test.js"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.6",
@@ -55,8 +59,10 @@
     "@types/vscode": "^1.80.0",
     "@vscode/test-electron": "^2.3.9",
     "@vscode/vsce": "^2.22.0",
+    "esbuild": "^0.27.4",
     "highlight.js": "^11.11.1",
     "mocha": "^10.3.0",
+    "nyc": "^18.0.0",
     "sinon": "^17.0.1",
     "typescript": "^5.0.0"
   },
@@ -425,6 +431,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Automatically compact conversation history when context reaches 99% of model's limit. You'll be alerted at 70% usage and reminded until 99%, then auto-compact will trigger if enabled."
+        },
+        "ollamaAgent.codeLens.enabled": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Show \"✨ Explain\" and \"📝 Document\" lenses above functions and classes. **Note:** May add visual clutter in large files."
         },
         "ollamaAgent.inlineCompletions.enabled": {
           "type": "boolean",

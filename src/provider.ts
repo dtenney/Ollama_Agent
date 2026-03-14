@@ -37,7 +37,9 @@ type WebviewMsg =
     | MsgDeleteSession | MsgClearSessions | MsgSearchFiles | MsgSetPreset
     | MsgGetTemplates | MsgToggleSmartContext
     | { command: 'searchSymbols'; query: string }
-    | { command: 'updatePins'; pins: string[] };
+    | { command: 'updatePins'; pins: string[] }
+    | { command: 'compactContext' }
+    | { command: 'undoLastTool' };
 
 // ── Serialised session summary sent to the webview ───────────────────────────
 
@@ -493,6 +495,32 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     const pinMsg = raw as { command: 'updatePins'; pins: string[] };
                     this.currentSession.pinnedMsgIds = pinMsg.pins;
                     this.persistSession();
+                    break;
+                }
+
+                // ── Manual context compaction ─────────────────────────────
+                case 'compactContext': {
+                    const result = this._agent!.compactContext(50);
+                    post({
+                        type: 'contextCompacted',
+                        messagesRemoved: result.removed,
+                        newPercentage: result.newPercentage
+                    });
+                    this.currentSession.agentHistory = this._agent!.conversationHistory;
+                    this.persistSession();
+                    logInfo(`[provider] Manual compact: removed ${result.removed} messages`);
+                    break;
+                }
+
+                // ── Undo last tool execution ──────────────────────────────
+                case 'undoLastTool': {
+                    const undoResult = this._agent!.undoLastTool();
+                    if (undoResult) {
+                        post({ type: 'undoResult', success: true, message: undoResult });
+                        logInfo(`[provider] ${undoResult}`);
+                    } else {
+                        post({ type: 'undoResult', success: false, message: 'Nothing to undo' });
+                    }
                     break;
                 }
             }

@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { execSync } from 'child_process';
 
 // Directories to ignore during all workspace scans
 export const SKIP_DIRS = new Set([
@@ -153,6 +154,86 @@ export function getRecentlyModifiedFiles(root: string, maxFiles = 10): string[] 
         .map((f) => f.rel);
 }
 
+// ── Python environment detection ──────────────────────────────────────────────
+
+export interface PythonEnvironment {
+    pythonVersion?: string;
+    venvPath?: string;
+    packageManager: string;
+    linter?: string;
+    typeChecker?: string;
+    testFramework?: string;
+    formatter?: string;
+}
+
+export function detectPythonEnvironment(root: string): PythonEnvironment | null {
+    const type = detectProjectType(root);
+    if (!type.startsWith('Python')) { return null; }
+
+    const env: PythonEnvironment = { packageManager: 'pip' };
+
+    // Python version
+    for (const cmd of ['python --version', 'python3 --version']) {
+        try {
+            env.pythonVersion = execSync(cmd, { cwd: root, timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }).toString().trim();
+            break;
+        } catch { /* not found */ }
+    }
+
+    // Virtual environment
+    if (process.env.VIRTUAL_ENV) {
+        env.venvPath = process.env.VIRTUAL_ENV;
+    } else {
+        for (const dir of ['venv', '.venv', 'env']) {
+            const candidate = path.join(root, dir);
+            if (fs.existsSync(path.join(candidate, 'pyvenv.cfg'))) {
+                env.venvPath = candidate;
+                break;
+            }
+        }
+    }
+
+    // Package manager
+    if (fs.existsSync(path.join(root, 'poetry.lock'))) { env.packageManager = 'poetry'; }
+    else if (fs.existsSync(path.join(root, 'Pipfile.lock')) || fs.existsSync(path.join(root, 'Pipfile'))) { env.packageManager = 'pipenv'; }
+    else if (fs.existsSync(path.join(root, 'uv.lock'))) { env.packageManager = 'uv'; }
+
+    // Read pyproject.toml once for tool detection
+    let pyproject = '';
+    try { pyproject = fs.readFileSync(path.join(root, 'pyproject.toml'), 'utf8'); } catch { /* no pyproject */ }
+
+    // Linter
+    if (pyproject.includes('[tool.ruff]') || fs.existsSync(path.join(root, 'ruff.toml'))) { env.linter = 'ruff'; }
+    else if (pyproject.includes('[tool.flake8]') || fs.existsSync(path.join(root, 'setup.cfg'))) { env.linter = 'flake8'; }
+    else if (fs.existsSync(path.join(root, '.pylintrc')) || pyproject.includes('[tool.pylint]')) { env.linter = 'pylint'; }
+
+    // Type checker
+    if (fs.existsSync(path.join(root, 'pyrightconfig.json')) || pyproject.includes('[tool.pyright]')) { env.typeChecker = 'pyright'; }
+    else if (fs.existsSync(path.join(root, 'mypy.ini')) || fs.existsSync(path.join(root, '.mypy.ini')) || pyproject.includes('[tool.mypy]')) { env.typeChecker = 'mypy'; }
+
+    // Test framework
+    if (fs.existsSync(path.join(root, 'pytest.ini')) || fs.existsSync(path.join(root, 'conftest.py')) || pyproject.includes('[tool.pytest]')) { env.testFramework = 'pytest'; }
+    else { env.testFramework = 'unittest'; }
+
+    // Formatter
+    if (pyproject.includes('[tool.black]')) { env.formatter = 'black'; }
+    else if (env.linter === 'ruff') { env.formatter = 'ruff format'; }
+
+    return env;
+}
+
+export function formatPythonEnvironment(env: PythonEnvironment): string {
+    const lines: string[] = [];
+    if (env.pythonVersion) { lines.push(`  Python: ${env.pythonVersion}`); }
+    if (env.venvPath) { lines.push(`  Virtual env: ${env.venvPath}`); }
+    lines.push(`  Package manager: ${env.packageManager}`);
+    if (env.linter) { lines.push(`  Linter: ${env.linter}`); }
+    if (env.typeChecker) { lines.push(`  Type checker: ${env.typeChecker}`); }
+    if (env.testFramework) { lines.push(`  Test framework: ${env.testFramework}`); }
+    if (env.formatter) { lines.push(`  Formatter: ${env.formatter}`); }
+    return lines.join('\n');
+}
+
 // ── Full workspace summary (used as a tool result) ────────────────────────────
 
 export function buildWorkspaceSummary(root: string): string {
@@ -161,9 +242,18 @@ export function buildWorkspaceSummary(root: string): string {
     const keyFiles = getKeyFilesSummary(root);
     const recent = getRecentlyModifiedFiles(root, 8);
 
-    return [
+    const sections = [
         `Workspace: ${path.basename(root)}`,
         `Type: ${type}`,
+    ];
+
+    // Include Python environment details for Python projects
+    const pyEnv = detectPythonEnvironment(root);
+    if (pyEnv) {
+        sections.push('', '── Python environment ──', formatPythonEnvironment(pyEnv));
+    }
+
+    sections.push(
         '',
         '── File tree ──',
         tree,
@@ -173,5 +263,7 @@ export function buildWorkspaceSummary(root: string): string {
         '',
         `── Recently modified (top ${recent.length}) ──`,
         recent.map((f) => `  ${f}`).join('\n') || '  (none)',
-    ].join('\n');
+    );
+
+    return sections.join('\n');
 }
