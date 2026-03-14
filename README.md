@@ -238,7 +238,7 @@ That's it. The agent will start responding immediately.
 ### 📝 Prompt Templates
 - **6 built-in templates** — Add Tests, JSDoc, Explain Error, Refactor, Type Hints, Optimize
 - **Custom templates** — Create and manage your own reusable prompts
-- **Variable substitution** — Templates support `{{selection}}`, `{{language}}`, `{{filename}}` placeholders
+- **Variable substitution** — Templates support `{selection}`, `{language}`, `{filename}` placeholders
 - **Template manager** — Access via command palette: "Ollama: Manage Prompt Templates"
 
 ### 🧠 Smart Context Selection

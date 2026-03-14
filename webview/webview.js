@@ -1406,7 +1406,7 @@ window.addEventListener('message', (event) => {
             break;
 
         case 'sessionLoaded':
-            renderStoredSession(msg.session, msg.messages);
+            renderStoredSession(msg.session, msg.messages, msg.pinnedMsgIds);
             break;
 
         case 'sessionSaved':
@@ -1573,7 +1573,7 @@ function renderSessionList(sessions, currentId) {
  * @param {SessionSummary} session
  * @param {Array<{role: string, content: string, timestamp: number}>} messages
  */
-function renderStoredSession(session, messages) {
+function renderStoredSession(session, messages, savedPins) {
     clearChat();
     activeSessionId = session.id;
 
@@ -1588,6 +1588,17 @@ function renderStoredSession(session, messages) {
             addErrorMessage(msg.content);
         }
     });
+
+    // Restore pinned messages
+    if (savedPins && savedPins.length) {
+        pinnedIds = new Set(savedPins);
+        messagesEl.querySelectorAll('.message[data-msg-id]').forEach(m => {
+            if (pinnedIds.has(m.dataset.msgId)) {
+                m.querySelector('.pin-btn')?.classList.add('pinned');
+            }
+        });
+        renderPinnedSection();
+    }
 }
 
 /**

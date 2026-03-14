@@ -27,6 +27,8 @@ export interface ChatSession {
      * Restored when the user re-opens a session so the model has prior context.
      */
     agentHistory: OllamaMessage[];
+    /** IDs of pinned messages (persisted across reloads). */
+    pinnedMsgIds?: string[];
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────

@@ -36,7 +36,8 @@ type WebviewMsg =
     | MsgRetryLast | MsgGetContext   | MsgListSessions  | MsgLoadSession
     | MsgDeleteSession | MsgClearSessions | MsgSearchFiles | MsgSetPreset
     | MsgGetTemplates | MsgToggleSmartContext
-    | { command: 'searchSymbols'; query: string };
+    | { command: 'searchSymbols'; query: string }
+    | { command: 'updatePins'; pins: string[] };
 
 // ── Serialised session summary sent to the webview ───────────────────────────
 
@@ -413,6 +414,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         type: 'sessionLoaded',
                         session: toSummary(session),
                         messages: session.messages,
+                        pinnedMsgIds: session.pinnedMsgIds || [],
                     });
                     break;
                 }
@@ -485,6 +487,14 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     logInfo(`[provider] Smart context ${this._smartContextEnabled ? 'enabled' : 'disabled'}`);
                     break;
                 }
+
+                // ── Pin persistence ───────────────────────────────────────
+                case 'updatePins': {
+                    const pinMsg = raw as { command: 'updatePins'; pins: string[] };
+                    this.currentSession.pinnedMsgIds = pinMsg.pins;
+                    this.persistSession();
+                    break;
+                }
             }
         });
 
@@ -514,6 +524,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         type: 'sessionLoaded',
                         session: toSummary(this.currentSession),
                         messages: this.currentSession.messages,
+                        pinnedMsgIds: this.currentSession.pinnedMsgIds || [],
                     });
                 }, 300); // small delay so the webview JS has time to initialise
             }
@@ -557,14 +568,13 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
     /** Get current chat messages for export. */
     getCurrentChatMessages(): Array<{ role: 'user' | 'assistant' | 'system'; content: string; timestamp?: number }> {
-        if (!this._agent) {
-            return [];
-        }
-        return this._agent.conversationHistory.map(msg => ({
-            role: msg.role as 'user' | 'assistant' | 'system',
-            content: msg.content,
-            timestamp: Date.now()
-        }));
+        return this.currentSession.messages
+            .filter(m => m.role === 'user' || m.role === 'assistant')
+            .map(msg => ({
+                role: msg.role as 'user' | 'assistant' | 'system',
+                content: msg.content,
+                timestamp: msg.timestamp
+            }));
     }
 
     /** Get current chat title. */

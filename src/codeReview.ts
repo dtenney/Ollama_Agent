@@ -1,6 +1,10 @@
 import * as vscode from 'vscode';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { getGitDiff } from './gitContext';
 import { logInfo, logWarn } from './logger';
+
+const execAsync = promisify(exec);
 
 export interface ReviewRequest {
     prompt: string;
@@ -24,7 +28,7 @@ export async function buildReviewRequest(root: string): Promise<ReviewRequest | 
     }
 
     const prompt =
-        `Review my uncommitted changes. For each file, note:\n` +
+        `Review my uncommitted changes. First check project memory for relevant conventions, then for each file note:\n` +
         `- Potential bugs or logic errors\n` +
         `- Security concerns\n` +
         `- Style or readability improvements\n` +
@@ -44,10 +48,6 @@ export async function buildCommitReviewRequest(
     root: string,
     commitRange: string
 ): Promise<ReviewRequest | null> {
-    const { exec } = require('child_process');
-    const { promisify } = require('util');
-    const execAsync = promisify(exec);
-
     try {
         const opts = { cwd: root, timeout: 10_000 };
         const { stdout: diff } = await execAsync(`git diff ${commitRange}`, opts);
@@ -63,7 +63,7 @@ export async function buildCommitReviewRequest(
         const clipped = truncated ? diff.slice(0, MAX) + '\n\n… (diff truncated)' : diff;
 
         const prompt =
-            `Review these changes (${commitRange}). For each file, note:\n` +
+            `Review these changes (${commitRange}). First check project memory for relevant conventions, then for each file note:\n` +
             `- Potential bugs or logic errors\n` +
             `- Security concerns\n` +
             `- Style or readability improvements\n` +
