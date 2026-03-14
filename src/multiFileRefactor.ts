@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { logInfo, logError } from './logger';
 
 export interface FileChange {
@@ -111,7 +112,7 @@ export class MultiFileRefactoringManager {
             
             // Create temp file with new content
             const tmpPath = path.join(
-                require('os').tmpdir(),
+                os.tmpdir(),
                 `ollama-refactor-${Date.now()}-${path.basename(change.path)}`
             );
             fs.writeFileSync(tmpPath, change.newContent, 'utf8');

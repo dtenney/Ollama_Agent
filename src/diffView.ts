@@ -4,14 +4,6 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { logInfo } from './logger';
 
-export interface DiffHunk {
-    oldStart: number;
-    oldLines: number;
-    newStart: number;
-    newLines: number;
-    lines: string[];
-}
-
 export interface DiffResult {
     accepted: boolean;
     hunks?: number[]; // Indices of accepted hunks (for partial accept)
@@ -104,54 +96,4 @@ export class DiffViewManager {
         }
     }
 
-    /**
-     * Parse unified diff format into hunks
-     */
-    private parseHunks(oldContent: string, newContent: string): DiffHunk[] {
-        const oldLines = oldContent.split('\n');
-        const newLines = newContent.split('\n');
-        const hunks: DiffHunk[] = [];
-
-        let i = 0, j = 0;
-        while (i < oldLines.length || j < newLines.length) {
-            // Find next difference
-            while (i < oldLines.length && j < newLines.length && oldLines[i] === newLines[j]) {
-                i++;
-                j++;
-            }
-
-            if (i >= oldLines.length && j >= newLines.length) break;
-
-            // Found a difference - create hunk
-            const hunkStart = i;
-            const hunkNewStart = j;
-            const hunkLines: string[] = [];
-
-            // Collect changed lines
-            while (i < oldLines.length || j < newLines.length) {
-                if (i < oldLines.length && (j >= newLines.length || oldLines[i] !== newLines[j])) {
-                    hunkLines.push(`-${oldLines[i]}`);
-                    i++;
-                } else if (j < newLines.length) {
-                    hunkLines.push(`+${newLines[j]}`);
-                    j++;
-                }
-
-                // Check if we've reached matching lines again
-                if (i < oldLines.length && j < newLines.length && oldLines[i] === newLines[j]) {
-                    break;
-                }
-            }
-
-            hunks.push({
-                oldStart: hunkStart,
-                oldLines: i - hunkStart,
-                newStart: hunkNewStart,
-                newLines: j - hunkNewStart,
-                lines: hunkLines
-            });
-        }
-
-        return hunks;
-    }
 }

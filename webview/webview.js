@@ -87,6 +87,9 @@ let mentionSelectedIdx = 0;
 /** @type {Array<{rel: string, display: string, ext: string}>} */
 let mentionResults = [];
 
+/** When true, next mention selection pins the file instead of @mentioning it */
+let pinModeActive = false;
+
 // ── Template state ────────────────────────────────────────────────────────────
 
 /** Available templates (built-in + custom). */
@@ -100,6 +103,9 @@ let templateBarVisible = false;
 /** Smart context files included in last message. */
 /** @type {string[]} */
 let smartContextFiles = [];
+
+/** @type {Array<{rel: string, display: string, ext: string}>} Pinned files (always-in-context) */
+let pinnedFiles = [];
 
 // ── Search state ──────────────────────────────────────────────────────────────
 
@@ -171,6 +177,7 @@ function updateTokenIndicator() {
     // Add rough estimate for each mentioned file (we don't have content here,
     // use a conservative 500 tokens per mention as placeholder)
     totalChars += mentionedFiles.length * 2000;
+    totalChars += pinnedFiles.length * 2000;
     if (ctx.includeFile && ctx.fileLines) { totalChars += ctx.fileLines * 40; }
 
     const estimated = estimateTokens(totalChars);
@@ -384,7 +391,10 @@ function renderMarkdown(text) {
 
         const header = `<div class="code-header">` +
             `<span class="code-lang-label">${escHtml(lang || 'code')}</span>` +
+            `<div style="display:flex;gap:6px;">` +
+            `<button class="apply-btn" data-apply-idx="${i}">Apply</button>` +
             `<button class="copy-btn" data-copy-idx="${i}">Copy</button>` +
+            `</div>` +
             `</div>`;
         text = text.replace(
             `\x01CB${i}\x01`,
@@ -416,18 +426,35 @@ function renderMarkdown(text) {
 
 messagesEl.addEventListener('click', (e) => {
     const btn = /** @type {HTMLElement} */ (e.target);
-    if (!btn.classList.contains('copy-btn')) { return; }
-    const block = btn.closest('.code-block');
-    if (!block) { return; }
-    const pre = block.querySelector('pre');
-    if (!pre) { return; }
-    navigator.clipboard?.writeText(pre.textContent ?? '').then(() => {
-        btn.textContent = 'Copied!';
-        setTimeout(() => (btn.textContent = 'Copy'), 1500);
-    }).catch(() => {
-        // Fallback for environments where clipboard API is restricted
-        btn.textContent = 'Copy';
-    });
+
+    // Copy button
+    if (btn.classList.contains('copy-btn')) {
+        const block = btn.closest('.code-block');
+        if (!block) { return; }
+        const pre = block.querySelector('pre');
+        if (!pre) { return; }
+        navigator.clipboard?.writeText(pre.textContent ?? '').then(() => {
+            btn.textContent = 'Copied!';
+            setTimeout(() => (btn.textContent = 'Copy'), 1500);
+        }).catch(() => {
+            btn.textContent = 'Copy';
+        });
+        return;
+    }
+
+    // Apply button
+    if (btn.classList.contains('apply-btn')) {
+        const block = btn.closest('.code-block');
+        if (!block) { return; }
+        const pre = block.querySelector('pre');
+        if (!pre) { return; }
+        const lang = block.querySelector('.code-lang-label')?.textContent ?? '';
+        vscode.postMessage({ command: 'applyCodeBlock', code: pre.textContent ?? '', lang });
+        btn.textContent = 'Applying…';
+        btn.disabled = true;
+        setTimeout(() => { btn.textContent = 'Apply'; btn.disabled = false; }, 2000);
+        return;
+    }
 });
 
 // ── Scroll helpers ────────────────────────────────────────────────────────────
@@ -467,6 +494,8 @@ const TOOL_ICONS = {
     memory_list:       '🧠',
     memory_write:      '💡',
     memory_delete:     '🗑️',
+    get_diagnostics:   '💡',
+    read_terminal:     '🖥️',
 };
 
 // ── Time helper ───────────────────────────────────────────────────────────────
@@ -758,6 +787,24 @@ function updateContextBar() {
             ` <span class="mention-pill-remove" data-remove-rel="${escHtml(f.rel)}">×</span>`;
         contextBar.appendChild(pill);
     });
+
+    // Pinned file pills
+    pinnedFiles.forEach((f) => {
+        const pill = document.createElement('span');
+        pill.className = 'pinned-file-pill';
+        pill.title = `📌 ${f.rel} (always included)`;
+        pill.innerHTML =
+            `📌 ${escHtml(f.display)}` +
+            ` <span class="pinned-file-remove" data-unpin-rel="${escHtml(f.rel)}">×</span>`;
+        contextBar.appendChild(pill);
+    });
+
+    // Pin file button
+    const pinBtn = document.createElement('button');
+    pinBtn.id = 'pin-file-btn';
+    pinBtn.title = 'Pin a file (always include in context)';
+    pinBtn.textContent = '📌+';
+    contextBar.appendChild(pinBtn);
 }
 
 contextBar.addEventListener('click', (e) => {
@@ -768,6 +815,31 @@ contextBar.addEventListener('click', (e) => {
         mentionedFiles = mentionedFiles.filter((f) => f.rel !== el.dataset.removeRel);
         updateContextBar();
         updateTokenIndicator();
+        return;
+    }
+
+    // Handle pinned file removal
+    if (el.dataset.unpinRel) {
+        pinnedFiles = pinnedFiles.filter((f) => f.rel !== el.dataset.unpinRel);
+        vscode.postMessage({ command: 'updatePinnedFiles', files: pinnedFiles.map(f => f.rel) });
+        updateContextBar();
+        updateTokenIndicator();
+        return;
+    }
+
+    // Handle pin-file button — trigger file search in pin mode
+    if (el.id === 'pin-file-btn') {
+        pinModeActive = true;
+        // Preserve existing input text; append @ at cursor position
+        const cursorPos = promptEl.selectionStart ?? promptEl.value.length;
+        const before = promptEl.value.slice(0, cursorPos);
+        const after = promptEl.value.slice(cursorPos);
+        promptEl.value = before + '@' + after;
+        promptEl.focus();
+        promptEl.selectionStart = promptEl.selectionEnd = cursorPos + 1;
+        mentionAtStart = cursorPos;
+        mentionQuery = '';
+        vscode.postMessage({ command: 'searchFiles', query: '' });
         return;
     }
 
@@ -890,7 +962,7 @@ function addFileToastSimple(icon, text) {
     div.innerHTML = `${icon} <span>${escHtml(text)}</span>`;
     messagesEl.insertBefore(div, scrollBtn);
     scrollBottom();
-}──
+}
 
 /**
  * Show a context warning/compacted/overflow toast in the chat.
@@ -974,6 +1046,7 @@ function sendMessage() {
     const text = promptEl.value.trim();
     if (!text || streaming) { return; }
 
+    pushInputHistory(text);
     addUserMessage(text);
     promptEl.value = '';
     autoResize();
@@ -996,6 +1069,7 @@ function sendMessage() {
         includeSelection: ctx.includeSelection,
         mentionedFiles: filesToSend,
         mentionedSymbols: symbolsToSend,
+        pinnedFiles: pinnedFiles.map(f => f.rel),
     });
 }
 
@@ -1025,6 +1099,107 @@ function autoResize() {
     promptEl.style.height = `${Math.min(promptEl.scrollHeight, 140)}px`;
 }
 promptEl.addEventListener('input', () => { autoResize(); updateTokenIndicator(); });
+
+// ── Chat input history (↑/↓ arrow) ───────────────────────────────────────────
+
+/** @type {string[]} */
+const inputHistory = [];
+let inputHistoryIdx = -1;
+let inputHistoryDraft = '';
+const MAX_INPUT_HISTORY = 50;
+
+function pushInputHistory(text) {
+    if (!text.trim()) { return; }
+    // Deduplicate last entry
+    if (inputHistory.length && inputHistory[inputHistory.length - 1] === text) { return; }
+    inputHistory.push(text);
+    if (inputHistory.length > MAX_INPUT_HISTORY) { inputHistory.shift(); }
+    inputHistoryIdx = -1;
+}
+
+promptEl.addEventListener('keydown', (e) => {
+    // Only activate when mention dropdown is hidden
+    if (mentionDropdown.style.display !== 'none') { return; }
+    if (e.key === 'ArrowUp' && promptEl.value === '' && inputHistory.length) {
+        e.preventDefault();
+        if (inputHistoryIdx === -1) { inputHistoryDraft = promptEl.value; inputHistoryIdx = inputHistory.length; }
+        if (inputHistoryIdx > 0) {
+            inputHistoryIdx--;
+            promptEl.value = inputHistory[inputHistoryIdx];
+            autoResize();
+        }
+        return;
+    }
+    if (e.key === 'ArrowDown' && inputHistoryIdx >= 0) {
+        e.preventDefault();
+        inputHistoryIdx++;
+        if (inputHistoryIdx >= inputHistory.length) {
+            inputHistoryIdx = -1;
+            promptEl.value = inputHistoryDraft;
+        } else {
+            promptEl.value = inputHistory[inputHistoryIdx];
+        }
+        autoResize();
+        return;
+    }
+});
+
+// ── Slash commands ─────────────────────────────────────────────────────────
+
+const SLASH_COMMANDS = {
+    '/test':     { label: '/test',     desc: 'Generate tests for selection or file',   prompt: 'Write comprehensive tests for the following code. Use the project\'s existing test framework.\n\n' },
+    '/fix':      { label: '/fix',      desc: 'Fix errors in selection or file',         prompt: 'Find and fix all bugs and errors in the following code. Explain each fix.\n\n' },
+    '/review':   { label: '/review',   desc: 'Code review with suggestions',            prompt: 'Review the following code for bugs, security issues, performance problems, and style. Provide specific suggestions.\n\n' },
+    '/doc':      { label: '/doc',      desc: 'Add documentation / comments',            prompt: 'Add clear, concise documentation comments to the following code. Use the language\'s standard doc format.\n\n' },
+    '/explain':  { label: '/explain',  desc: 'Explain how this code works',             prompt: 'Explain the following code step by step in plain language.\n\n' },
+    '/refactor': { label: '/refactor', desc: 'Refactor for clarity and maintainability', prompt: 'Refactor the following code to improve readability, maintainability, and performance. Show the changes.\n\n' },
+    '/optimize': { label: '/optimize', desc: 'Optimize for performance',                prompt: 'Optimize the following code for performance. Explain the improvements.\n\n' },
+};
+
+const slashDropdown = document.createElement('div');
+slashDropdown.id = 'slash-dropdown';
+slashDropdown.style.cssText = mentionDropdown.style.cssText;
+slashDropdown.style.display = 'none';
+document.getElementById('input-container').appendChild(slashDropdown);
+
+let slashResults = [];
+let slashSelectedIdx = 0;
+
+function showSlashDropdown(filter) {
+    const q = filter.toLowerCase();
+    slashResults = Object.values(SLASH_COMMANDS).filter(c => c.label.includes(q) || c.desc.toLowerCase().includes(q));
+    slashSelectedIdx = 0;
+    slashDropdown.innerHTML = '';
+    if (!slashResults.length) { slashDropdown.style.display = 'none'; return; }
+    slashResults.forEach((c, i) => {
+        const item = document.createElement('div');
+        item.className = 'mention-item' + (i === 0 ? ' selected' : '');
+        item.innerHTML = `<span class="mention-item-base">${escHtml(c.label)}</span><span class="mention-item-rel">${escHtml(c.desc)}</span>`;
+        item.addEventListener('mousedown', (e) => { e.preventDefault(); selectSlashItem(i); });
+        slashDropdown.appendChild(item);
+    });
+    slashDropdown.style.display = 'block';
+}
+
+function hideSlashDropdown() { slashDropdown.style.display = 'none'; slashResults = []; }
+
+function updateSlashHighlight() {
+    const items = slashDropdown.querySelectorAll('.mention-item');
+    items.forEach((el, i) => el.classList.toggle('selected', i === slashSelectedIdx));
+    items[slashSelectedIdx]?.scrollIntoView({ block: 'nearest' });
+}
+
+function selectSlashItem(idx) {
+    const cmd = slashResults[idx];
+    if (!cmd) { return; }
+    // Replace the /command text with the expanded prompt
+    promptEl.value = cmd.prompt;
+    autoResize();
+    hideSlashDropdown();
+    promptEl.focus();
+    // Move cursor to end
+    promptEl.selectionStart = promptEl.selectionEnd = promptEl.value.length;
+}
 
 // ── @mention autocomplete ─────────────────────────────────────────────────────
 
@@ -1070,6 +1245,7 @@ function hideMentionDropdown() {
     mentionAtStart = -1;
     mentionQuery = '';
     mentionResults = [];
+    pinModeActive = false;
 }
 
 function selectMentionItem(idx) {
@@ -1082,6 +1258,25 @@ function selectMentionItem(idx) {
     const after  = val.slice(mentionAtStart + 1 + mentionQuery.length); // +1 for '@'
     promptEl.value = before + after;
     autoResize();
+
+    // If pin mode, add to pinned files instead of mentioned files
+    if (pinModeActive) {
+        pinModeActive = false;
+        if (!pinnedFiles.some((f) => f.rel === file.rel)) {
+            pinnedFiles.push(file);
+            vscode.postMessage({ command: 'updatePinnedFiles', files: pinnedFiles.map(f => f.rel) });
+        }
+        hideMentionDropdown();
+        // Restore input to what it was before the @ was injected
+        const val2 = promptEl.value;
+        const before2 = val2.slice(0, mentionAtStart);
+        const after2 = val2.slice(mentionAtStart + 1 + mentionQuery.length);
+        promptEl.value = before2 + after2;
+        autoResize();
+        updateContextBar();
+        updateTokenIndicator();
+        return;
+    }
 
     // Add to mentioned files (avoid duplicates)
     if (!mentionedFiles.some((f) => f.rel === file.rel)) {
@@ -1107,6 +1302,13 @@ promptEl.addEventListener('input', () => {
     const val = promptEl.value;
     const pos = promptEl.selectionStart ?? val.length;
 
+    // Check for slash command at start of input
+    if (val.startsWith('/') && !val.includes(' ') && !val.includes('\n')) {
+        showSlashDropdown(val);
+        return;
+    }
+    hideSlashDropdown();
+
     // Check if there's an active @ mention being typed
     const before = val.slice(0, pos);
     const atIdx = before.lastIndexOf('@');
@@ -1124,10 +1326,20 @@ promptEl.addEventListener('input', () => {
 
     // No active mention
     hideMentionDropdown();
+    pinModeActive = false;
     updateTokenIndicator();
 });
 
 promptEl.addEventListener('keydown', (e) => {
+    // Slash command dropdown navigation
+    if (slashDropdown.style.display !== 'none') {
+        if (e.key === 'ArrowDown')  { e.preventDefault(); slashSelectedIdx = (slashSelectedIdx + 1) % slashResults.length; updateSlashHighlight(); return; }
+        if (e.key === 'ArrowUp')    { e.preventDefault(); slashSelectedIdx = (slashSelectedIdx - 1 + slashResults.length) % slashResults.length; updateSlashHighlight(); return; }
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); selectSlashItem(slashSelectedIdx); return; }
+        if (e.key === 'Tab')        { e.preventDefault(); selectSlashItem(slashSelectedIdx); return; }
+        if (e.key === 'Escape')     { hideSlashDropdown(); return; }
+    }
+    // @mention dropdown navigation
     if (mentionDropdown.style.display !== 'none') {
         if (e.key === 'ArrowDown')  { e.preventDefault(); navigateMentionDropdown(+1); return; }
         if (e.key === 'ArrowUp')    { e.preventDefault(); navigateMentionDropdown(-1); return; }
@@ -1537,6 +1749,15 @@ window.addEventListener('message', (event) => {
 
         case 'smartContextRestored':
             smartContextToggle.checked = msg.enabled ?? false;
+            break;
+
+        case 'pinnedFilesRestored':
+            pinnedFiles = (msg.files ?? []).map(f => ({
+                rel: f.rel,
+                display: f.rel.split('/').pop() || f.rel,
+                ext: (f.rel.split('.').pop() || '').toLowerCase()
+            }));
+            updateContextBar();
             break;
 
         case 'smartContextFiles':

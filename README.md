@@ -9,7 +9,7 @@ A fully local, offline AI coding assistant for VS Code — powered by Ollama.
 
 [![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/kchikech.ollamapilot?label=Marketplace&color=007ACC&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
 [![Installs](https://img.shields.io/visual-studio-marketplace/i/kchikech.ollamapilot?label=Installs&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
-[![Version](https://img.shields.io/badge/version-0.3.1-blue.svg)](https://github.com/dtenney/Ollama_Agent/releases)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](https://github.com/dtenney/Ollama_Agent/releases)
 [![VS Code](https://img.shields.io/badge/VS%20Code-%5E1.80.0-007ACC.svg)](https://code.visualstudio.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
@@ -114,14 +114,14 @@ ollama serve
 1. Download the latest `.vsix` from the [Releases page](https://github.com/dtenney/Ollama_Agent/releases)
 2. Open VS Code
 3. Press `Ctrl+Shift+P` / `Cmd+Shift+P` → type **"Install from VSIX"**
-4. Select the downloaded `ollamapilot-0.3.1.vsix` file
+4. Select the downloaded `ollamapilot-0.4.0.vsix` file
 5. Reload VS Code when prompted
 
 ### Option B — Install via command line
 
 ```bash
 # Download the .vsix file from releases, then:
-code --install-extension ollamapilot-0.3.1.vsix
+code --install-extension ollamapilot-0.4.0.vsix
 ```
 
 ### Option C — Build from source
@@ -141,7 +141,7 @@ npm run build
 npx vsce package
 
 # 5. Install the extension
-code --install-extension ollamapilot-0.3.1.vsix
+code --install-extension ollamapilot-0.4.0.vsix
 ```
 
 ---
@@ -188,12 +188,14 @@ That's it. The agent will start responding immediately.
 
 ### 🤖 AI Agent
 - Multi-turn **agentic tool loop** — the AI can call tools, read results, then continue reasoning
-- Supports **14 workspace tools** (see [Agent Tools](#-agent-tools) below)
+- Supports **21 workspace tools** (see [Agent Tools](#-agent-tools) below)
 - **Live command output** — terminal output streams directly into the chat
 - **Diff preview** before applying file edits
 - **Confirmation dialogs** for all destructive actions (write, delete, run command)
 - **Automatic tool-mode fallback** — works with models that don't support native tool calling
 - **Project memory tools** — the AI can save and recall notes about your project
+- **Diagnostics-aware** — checks VS Code errors/warnings after edits and self-corrects
+- **Terminal reading** — reads output from VS Code integrated terminals
 
 ### 📎 @File Mentions
 - Type `@` in the input to trigger fuzzy file search
@@ -275,6 +277,29 @@ That's it. The agent will start responding immediately.
 - **Sanitized filenames** — Automatic filename cleaning for safe exports
 - **Open after save** — Option to immediately view exported file
 
+### ⚡ Slash Commands
+- **7 built-in commands** — `/test`, `/fix`, `/review`, `/doc`, `/explain`, `/refactor`, `/optimize`
+- **Autocomplete dropdown** — appears when typing `/` at start of input
+- **Keyboard navigation** — Arrow keys + Enter/Tab to select, Escape to dismiss
+- **Prompt expansion** — selected command expands to an optimized prompt
+
+### 📌 Pinned Files
+- **Always-in-context** — pin workspace files that stay attached across all messages
+- **Pin button** — click 📌+ in the context bar to pin via file search
+- **Visual pills** — pinned files shown as amber pills with × to remove
+- **Persistent** — pinned files survive across VS Code restarts
+
+### 🔧 Apply Code from Chat
+- **Apply button** — every code block in chat has an "Apply" button next to "Copy"
+- **Diff preview** — shows changes before applying, accept or reject
+- **Smart targeting** — replaces selection if one exists, otherwise replaces entire file
+
+### 📦 Context Compaction
+- **Auto-compact** — automatically compacts conversation when context window fills up
+- **Summary preservation** — dropped messages are summarized before removal
+- **Manual compact** — click "Compact Now" when context warning appears
+- **Usage indicator** — running context percentage shown in footer
+
 ---
 
 ## 🛠️ Agent Tools
@@ -301,6 +326,9 @@ The AI can autonomously call the following tools during a conversation:
 | `memory_tier_write` | Save to specific tier (0=critical, 1=essential, 2=operational, 3=collaboration, 4=references) | — |
 | `memory_tier_list` | List memories from specific tiers | — |
 | `memory_stats` | Get memory statistics (entry count and tokens per tier) | — |
+| `read_terminal` | Read recent output from VS Code integrated terminals | — |
+| `get_diagnostics` | Get VS Code errors/warnings for a file or workspace | — |
+| `refactor_multi_file` | Coordinated changes across multiple files with preview | ✅ |
 
 > **Safety:** All file modifications and command executions require explicit confirmation via a VS Code dialog. Paths are validated to stay within the workspace root. Dangerous command patterns (`rm -rf /`, `mkfs`, etc.) are blocked before the confirmation dialog even appears.
 
@@ -494,9 +522,11 @@ Open `Settings` (`Ctrl+,` / `Cmd+,`) and search for **"Ollama"** to see all opti
 | `Enter` | Send message |
 | `Shift+Enter` | New line in the message input |
 | `@` | Trigger file mention autocomplete |
-| `↑` / `↓` | Navigate the @mention dropdown |
-| `Tab` / `Enter` | Select highlighted @mention |
+| `↑` / `↓` | Navigate the @mention dropdown / cycle input history |
+| `Tab` / `Enter` | Select highlighted @mention or slash command |
 | `Escape` | Dismiss the @mention dropdown |
+| `/` | Trigger slash command autocomplete (at start of input) |
+| `Alt+C` | Trigger inline code completion |
 
 ---
 
@@ -744,8 +774,17 @@ This tests HTTP connectivity, lists models, and runs a streaming test. Output ap
 - [x] **Multi-workspace folder support** — isolated agents per workspace
 - [x] **`@symbol` mention** — attach a specific function or class
 
+### v0.5.0 — Agent Intelligence ✅
+- [x] **Diagnostics-aware agent** — `get_diagnostics` tool checks VS Code errors after edits
+- [x] **Apply code from chat** — "Apply" button on code blocks with diff preview
+- [x] **Slash commands** — 7 commands (`/test`, `/fix`, `/review`, `/doc`, `/explain`, `/refactor`, `/optimize`)
+- [x] **Chat input history** — ↑/↓ arrow keys to cycle through previous messages
+- [x] **Terminal output reading** — `read_terminal` tool reads VS Code integrated terminals
+- [x] **Pinned files** — always-in-context files that persist across messages and sessions
+- [x] **Compact with summary** — dropped messages are summarized before removal
+
 ### v1.0.0 — Stability 🚧 *in progress*
-- [x] **Comprehensive test suite** — 147 unit tests across 11 modules
+- [x] **Comprehensive test suite** — 160 unit tests across 11 modules
 - [x] **Extension icon** — professional marketplace icon
 - [x] **Marketplace banner** — 1280×640 dark-themed banner
 - [ ] Final version bump and marketplace publish

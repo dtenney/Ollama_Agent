@@ -1,4 +1,4 @@
-# ── Everything bundled into dist/main.js — exclude the rest ──────────────────
+# ── Everything bundled into dist/main.js — exclude the rest ───────────────────
 
 # Source & build tooling
 src/**
@@ -25,6 +25,8 @@ CONTRIBUTING.md
 CONTEXT_MANAGEMENT_TODO.md
 PYTHON_TOOLING_TODO.md
 SYNERGY_AUDIT.md
+NEXT_FEATURES.md
+GAP_ANALYSIS.md
 .ollamapilot/**
 
 # Build artefacts
@@ -48,9 +50,9 @@ vsce_ls.txt
 Thumbs.db
 
 # ── Keep in VSIX ─────────────────────────────────────────────────────────────
-# dist/main.js    ← single bundled extension file
-# webview/**      ← chat UI (HTML + JS + vendor hljs)
-# images/**       ← logo, banner, sidebar icon, demo gif
-# package.json    ← manifest
-# README.md       ← Marketplace description
+# dist/main.js     ← single bundled extension file
+# webview/**        ← chat UI (HTML + JS + vendor hljs)
+# images/**         ← logo, banner, sidebar icon, demo gif
+# package.json      ← manifest
+# README.md         ← Marketplace description
 # LICENSE

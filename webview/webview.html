@@ -207,8 +207,6 @@
       margin: 2px 12px; padding: 4px 8px; font-size: 12px;
     }
     #pinned-list .msg-content { max-height: 80px; overflow: hidden; }
-      gap: 8px;
-    }
     .msg-role {
       font-size: 10px;
       font-weight: 700;
@@ -268,7 +266,7 @@
       border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
     }
     .code-lang-label { font-size: 10px; opacity: 0.5; text-transform: uppercase; letter-spacing: 0.3px; }
-    .copy-btn {
+    .copy-btn, .apply-btn {
       font-size: 10px;
       background: none;
       border: none;
@@ -277,7 +275,9 @@
       padding: 0 2px;
       font-family: inherit;
     }
-    .copy-btn:hover { color: var(--vscode-sideBar-foreground, #ccc); }
+    .copy-btn:hover, .apply-btn:hover { color: var(--vscode-sideBar-foreground, #ccc); }
+    .apply-btn { color: var(--vscode-textLink-foreground, #4fc1ff); opacity: 0.7; }
+    .apply-btn:hover { opacity: 1; }
     .code-block pre {
       padding: 8px 10px;
       overflow-x: auto;
@@ -786,7 +786,59 @@
       line-height: 1;
     }
     .mention-pill-remove:hover { opacity: 1; color: #f44747; }
+
+    /* ── Pinned file pills ─────────────────────────────────────── */
+    .pinned-file-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 10px;
+      padding: 1px 5px 1px 6px;
+      border-radius: 10px;
+      border: 1px solid rgba(229,192,123,0.5);
+      color: #e5c07b;
+      background: rgba(229,192,123,0.08);
+      cursor: default;
+      user-select: none;
+      white-space: nowrap;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .pinned-file-remove {
+      flex-shrink: 0;
+      cursor: pointer;
+      opacity: 0.6;
+      font-size: 10px;
+      line-height: 1;
+    }
+    .pinned-file-remove:hover { opacity: 1; color: #f44747; }
+    #pin-file-btn {
+      font-size: 10px;
+      background: none;
+      border: 1px dashed var(--vscode-panel-border, rgba(128,128,128,0.3));
+      color: var(--vscode-descriptionForeground, #888);
+      border-radius: 10px;
+      padding: 1px 7px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    #pin-file-btn:hover { border-color: #e5c07b; color: #e5c07b; }
+
     #input-container { position: relative; }
+    #slash-dropdown {
+      position: absolute;
+      bottom: calc(100% + 4px);
+      left: 0;
+      right: 0;
+      max-height: 220px;
+      overflow-y: auto;
+      background: var(--vscode-editorSuggestWidget-background, #252526);
+      border: 1px solid var(--vscode-editorSuggestWidget-border, #454545);
+      border-radius: 5px;
+      z-index: 50;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    }
 
     /* ── Token / context indicator ───────────────────────────────────────── */
     #token-indicator {

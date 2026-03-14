@@ -1,7 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import { spawn } from 'child_process';
 
 import { streamChatRequest, OllamaMessage, OllamaToolCall, StreamResult, ToolsNotSupportedError } from './ollamaClient';
@@ -267,6 +266,34 @@ export const TOOL_DEFINITIONS = [
     {
         type: 'function',
         function: {
+            name: 'read_terminal',
+            description: 'Read recent output from VS Code integrated terminals. Use this when the user mentions terminal output, errors in their terminal, or when you need to see what a previously-run command produced.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    index: { type: 'number', description: 'Terminal index (0-based). Omit to read the active terminal.' },
+                },
+                required: [],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'get_diagnostics',
+            description: 'Get VS Code diagnostics (errors, warnings) for a file or the entire workspace. Use this after editing files to check if your changes introduced any problems, or when the user mentions errors in their code.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    path: { type: 'string', description: 'File path relative to workspace root. Omit to get diagnostics for all open files.' },
+                },
+                required: [],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
             name: 'refactor_multi_file',
             description: 'Propose coordinated changes across multiple files. Use this when a refactoring affects multiple files (e.g., renaming a function used in many places, restructuring modules). Shows a preview of all changes before applying.',
             parameters: {
@@ -388,11 +415,14 @@ You have access to the user's workspace through the following tools:
   memory_tier_write  — save to specific tier (0=critical, 1=essential, 2=operational, 3=collaboration, 4=references)
   memory_tier_list   — list memories from specific tiers
   memory_stats       — get memory statistics (entry count and tokens per tier)
+  read_terminal      — read recent output from VS Code integrated terminals
+  get_diagnostics    — get VS Code errors/warnings for a file (use after editing to verify changes)
 
 Guidelines:
 - ALWAYS CALL TOOLS DIRECTLY - never explain what tool to call, just call it immediately
 - Always call workspace_summary or read_file before proposing code changes.
 - Prefer edit_file over write_file for targeted modifications.
+- After editing or creating files, call get_diagnostics to check for errors introduced by your changes. If errors exist, fix them.
 - Your persistent memory is automatically loaded (Tiers 0-2) and shown above.
 ${memoryGuidelines}
 - Use memory_search to find relevant past solutions without loading all memories.
@@ -508,6 +538,8 @@ Available tools and their argument schemas:
   memory_tier_write   — {"tier": 0-5, "content": "note text", "tags": ["optional"]}
   memory_tier_list    — {"tiers": [0, 1, 2]}
   memory_stats        — {}
+  read_terminal       — {"index": "optional terminal index"}
+  get_diagnostics     — {"path": "optional relative/path"}
 ===================`;
 }
 
@@ -826,34 +858,59 @@ export class Agent {
     }
 
     /** Manually compact conversation history to reduce context usage */
-    compactContext(targetPercentage: number = 50): { removed: number; newPercentage: number } {
-        // Use current model if available, otherwise fall back to config
+    async compactContext(targetPercentage: number = 50): Promise<{ removed: number; newPercentage: number }> {
         const model = this.currentModel || getConfig().model;
-        
-        // Calculate current stats
-        const stats = calculateContextStats(
-            this.history,
-            '', // System prompt not needed for calculation
-            '', // Memory context not needed for calculation
-            model
-        );
-        
+        const stats = calculateContextStats(this.history, '', '', model);
         const oldCount = this.history.length;
-        this.history = compactHistory(
+
+        // Grab the messages that will be dropped for summarization
+        const compacted = compactHistory(
             this.history,
             targetPercentage,
             stats.modelLimit,
-            0, // System prompt tokens (will be added at runtime)
-            0  // Memory tokens (will be added at runtime)
+            0,
+            0
         );
-        
-        const removed = oldCount - this.history.length;
-        this.lastContextLevel = 'safe'; // Reset warning level
-        
-        logInfo(`[context] Manual compaction: removed ${removed} messages, ${this.history.length} remaining`);
-        
+        const removedCount = oldCount - compacted.length;
+
+        // Summarize dropped messages if there are enough to be worth it
+        if (removedCount >= 4) {
+            const dropped = this.history.slice(0, removedCount);
+            const summaryText = dropped
+                .filter(m => m.role === 'user' || m.role === 'assistant')
+                .map(m => `${m.role}: ${m.content.slice(0, 300)}`)
+                .join('\n');
+
+            if (summaryText.trim()) {
+                try {
+                    let summary = '';
+                    await streamChatRequest(
+                        model,
+                        [
+                            { role: 'system', content: 'Summarize this conversation in 2-3 sentences. Be concise. Output ONLY the summary.' },
+                            { role: 'user', content: summaryText.slice(0, 4000) },
+                        ],
+                        [],
+                        (token) => { summary += token; },
+                        { stop: false }
+                    );
+                    if (summary.trim()) {
+                        compacted.unshift({ role: 'assistant', content: `[Earlier conversation summary] ${summary.trim()}` });
+                        logInfo(`[context] Compaction summary: ${summary.trim().slice(0, 120)}`);
+                    }
+                } catch (err) {
+                    logWarn(`[context] Summary generation failed, compacting without summary: ${(err as Error).message}`);
+                }
+            }
+        }
+
+        this.history = compacted;
+        this.lastContextLevel = 'safe';
+
+        logInfo(`[context] Manual compaction: removed ${removedCount} messages, ${this.history.length} remaining`);
+
         return {
-            removed,
+            removed: removedCount,
             newPercentage: targetPercentage
         };
     }
@@ -1245,22 +1302,22 @@ This memory persists across all conversations. Use memory_write to add new infor
                 const MAX_RESULTS = 100;
                 
                 return new Promise<string>((resolve) => {
-                    let command: string;
-                    let args: string[];
+                    let searchCommand: string;
+                    let searchArgs: string[];
                     
                     if (isWindows) {
                         // Windows: use findstr with recursive search
                         // /S = recursive, /N = line numbers, /I = case insensitive
-                        command = 'findstr';
-                        args = ['/S', '/N', '/I', query, '*.*'];
+                        searchCommand = 'findstr';
+                        searchArgs = ['/S', '/N', '/I', query, '*.*'];
                     } else {
                         // Unix/Linux/macOS: use grep
                         // -r = recursive, -n = line numbers, -i = case insensitive, -I = skip binary files
-                        command = 'grep';
-                        args = ['-r', '-n', '-i', '-I', '--', query, '.'];
+                        searchCommand = 'grep';
+                        searchArgs = ['-r', '-n', '-i', '-I', '--', query, '.'];
                     }
                     
-                    const child = spawn(command, args, {
+                    const child = spawn(searchCommand, searchArgs, {
                         cwd: searchDir,
                         shell: false,
                         env: { ...process.env }
@@ -1290,7 +1347,7 @@ This memory persists across all conversations. Use memory_write to add new infor
                         
                         if (code !== null && code > 1) {
                             logError(`[search_files] Command failed with code ${code}`);
-                            resolve(`Search failed. Make sure ${command} is available on your system.`);
+                            resolve(`Search failed. Make sure ${searchCommand} is available on your system.`);
                             return;
                         }
                         
@@ -1325,8 +1382,8 @@ This memory persists across all conversations. Use memory_write to add new infor
                     });
                     
                     child.on('error', (err) => {
-                        logError(`[search_files] Failed to spawn ${command}: ${err.message}`);
-                        resolve(`Search failed: ${command} not available. Error: ${err.message}`);
+                        logError(`[search_files] Failed to spawn ${searchCommand}: ${err.message}`);
+                        resolve(`Search failed: ${searchCommand} not available. Error: ${err.message}`);
                     });
                     
                     // Timeout after 30 seconds
@@ -1628,6 +1685,18 @@ This memory persists across all conversations. Use memory_write to add new infor
                 }
             }
 
+            // ── read_terminal ──────────────────────────────────────────────────
+            case 'read_terminal': {
+                const idx = args.index !== undefined ? Number(args.index) : undefined;
+                return this.readTerminal(idx);
+            }
+
+            // ── get_diagnostics ────────────────────────────────────────────────
+            case 'get_diagnostics': {
+                const rel = args.path ? String(args.path) : undefined;
+                return this.getDiagnostics(root, rel);
+            }
+
             // ── refactor_multi_file ────────────────────────────────────────────
             case 'refactor_multi_file': {
                 const title = String(args.title ?? '');
@@ -1755,6 +1824,63 @@ This memory persists across all conversations. Use memory_write to add new infor
     }
 
     // ── Utilities ─────────────────────────────────────────────────────────────
+
+    private readTerminal(index?: number): string {
+        const terminals = vscode.window.terminals;
+        if (!terminals.length) { return 'No terminals are open in VS Code.'; }
+
+        const terminal = index !== undefined
+            ? terminals[index]
+            : vscode.window.activeTerminal ?? terminals[terminals.length - 1];
+
+        if (!terminal) { return `Terminal index ${index} not found. ${terminals.length} terminal(s) open.`; }
+
+        // shellIntegration (VS Code 1.93+) provides recent command output
+        const si = (terminal as any).shellIntegration;
+        if (si?.executedCommands) {
+            try {
+                const cmds = Array.from(si.executedCommands as Iterable<any>);
+                const recent = cmds.slice(-5);
+                const MAX = 8192;
+                let output = `Terminal: ${terminal.name}\n`;
+                for (const cmd of recent) {
+                    const text = cmd.output?.trim() ?? '';
+                    if (text) {
+                        output += `\n$ ${cmd.command ?? '(unknown)'}\n${text}\n`;
+                    }
+                    if (output.length > MAX) { break; }
+                }
+                return output.slice(0, MAX) || `Terminal "${terminal.name}" — no recent output captured.`;
+            } catch {
+                // Fall through to fallback
+            }
+        }
+
+        // Fallback: list terminals and suggest run_command
+        const list = terminals.map((t, i) => `  [${i}] ${t.name}`).join('\n');
+        return `Cannot read terminal output directly (requires VS Code 1.93+ shell integration).\n\nOpen terminals:\n${list}\n\nTip: Use run_command to execute a command and capture its output.`;
+    }
+
+    private getDiagnostics(root: string, relPath?: string): string {
+        const allDiags = vscode.languages.getDiagnostics();
+        const lines: string[] = [];
+
+        for (const [uri, diags] of allDiags) {
+            const filePath = uri.fsPath;
+            if (!filePath.startsWith(root)) { continue; }
+            const rel = path.relative(root, filePath);
+            if (relPath && rel !== relPath && !rel.endsWith(relPath)) { continue; }
+
+            for (const d of diags) {
+                if (d.severity > vscode.DiagnosticSeverity.Warning) { continue; }
+                const sev = d.severity === vscode.DiagnosticSeverity.Error ? 'ERROR' : 'WARN';
+                lines.push(`${rel}:${d.range.start.line + 1}:${d.range.start.character + 1} ${sev} ${d.message}`);
+            }
+            if (lines.length >= 100) { break; }
+        }
+
+        return lines.length ? lines.join('\n') : 'No errors or warnings found.';
+    }
 
     private safePath(root: string, rel: string): string {
         const full = path.resolve(root, rel);

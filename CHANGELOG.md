@@ -5,6 +5,33 @@ All notable changes to OllamaPilot will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-06-14
+
+### Added
+- **Diagnostics-aware agent** — new `get_diagnostics` tool checks VS Code errors/warnings after edits and self-corrects
+- **Apply code from chat** — "Apply" button on every code block with diff preview before applying
+- **Slash commands** — 7 built-in commands (`/test`, `/fix`, `/review`, `/doc`, `/explain`, `/refactor`, `/optimize`) with autocomplete dropdown
+- **Chat input history** — ↑/↓ arrow keys in empty input to cycle through previous messages (last 50)
+- **Terminal output reading** — new `read_terminal` tool reads recent output from VS Code integrated terminals (1.93+ shell integration with fallback)
+- **Pinned files** — always-in-context files that persist across messages and VS Code restarts, with 📌+ button in context bar
+- **Compact with summary** — dropped messages are summarized by the model before removal during context compaction
+- **FIM inline completions** — switched from chat API to `/api/generate` with prefix/suffix for proper fill-in-the-middle completions
+
+### Changed
+- Agent tool count increased from 18 to 21 (added `get_diagnostics`, `read_terminal`, `refactor_multi_file`)
+- Test suite updated to validate 21 tools
+- README updated with all new features, tools table, keyboard shortcuts, and v0.5.0 roadmap section
+
+### Fixed
+- **Type safety** — `pinnedFiles` added to `MsgSendMessage` interface (was `any` cast)
+- **Pinned files dedup** — now deduplicates against smart context files, not just @mentions
+- **Pin button UX** — 📌+ now inserts `@` at cursor position instead of overwriting input text
+- **Pin mode race condition** — `pinModeActive` flag properly reset when user breaks out of @mention flow
+- **Stale workspace closure** — pinned files and git diff now use `this._currentWorkspaceRoot` instead of stale closure from `resolveWebviewView`
+- **Dead import** — removed unused `import * as os` from agent.ts
+- **.gitignore encoding** — rewrote in clean UTF-8 (was corrupted with UTF-16LE entries)
+- **.vscodeignore encoding** — same fix
+
 ## [0.3.1] - 2025-06-13
 
 ### Added

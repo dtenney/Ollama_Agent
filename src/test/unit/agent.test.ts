@@ -13,16 +13,17 @@ describe('Agent Module', () => {
   });
 
   describe('Tool Definitions', () => {
-    it('should define all 18 tools', () => {
+    it('should define all 21 tools', () => {
       const toolNames = [
         'workspace_summary', 'read_file', 'list_files', 'search_files',
         'create_file', 'edit_file', 'write_file', 'append_to_file',
         'rename_file', 'delete_file', 'run_command',
         'memory_list', 'memory_write', 'memory_delete', 'memory_search',
-        'memory_tier_write', 'memory_tier_list', 'memory_stats'
+        'memory_tier_write', 'memory_tier_list', 'memory_stats',
+        'read_terminal', 'get_diagnostics', 'refactor_multi_file'
       ];
 
-      assert.strictEqual(toolNames.length, 18);
+      assert.strictEqual(toolNames.length, 21);
     });
 
     it('should mark destructive tools for confirmation', () => {

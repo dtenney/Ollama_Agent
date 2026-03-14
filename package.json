@@ -1,7 +1,7 @@
 {
   "name": "ollamapilot",
   "displayName": "OllamaPilot (MCP Edition)",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Your offline AI co-pilot powered by Ollama with MCP support — 100% local, no telemetry, no internet required",
   "publisher": "dtenney",
   "author": {

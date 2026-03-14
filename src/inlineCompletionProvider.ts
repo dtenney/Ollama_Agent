@@ -1,130 +1,89 @@
 import * as vscode from 'vscode';
-import { streamChatRequest } from './ollamaClient';
+import { streamGenerateRequest } from './ollamaClient';
 import { getConfig } from './config';
 import { logInfo, logError } from './logger';
 
 export class OllamaInlineCompletionProvider implements vscode.InlineCompletionItemProvider {
     private lastTriggerTime = 0;
-    private readonly DEBOUNCE_MS = 500;
-    private abortController?: AbortController;
+    private activeStopRef?: { stop: boolean };
 
     async provideInlineCompletionItems(
         document: vscode.TextDocument,
         position: vscode.Position,
         context: vscode.InlineCompletionContext,
         token: vscode.CancellationToken
-    ): Promise<vscode.InlineCompletionItem[] | vscode.InlineCompletionList | null> {
-        // Skip if triggered too frequently
-        const now = Date.now();
-        if (now - this.lastTriggerTime < this.DEBOUNCE_MS) {
+    ): Promise<vscode.InlineCompletionItem[] | null> {
+        const inlineCfg = vscode.workspace.getConfiguration('ollamaAgent.inlineCompletions');
+        const triggerMode = inlineCfg.get<string>('triggerMode', 'automatic');
+        const debounceMs = inlineCfg.get<number>('debounceMs', 500);
+
+        // Respect manual-only mode: reject automatic triggers entirely
+        if (triggerMode === 'manual' && context.triggerKind === vscode.InlineCompletionTriggerKind.Automatic) {
             return null;
         }
+
+        // Debounce (applies to both automatic and manual triggers)
+        const now = Date.now();
+        if (now - this.lastTriggerTime < debounceMs) return null;
         this.lastTriggerTime = now;
 
-        // Skip if user is actively typing (only trigger on pause)
+        // On automatic triggers, wait for typing pause then re-check cancellation
         if (context.triggerKind === vscode.InlineCompletionTriggerKind.Automatic) {
-            // Wait a bit to see if user continues typing
-            await new Promise(resolve => setTimeout(resolve, 300));
-            if (token.isCancellationRequested) {
-                return null;
-            }
+            await new Promise(r => setTimeout(r, debounceMs));
+            if (token.isCancellationRequested) return null;
         }
 
-        const cfg = getConfig();
-        const model = cfg.model;
+        // Skip empty/whitespace-only prefix on current line
+        const lineText = document.lineAt(position.line).text;
+        if (!lineText.substring(0, position.character).trim()) return null;
 
-        // Get context: current line + previous lines
-        const currentLine = document.lineAt(position.line).text;
-        const cursorPos = position.character;
-        const prefix = currentLine.substring(0, cursorPos);
-        
-        // Skip if line is empty or just whitespace
-        if (!prefix.trim()) {
-            return null;
-        }
+        // Build prefix: up to 50 lines before cursor
+        const prefixStart = Math.max(0, position.line - 50);
+        const prefix = document.getText(new vscode.Range(prefixStart, 0, position.line, position.character));
 
-        // Get surrounding context (up to 50 lines before)
-        const startLine = Math.max(0, position.line - 50);
-        const contextRange = new vscode.Range(startLine, 0, position.line, cursorPos);
-        const contextText = document.getText(contextRange);
+        // Build suffix: up to 50 lines after cursor
+        const suffixEnd = Math.min(document.lineCount - 1, position.line + 50);
+        const suffix = document.getText(new vscode.Range(position.line, position.character, suffixEnd, document.lineAt(suffixEnd).text.length));
 
-        // Build prompt
-        const language = document.languageId;
-        const prompt = this.buildPrompt(language, contextText, prefix);
-
-        logInfo(`[inline] Generating completion for ${language} at line ${position.line}`);
+        const model = getConfig().model;
+        logInfo(`[FIM] model=${model} line=${position.line} prefix=${prefix.length}c suffix=${suffix.length}c`);
 
         try {
-            // Cancel any previous request
-            if (this.abortController) {
-                this.abortController.abort();
-            }
-            this.abortController = new AbortController();
-
+            // Cancel previous in-flight request
+            if (this.activeStopRef) this.activeStopRef.stop = true;
             const stopRef = { stop: false };
-            token.onCancellationRequested(() => {
-                stopRef.stop = true;
-                this.abortController?.abort();
-            });
+            this.activeStopRef = stopRef;
 
-            let completion = '';
-            const result = await streamChatRequest(
-                model,
-                [{ role: 'user', content: prompt }],
-                [],
-                (token) => { completion += token; },
-                stopRef
-            );
+            token.onCancellationRequested(() => { stopRef.stop = true; });
 
-            completion = result.content.trim();
+            const raw = await streamGenerateRequest(model, prefix, suffix, () => {}, stopRef);
 
-            // Clean up completion
-            completion = this.cleanCompletion(completion, prefix);
+            if (stopRef.stop || token.isCancellationRequested) return null;
 
-            if (!completion || token.isCancellationRequested) {
-                return null;
-            }
+            const completion = this.clean(raw, prefix);
+            if (!completion) return null;
 
-            logInfo(`[inline] Generated ${completion.length} chars`);
+            logInfo(`[FIM] ${completion.split('\n').length} lines, ${completion.length} chars`);
 
-            return [
-                new vscode.InlineCompletionItem(
-                    completion,
-                    new vscode.Range(position, position)
-                )
-            ];
-        } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            logError(`[inline] Completion failed: ${msg}`);
+            return [new vscode.InlineCompletionItem(completion, new vscode.Range(position, position))];
+        } catch (err) {
+            logError(`[FIM] ${err instanceof Error ? err.message : String(err)}`);
             return null;
         }
     }
 
-    private buildPrompt(language: string, context: string, prefix: string): string {
-        return `You are a code completion assistant. Complete the following ${language} code.
+    private clean(raw: string, prefix: string): string {
+        let text = raw;
 
-Context:
-\`\`\`${language}
-${context}
-\`\`\`
+        // Strip markdown fences if model wraps output
+        text = text.replace(/```[\w]*\n?/g, '');
 
-Complete this line (provide ONLY the completion, no explanations):
-${prefix}`;
-    }
+        // Remove echoed prefix
+        if (text.startsWith(prefix)) text = text.substring(prefix.length);
 
-    private cleanCompletion(completion: string, prefix: string): string {
-        // Remove markdown code blocks
-        completion = completion.replace(/```[\w]*\n?/g, '');
-        
-        // Remove any repeated prefix
-        if (completion.startsWith(prefix)) {
-            completion = completion.substring(prefix.length);
-        }
+        // Trim trailing blank lines but keep meaningful whitespace
+        text = text.replace(/\n{3,}/g, '\n\n').trimEnd();
 
-        // Take only the first line for inline completion
-        const firstLine = completion.split('\n')[0];
-        
-        // Remove trailing whitespace
-        return firstLine.trimEnd();
+        return text;
     }
 }

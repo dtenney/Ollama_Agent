@@ -119,6 +119,7 @@ export function streamChatRequest(
                 let fullContent = '';
                 let toolCalls: OllamaToolCall[] = [];
                 let buf = '';
+                let resolved = false;
 
                 res.on('data', (chunk: Buffer) => {
                     if (stopRef.stop) { req.destroy(); return; }
@@ -137,7 +138,8 @@ export function streamChatRequest(
                             if (p.message?.tool_calls?.length) {
                                 toolCalls = p.message.tool_calls;
                             }
-                            if (p.done) {
+                            if (p.done && !resolved) {
+                                resolved = true;
                                 logInfo(`Stream done — ${fullContent.length} chars, ${toolCalls.length} tool calls`);
                                 resolve({ content: fullContent, toolCalls });
                             }
@@ -145,13 +147,93 @@ export function streamChatRequest(
                     }
                 });
 
-                res.on('end', () => resolve({ content: fullContent, toolCalls }));
+                res.on('end', () => { if (!resolved) { resolved = true; resolve({ content: fullContent, toolCalls }); } });
                 res.on('error', reject);
             }
         );
         req.on('error', (err) => {
             logError(`streamChatRequest: ${err.message}`);
             reject(err);
+        });
+        req.write(body);
+        req.end();
+    });
+}
+
+// ── FIM (Fill-in-the-Middle) via /api/generate ───────────────────────────────
+
+export function streamGenerateRequest(
+    model: string,
+    prompt: string,
+    suffix: string,
+    onToken: (t: string) => void,
+    stopRef: { stop: boolean }
+): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const { hostname, port } = getEndpoint();
+        const payload: Record<string, unknown> = {
+            model,
+            prompt,
+            suffix,
+            stream: true,
+            raw: true,
+            options: { temperature: 0, num_predict: 256, stop: ['\n\n\n'] },
+        };
+
+        const body = JSON.stringify(payload);
+        logInfo(`POST /api/generate (FIM)  model=${model}  prefix=${prompt.length}c  suffix=${suffix.length}c`);
+
+        let settled = false;
+        const req = makeRequest(
+            {
+                hostname, port, path: '/api/generate', method: 'POST',
+                timeout: 15_000,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(body),
+                },
+            },
+            (res) => {
+                if (res.statusCode !== 200) {
+                    let e = '';
+                    res.on('data', (c: Buffer) => (e += c.toString()));
+                    res.on('end', () => { if (!settled) { settled = true; reject(new Error(`HTTP ${res.statusCode}: ${e}`)); } });
+                    return;
+                }
+
+                let fullContent = '';
+                let buf = '';
+
+                res.on('data', (chunk: Buffer) => {
+                    if (stopRef.stop) { req.destroy(); return; }
+                    buf += chunk.toString();
+                    const lines = buf.split('\n');
+                    buf = lines.pop() ?? '';
+
+                    for (const line of lines) {
+                        if (!line.trim()) continue;
+                        try {
+                            const p = JSON.parse(line);
+                            if (p.response) {
+                                fullContent += p.response;
+                                onToken(p.response);
+                            }
+                            if (p.done && !settled) {
+                                settled = true;
+                                resolve(fullContent);
+                            }
+                        } catch { /* skip malformed line */ }
+                    }
+                });
+
+                res.on('end', () => { if (!settled) { settled = true; resolve(fullContent); } });
+                res.on('error', (err) => { if (!settled) { settled = true; reject(err); } });
+            }
+        );
+        req.on('timeout', () => { req.destroy(); if (!settled) { settled = true; reject(new Error('FIM request timed out')); } });
+        req.on('error', (err) => {
+            logError(`streamGenerateRequest: ${err.message}`);
+            if (!settled) { settled = true; reject(err); }
         });
         req.write(body);
         req.end();

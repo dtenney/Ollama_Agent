@@ -1,4 +1,4 @@
-# ── Compiled output ───────────────────────────────────────────────────────────
+# ── Compiled output ────────────────────────────────────────────────────────────
 dist/
 out/
 
@@ -43,10 +43,12 @@ FEATURE_*.md
 CLEANUP_*.md
 RESUME_*.md
 PRE_PUBLISH*.md
+NEXT_FEATURES.md
+GAP_ANALYSIS.md
 PROMPT_*.txt
 *.tmp
 
-# ── VS Code local settings ────────────────────────────────────────────────────
+# ── VS Code local settings ───────────────────────────────────────────────────
 .vscode/*
 !.vscode/extensions.json
 !.vscode/launch.json

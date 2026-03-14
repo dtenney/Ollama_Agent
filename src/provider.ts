@@ -13,11 +13,12 @@ import { TieredMemoryManager } from './memoryCore';
 import { TemplateManager } from './promptTemplates';
 import { SmartContextManager } from './smartContext';
 import { SymbolProvider } from './symbolProvider';
+import { DiffViewManager } from './diffView';
 
 // ── Message shapes (webview → extension) ─────────────────────────────────────
 
 interface MsgGetModels     { command: 'getModels' }
-interface MsgSendMessage   { command: 'sendMessage'; text: string; model: string; includeFile: boolean; includeSelection: boolean; mentionedFiles?: string[]; mentionedSymbols?: Array<{ name: string; filePath: string; }>; }
+interface MsgSendMessage   { command: 'sendMessage'; text: string; model: string; includeFile: boolean; includeSelection: boolean; mentionedFiles?: string[]; mentionedSymbols?: Array<{ name: string; filePath: string; }>; pinnedFiles?: string[]; }
 interface MsgNewChat       { command: 'newChat' }
 interface MsgStopGen       { command: 'stopGeneration' }
 interface MsgRetryLast     { command: 'retryLast'; model: string }
@@ -38,8 +39,10 @@ type WebviewMsg =
     | MsgGetTemplates | MsgToggleSmartContext
     | { command: 'searchSymbols'; query: string }
     | { command: 'updatePins'; pins: string[] }
+    | { command: 'updatePinnedFiles'; files: string[] }
     | { command: 'compactContext' }
-    | { command: 'undoLastTool' };
+    | { command: 'undoLastTool' }
+    | { command: 'applyCodeBlock'; code: string; lang: string };
 
 // ── Serialised session summary sent to the webview ───────────────────────────
 
@@ -86,6 +89,8 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
     private _activePreset: string = 'balanced';
     /** Smart context enabled state (persisted in workspace state). */
     private _smartContextEnabled: boolean = false;
+    /** Pinned files (always-in-context, persisted in workspace state). */
+    private _pinnedFiles: string[] = [];
 
     constructor(
         private readonly context: vscode.ExtensionContext,
@@ -105,6 +110,8 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         this._activePreset = context.workspaceState.get('ollamaAgent.activePreset', 'balanced');
         // Restore smart context enabled state
         this._smartContextEnabled = context.workspaceState.get('ollamaAgent.smartContextEnabled', false);
+        // Restore pinned files
+        this._pinnedFiles = context.workspaceState.get('ollamaAgent.pinnedFiles', []);
         logInfo(`[provider] Loaded session "${this.currentSession.title}" (${this.currentSession.messages.length} msgs)`);
     }
 
@@ -242,8 +249,9 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     const autoAttachedFile = raw.includeFile
                         ? vscode.workspace.asRelativePath(vscode.window.activeTextEditor?.document.uri ?? vscode.Uri.parse(''), false)
                         : '';
+                    const currentWsRoot = this._currentWorkspaceRoot ?? '';
                     const mentionCtx = raw.mentionedFiles?.length
-                        ? buildMentionContext(raw.mentionedFiles, workspaceRoot, new Set([autoAttachedFile]))
+                        ? buildMentionContext(raw.mentionedFiles, currentWsRoot, new Set([autoAttachedFile]))
                         : '';
 
                     // Resolve @mentioned symbols
@@ -252,7 +260,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         symbolCtx = '\n\n<symbol-mentions>\n';
                         for (const sym of raw.mentionedSymbols) {
                             try {
-                                const uri = vscode.Uri.file(path.join(workspaceRoot, sym.filePath));
+                                const uri = vscode.Uri.file(path.join(currentWsRoot, sym.filePath));
                                 const symbols = await this.symbolProvider.getFileSymbols(uri);
                                 const match = symbols.find(s => s.name === sym.name);
                                 if (match) {
@@ -269,6 +277,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
                     // Smart context: auto-include related files
                     let smartCtx = '';
+                    const smartContextFiles: string[] = [];
                     if (this._smartContextEnabled && vscode.window.activeTextEditor) {
                         const relatedFiles = await this.smartContext.getRelatedFiles(
                             vscode.window.activeTextEditor.document,
@@ -282,6 +291,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                                 smartCtx = '\n\n<smart-context>\n';
                                 smartCtx += `Auto-included ${filesToInclude.length} related file(s):\n\n`;
                                 for (const file of filesToInclude) {
+                                    smartContextFiles.push(file.relativePath);
                                     try {
                                         const content = await vscode.workspace.fs.readFile(vscode.Uri.file(file.path));
                                         const text = Buffer.from(content).toString('utf8');
@@ -297,13 +307,32 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     }
 
                     // Optionally inject git diff context
-                    const gitCtx = cfg.injectGitDiff && workspaceRoot
-                        ? await buildGitDiffContext(workspaceRoot)
+                    // Optionally inject git diff context
+                    const gitCtx = cfg.injectGitDiff && this._currentWorkspaceRoot
+                        ? await buildGitDiffContext(this._currentWorkspaceRoot)
                         : '';
 
                     const fullMessage = ctx || mentionCtx || symbolCtx || smartCtx || gitCtx
                         ? `${text}${ctx}${mentionCtx}${symbolCtx}${smartCtx}${gitCtx}`
                         : text;
+
+                    // Build pinned files context (dedup against mentions, auto-attached, AND smart context)
+                    let pinnedCtx = '';
+                    if (raw.pinnedFiles?.length && this._currentWorkspaceRoot) {
+                        const alreadyIncluded = new Set([
+                            autoAttachedFile,
+                            ...(raw.mentionedFiles || []),
+                            ...smartContextFiles,
+                        ]);
+                        const uniquePinned = raw.pinnedFiles.filter(f => !alreadyIncluded.has(f));
+                        if (uniquePinned.length) {
+                            pinnedCtx = buildMentionContext(uniquePinned, this._currentWorkspaceRoot, alreadyIncluded);
+                        }
+                    }
+
+                    const fullMessageWithPins = pinnedCtx
+                        ? `${fullMessage}${pinnedCtx}`
+                        : fullMessage;
 
                     // Wrap post() to capture streamed tokens → save assistant message
                     let assistantBuf = '';
@@ -331,7 +360,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         }
                     };
 
-                    await this._agent!.run(fullMessage, model, trackedPost);
+                    await this._agent!.run(fullMessageWithPins, model, trackedPost);
                     // Sync agent history into session after run completes
                     this.currentSession.agentHistory = this._agent!.conversationHistory;
                     this.persistSession();
@@ -490,6 +519,15 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
+                // ── Update pinned files ───────────────────────────────────
+                case 'updatePinnedFiles': {
+                    const pfMsg = raw as { command: 'updatePinnedFiles'; files: string[] };
+                    this._pinnedFiles = pfMsg.files || [];
+                    this.context.workspaceState.update('ollamaAgent.pinnedFiles', this._pinnedFiles);
+                    logInfo(`[provider] Pinned files updated: ${this._pinnedFiles.join(', ') || '(none)'}`);
+                    break;
+                }
+
                 // ── Pin persistence ───────────────────────────────────────
                 case 'updatePins': {
                     const pinMsg = raw as { command: 'updatePins'; pins: string[] };
@@ -500,7 +538,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
                 // ── Manual context compaction ─────────────────────────────
                 case 'compactContext': {
-                    const result = this._agent!.compactContext(50);
+                    const result = await this._agent!.compactContext(50);
                     post({
                         type: 'contextCompacted',
                         messagesRemoved: result.removed,
@@ -521,6 +559,13 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     } else {
                         post({ type: 'undoResult', success: false, message: 'Nothing to undo' });
                     }
+                    break;
+                }
+
+                // ── Apply code block from chat ───────────────────────────────
+                case 'applyCodeBlock': {
+                    const applyMsg = raw as { command: 'applyCodeBlock'; code: string; lang: string };
+                    await this.applyCodeBlock(applyMsg.code, applyMsg.lang);
                     break;
                 }
             }
@@ -561,6 +606,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
             setTimeout(() => {
                 post({ type: 'presetRestored', preset: this._activePreset });
                 post({ type: 'smartContextRestored', enabled: this._smartContextEnabled });
+                post({ type: 'pinnedFilesRestored', files: this._pinnedFiles.map(f => ({ rel: f })) });
             }, 400);
         } catch (err) {
             logError(`[provider] Failed to build webview: ${(err as Error).message}`);
@@ -613,6 +659,46 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
     dispose(): void {
         this._editorListener?.dispose();
         this._workspaceListener?.dispose();
+    }
+
+    // ── Apply code block from chat ─────────────────────────────────────────
+
+    private async applyCodeBlock(code: string, _lang: string): Promise<void> {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showWarningMessage('No active editor — open a file first, then click Apply.');
+            return;
+        }
+
+        const doc = editor.document;
+        const original = doc.getText();
+        const filePath = doc.uri.fsPath;
+
+        // If there's a selection, replace just the selection; otherwise replace entire file
+        const selection = editor.selection;
+        const hasSelection = !selection.isEmpty;
+
+        let newContent: string;
+        if (hasSelection) {
+            const before = original.slice(0, doc.offsetAt(selection.start));
+            const after = original.slice(doc.offsetAt(selection.end));
+            newContent = before + code + after;
+        } else {
+            newContent = code;
+        }
+
+        // Show diff preview
+        const diffManager = new DiffViewManager();
+        try {
+            const result = await diffManager.showDiff(filePath, original, newContent);
+            if (result.accepted) {
+                const fullRange = new vscode.Range(doc.positionAt(0), doc.positionAt(original.length));
+                await editor.edit(eb => eb.replace(fullRange, newContent));
+                logInfo(`[provider] Applied code block to ${vscode.workspace.asRelativePath(doc.uri)}`);
+            }
+        } finally {
+            diffManager.dispose();
+        }
     }
 
     // ── Session helpers ───────────────────────────────────────────────────────

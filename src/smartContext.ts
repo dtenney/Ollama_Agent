@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { execSync } from 'child_process';
 
 // ── Smart Context Manager ─────────────────────────────────────────────────────
 
@@ -13,7 +14,6 @@ export interface RelatedFile {
 
 export class SmartContextManager {
     private importCache = new Map<string, string[]>();
-    private fileAccessCount = new Map<string, number>();
 
     /**
      * Get related files for the active document.
@@ -209,7 +209,6 @@ export class SmartContextManager {
      */
     private async getRecentlyModifiedFiles(workspaceRoot: string): Promise<string[]> {
         try {
-            const { execSync } = require('child_process');
             const output = execSync('git diff --name-only HEAD~5..HEAD', {
                 cwd: workspaceRoot,
                 encoding: 'utf8',
@@ -259,6 +258,5 @@ export class SmartContextManager {
      */
     clearAllCaches(): void {
         this.importCache.clear();
-        this.fileAccessCount.clear();
     }
 }
