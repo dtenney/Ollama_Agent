@@ -177,6 +177,36 @@
       align-items: center;
       justify-content: space-between;
       margin-bottom: 5px;
+    }
+
+    /* ── Pin button ─────────────────────────────────────────────── */
+    .pin-btn {
+      background: none; border: none; cursor: pointer;
+      opacity: 0; font-size: 13px; padding: 2px 4px;
+      color: var(--vscode-descriptionForeground);
+      transition: opacity .15s;
+    }
+    .message:hover .pin-btn { opacity: .6; }
+    .pin-btn:hover { opacity: 1 !important; }
+    .pin-btn.pinned { opacity: 1; color: var(--vscode-textLink-foreground); }
+
+    /* ── Pinned section ─────────────────────────────────────────── */
+    #pinned-section {
+      display: none; border-bottom: 1px solid var(--vscode-panel-border);
+      margin-bottom: 8px; padding-bottom: 8px;
+    }
+    #pinned-section.has-pins { display: block; }
+    #pinned-header {
+      font-size: 11px; font-weight: 600; padding: 4px 12px;
+      color: var(--vscode-descriptionForeground); cursor: pointer;
+      user-select: none;
+    }
+    #pinned-header:hover { color: var(--vscode-foreground); }
+    #pinned-list .message {
+      opacity: .85; border-left: 2px solid var(--vscode-textLink-foreground);
+      margin: 2px 12px; padding: 4px 8px; font-size: 12px;
+    }
+    #pinned-list .msg-content { max-height: 80px; overflow: hidden; }
       gap: 8px;
     }
     .msg-role {
@@ -809,6 +839,10 @@
 
   <!-- Messages -->
   <div id="messages">
+    <div id="pinned-section">
+      <div id="pinned-header">📌 Pinned Messages</div>
+      <div id="pinned-list"></div>
+    </div>
     <div id="welcome">
       <div class="welcome-icon">🤖</div>
       <div class="welcome-title">Ollama Agent</div>

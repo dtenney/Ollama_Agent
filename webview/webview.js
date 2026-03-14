@@ -110,6 +110,12 @@ let searchMatches = [];
 /** Current match index. */
 let searchCurrentIndex = -1;
 
+// ── Pin state ─────────────────────────────────────────────────────────────────
+let pinnedIds = new Set();
+let msgIdCounter = 0;
+const pinnedSection = document.getElementById('pinned-section');
+const pinnedList = document.getElementById('pinned-list');
+
 // ── Token estimation state ────────────────────────────────────────────────────
 
 /** Approximate context window sizes (tokens) for known model families. */
@@ -476,6 +482,63 @@ function hideWelcome() {
     }
 }
 
+// ── Pin helpers ──────────────────────────────────────────────────────────────
+function assignMsgId(el) {
+    const id = 'msg-' + (++msgIdCounter);
+    el.dataset.msgId = id;
+    return id;
+}
+
+function createPinBtn(msgEl) {
+    const btn = document.createElement('button');
+    btn.className = 'pin-btn';
+    btn.title = 'Pin message';
+    btn.textContent = '\u{1F4CC}';
+    btn.addEventListener('click', () => togglePin(msgEl));
+    return btn;
+}
+
+function togglePin(msgEl) {
+    const id = msgEl.dataset.msgId;
+    if (!id) return;
+    if (pinnedIds.has(id)) {
+        pinnedIds.delete(id);
+        msgEl.querySelector('.pin-btn')?.classList.remove('pinned');
+    } else {
+        pinnedIds.add(id);
+        msgEl.querySelector('.pin-btn')?.classList.add('pinned');
+    }
+    renderPinnedSection();
+    vscode.postMessage({ command: 'updatePins', pins: [...pinnedIds] });
+}
+
+function renderPinnedSection() {
+    pinnedList.innerHTML = '';
+    const msgs = messagesEl.querySelectorAll('.message[data-msg-id]');
+    let count = 0;
+    msgs.forEach(m => {
+        if (!pinnedIds.has(m.dataset.msgId)) return;
+        count++;
+        const clone = m.cloneNode(true);
+        clone.querySelectorAll('.pin-btn').forEach(b => b.remove());
+        clone.querySelectorAll('.retry-btn').forEach(b => b.remove());
+        const unpin = document.createElement('button');
+        unpin.className = 'pin-btn pinned';
+        unpin.textContent = '\u{1F4CC}';
+        unpin.title = 'Unpin';
+        const origId = m.dataset.msgId;
+        unpin.addEventListener('click', () => {
+            pinnedIds.delete(origId);
+            m.querySelector('.pin-btn')?.classList.remove('pinned');
+            renderPinnedSection();
+            vscode.postMessage({ command: 'updatePins', pins: [...pinnedIds] });
+        });
+        clone.querySelector('.msg-header')?.appendChild(unpin);
+        pinnedList.appendChild(clone);
+    });
+    pinnedSection.classList.toggle('has-pins', count > 0);
+}
+
 // addUserMessage is defined later in the History section with optional timestamp support
 
 function startAssistantMessage() {
@@ -489,6 +552,8 @@ function startAssistantMessage() {
         `</div>` +
         `<div class="msg-content"></div>`;
     messagesEl.insertBefore(div, scrollBtn);
+    assignMsgId(div);
+    div.querySelector('.msg-header').appendChild(createPinBtn(div));
     currentMsgEl = div;
     currentRaw = '';
     scrollBottom();
@@ -611,13 +676,16 @@ function addErrorMessage(text) {
 }
 
 function clearChat() {
-    // Remove all message / tool-card children but keep #welcome and #scroll-btn
+    // Remove all message / tool-card children but keep #welcome, #scroll-btn, #pinned-section
     Array.from(messagesEl.childNodes).forEach((node) => {
         const el = /** @type {HTMLElement} */ (node);
         if (el.id === 'scroll-btn') { return; }
         if (el.id === 'welcome') { return; }
+        if (el.id === 'pinned-section') { return; }
         el.remove();
     });
+    pinnedIds.clear();
+    renderPinnedSection();
     // Re-attach welcome if it was removed
     if (!document.getElementById('welcome')) {
         messagesEl.insertBefore(welcomeEl, scrollBtn);
@@ -1542,6 +1610,8 @@ function addStoredAssistantMessage(content, timestamp) {
         `</div>` +
         `<div class="msg-content">${renderMarkdown(content)}</div>`;
     messagesEl.insertBefore(div, scrollBtn);
+    assignMsgId(div);
+    div.querySelector('.msg-header').appendChild(createPinBtn(div));
 }
 
 // ── Update addUserMessage to accept an optional stored timestamp ──────────────
@@ -1560,6 +1630,8 @@ function addUserMessage(text, timestamp) {
         `</div>` +
         `<div class="msg-content">${escHtml(text).replace(/\n/g, '<br>')}</div>`;
     messagesEl.insertBefore(div, scrollBtn);
+    assignMsgId(div);
+    div.querySelector('.msg-header').appendChild(createPinBtn(div));
     userScrolledUp = false;
     scrollBottom(true);
 }

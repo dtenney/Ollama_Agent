@@ -14,6 +14,7 @@ import { OllamaCodeActionsProvider } from './codeActionsProvider';
 import { OllamaInlineCompletionProvider } from './inlineCompletionProvider';
 import { ChatExporter } from './chatExporter';
 import { MultiWorkspaceManager } from './multiWorkspace';
+import { buildReviewRequest, buildCommitReviewRequest } from './codeReview';
 import { showManageTemplatesUI } from './promptTemplates';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -583,6 +584,50 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             const messages = provider.getCurrentChatMessages();
             const title = provider.getCurrentChatTitle();
             await ChatExporter.exportToJSON(messages, title);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.reviewChanges', async () => {
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!root) {
+                vscode.window.showWarningMessage('No workspace folder open.');
+                return;
+            }
+
+            const review = await buildReviewRequest(root);
+            if (!review) {
+                vscode.window.showInformationMessage('No uncommitted changes to review.');
+                return;
+            }
+
+            await vscode.commands.executeCommand('ollamaAgent.chatView.focus');
+            provider.sendMessageFromCommand(review.prompt, false, false);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.reviewCommit', async () => {
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!root) {
+                vscode.window.showWarningMessage('No workspace folder open.');
+                return;
+            }
+
+            const range = await vscode.window.showInputBox({
+                prompt: 'Enter commit range (e.g. HEAD~1, main..feature, abc123)',
+                placeHolder: 'HEAD~1'
+            });
+            if (!range) { return; }
+
+            const review = await buildCommitReviewRequest(root, range);
+            if (!review) {
+                vscode.window.showWarningMessage('No changes found for that commit range.');
+                return;
+            }
+
+            await vscode.commands.executeCommand('ollamaAgent.chatView.focus');
+            provider.sendMessageFromCommand(review.prompt, false, false);
         })
     );
 
