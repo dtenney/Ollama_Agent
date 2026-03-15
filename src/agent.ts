@@ -1955,9 +1955,28 @@ This memory persists across all conversations. Use memory_write to add new infor
         { pattern: /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)(?::\d{2,5})?\b/g, tier: 0, tag: 'ip' },
         { pattern: /\bhttps?:\/\/[^\s"'<>)\]]+/gi, tier: 0, tag: 'url' },
         { pattern: /\bport\s+(\d{2,5})\b/gi, tier: 0, tag: 'port' },
-        // Tier 1 — essential (frameworks/tools detected from conversation)
-        { pattern: /\b(?:using|uses|built with|powered by|running|framework is|stack includes?)\s+([A-Z][a-zA-Z0-9.]+)/gi, tier: 1, tag: 'technology' },
     ];
+
+    /** Known technology names to match in conversation text (case-insensitive) */
+    private static readonly KNOWN_TECHNOLOGIES = new Set([
+        'react', 'vue', 'angular', 'svelte', 'next.js', 'nuxt', 'express', 'fastify', 'koa', 'hapi',
+        'django', 'flask', 'fastapi', 'rails', 'spring', 'laravel', 'symfony', 'gin', 'echo', 'fiber',
+        'typescript', 'javascript', 'python', 'rust', 'golang', 'java', 'kotlin', 'swift', 'ruby', 'php',
+        'node.js', 'nodejs', 'deno', 'bun',
+        'postgresql', 'postgres', 'mysql', 'mariadb', 'mongodb', 'redis', 'sqlite', 'dynamodb', 'cassandra',
+        'docker', 'kubernetes', 'k8s', 'terraform', 'ansible', 'nginx', 'apache', 'caddy', 'traefik',
+        'webpack', 'vite', 'esbuild', 'rollup', 'parcel', 'turbopack',
+        'jest', 'mocha', 'pytest', 'vitest', 'cypress', 'playwright',
+        'eslint', 'prettier', 'ruff', 'black', 'flake8', 'pylint', 'mypy',
+        'prisma', 'sequelize', 'typeorm', 'drizzle', 'sqlalchemy', 'alembic',
+        'graphql', 'grpc', 'rest', 'websocket',
+        'aws', 'gcp', 'azure', 's3', 'ec2', 'lambda', 'cloudflare',
+        'git', 'github', 'gitlab', 'bitbucket',
+        'tailwind', 'bootstrap', 'material-ui', 'chakra',
+        'celery', 'rabbitmq', 'kafka', 'nats',
+        'sentry', 'datadog', 'grafana', 'prometheus',
+        'gunicorn', 'uvicorn', 'pm2', 'supervisor',
+    ]);
 
     /**
      * Scan the user message and assistant response for extractable facts
@@ -1970,21 +1989,28 @@ This memory persists across all conversations. Use memory_write to add new infor
         const existingContext = this.memory.buildContext([0, 1, 2, 3, 4], 8000).toLowerCase();
         const saves: Array<{ tier: 0|1|2|3|4|5; content: string; tags: string[] }> = [];
 
+        // Extract IPs, URLs, ports via regex
         for (const { pattern, tier, tag } of Agent.FACT_PATTERNS) {
-            // Reset lastIndex for global regexes
             pattern.lastIndex = 0;
             let match: RegExpExecArray | null;
             while ((match = pattern.exec(combined)) !== null) {
                 const value = (match[1] || match[0]).trim();
                 if (!value || value.length < 4 || value.length > 200) { continue; }
-                // Skip if already in memory
                 if (existingContext.includes(value.toLowerCase())) { continue; }
-                // Skip common false positives
                 if (tag === 'ip' && (value.startsWith('0.0.') || value.startsWith('127.0.0.1'))) { continue; }
-                if (tag === 'url' && /\blocalhost:11434\b/.test(value)) { continue; } // Ollama default
-                // Deduplicate within this batch
+                if (tag === 'url' && /\blocalhost:11434\b/.test(value)) { continue; }
                 if (saves.some(s => s.content.toLowerCase().includes(value.toLowerCase()))) { continue; }
                 saves.push({ tier, content: value, tags: [tag] });
+            }
+        }
+
+        // Extract known technologies from conversation text
+        const words = combined.toLowerCase().split(/[\s,;:()\[\]{}"'`]+/);
+        for (const word of words) {
+            if (Agent.KNOWN_TECHNOLOGIES.has(word) && !existingContext.includes(word)) {
+                if (!saves.some(s => s.content.toLowerCase() === word)) {
+                    saves.push({ tier: 1, content: word, tags: ['technology'] });
+                }
             }
         }
 
