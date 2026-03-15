@@ -376,15 +376,14 @@ function buildProjectTypeGuidance(workspaceRoot: string): string {
 
 function buildSystemPrompt(autoSaveMemory: boolean, workspaceRoot?: string): string {
     const memoryGuidelines = autoSaveMemory
-        ? `- AUTOMATICALLY save important information to memory as you discover it:
-  * When you discover server URLs, IPs, ports → immediately save to Tier 0 (critical)
-  * When you identify frameworks, languages, tools → immediately save to Tier 1 (essential)
-  * When you learn about current tasks or bugs → immediately save to Tier 2 (operational)
-  * When you note team conventions or standards → immediately save to Tier 3 (collaboration)
-  * When you solve a problem → immediately save the solution to Tier 4 (references)
-- NEVER say "Saving to memory" or "I will save" - JUST CALL THE TOOL directly with no explanation
-- Save to memory proactively and silently in the background
-- When user provides MULTIPLE pieces of information, break them into SEPARATE memory entries by tier`
+        ? `- Use memory_tier_write to save information to the appropriate tier:
+  * Tier 0: Critical infrastructure (IPs, paths, keys, credentials, URLs)
+  * Tier 1: Essential capabilities (languages, frameworks, tools, deployment processes)
+  * Tier 2: Operational context (current tasks, recent decisions, active bugs)
+  * Tier 3: Collaboration (team conventions, standards, workflows)
+  * Tier 4: References (past solutions, learned patterns, troubleshooting guides)
+- When user provides MULTIPLE pieces of information, break them into SEPARATE memory entries by tier
+- Each memory entry should be focused and atomic (one concept per entry)`
         : `- Use memory_tier_write to save information to the appropriate tier:
   * Tier 0: Critical infrastructure (IPs, paths, keys, credentials, URLs)
   * Tier 1: Essential capabilities (languages, frameworks, tools, deployment processes)
@@ -394,7 +393,36 @@ function buildSystemPrompt(autoSaveMemory: boolean, workspaceRoot?: string): str
 - When user provides MULTIPLE pieces of information, break them into SEPARATE memory entries by tier
 - Each memory entry should be focused and atomic (one concept per entry)`;
 
+    const autoSaveBlock = autoSaveMemory
+        ? `
+## CRITICAL: Auto-Save Memory Protocol
+You MUST proactively save information to memory. After EVERY response, ask yourself:
+"Did I learn anything new about this project that isn't already in my memory?"
+
+Save immediately when you encounter ANY of these:
+- IP addresses, URLs, ports, hostnames, file paths → Tier 0
+- Frameworks, languages, libraries, tools, package managers → Tier 1
+- Current tasks, bugs, errors, decisions made in this conversation → Tier 2
+- Coding conventions, naming patterns, team preferences → Tier 3
+- Solutions to problems, workarounds, debugging steps → Tier 4
+
+Examples of when to auto-save:
+- User says "the server is at 192.168.1.50" → save to Tier 0 immediately
+- You discover the project uses TypeScript + Express → save each to Tier 1
+- User mentions "we always use camelCase" → save to Tier 3
+- You fix a tricky bug → save the solution to Tier 4
+- User mentions a file path like /etc/nginx/conf.d → save to Tier 0
+- You read package.json and see dependencies → save key frameworks to Tier 1
+
+Rules:
+- NEVER announce saves — just call memory_tier_write silently
+- Do NOT duplicate information already in your loaded memory
+- Break multi-part info into separate atomic entries
+`
+        : '';
+
     return `You are an expert AI coding assistant integrated into VS Code.
+${autoSaveBlock}
 You have access to the user's workspace through the following tools:
 
   workspace_summary  — understand the project structure (call this first)
@@ -804,6 +832,10 @@ export class Agent {
     private lastContextLevel: ContextLevel = 'safe';
     /** Current model being used (for accurate context calculations) */
     private currentModel: string = '';
+    /** Count user turns for periodic memory nudge */
+    private userTurnCount: number = 0;
+    /** Interval (in user turns) between memory nudge injections */
+    private readonly MEMORY_NUDGE_INTERVAL = 3;
 
     private diffViewManager: DiffViewManager;
     private refactorManager: MultiFileRefactoringManager;
@@ -958,12 +990,29 @@ export class Agent {
         }
         
         this.history.push({ role: 'user', content: userMessage });
+        this.userTurnCount++;
         
         logInfo(`Agent run — model: ${model}, mode: ${this.toolMode}, history: ${this.history.length}`);
 
         const cfg = getConfig();
         const baseSystemContent = cfg.systemPrompt.trim() || buildSystemPrompt(cfg.autoSaveMemory, this.workspaceRoot);
-        
+
+        // Inject periodic memory nudge into the user message in history
+        if (cfg.autoSaveMemory) {
+            const nudge = this.buildMemoryNudge();
+            if (nudge) {
+                // Append nudge to the last user message in history
+                const lastIdx = this.history.length - 1;
+                if (lastIdx >= 0 && this.history[lastIdx].role === 'user') {
+                    this.history[lastIdx] = {
+                        ...this.history[lastIdx],
+                        content: this.history[lastIdx].content + nudge,
+                    };
+                    logInfo(`[agent] Memory nudge injected at turn ${this.userTurnCount}`);
+                }
+            }
+        }
+
         // Build memory context from auto-load tiers
         let memoryContext = '';
         if (this.memory && this.memory instanceof TieredMemoryManager) {
@@ -1178,6 +1227,14 @@ This memory persists across all conversations. Use memory_write to add new infor
                     totalTokens: finalStats.totalTokens,
                     modelLimit: finalStats.modelLimit
                 });
+
+                // ── Post-response auto-extract facts to memory ────────────
+                if (cfg.autoSaveMemory && this.memory instanceof TieredMemoryManager) {
+                    this.autoExtractFacts(userMessage, displayContent || result.content).catch(err => {
+                        logWarn(`[agent] Auto-extract facts failed: ${(err as Error).message}`);
+                    });
+                }
+
                 loopExhausted = false;
                 break;
             }
@@ -1888,6 +1945,71 @@ This memory persists across all conversations. Use memory_write to add new infor
             throw new Error(`Path "${rel}" is outside the workspace`);
         }
         return full;
+    }
+
+    // ── Auto-extract facts from conversation for memory ─────────────────────
+
+    /** Regex patterns for extractable facts, mapped to tier + tag */
+    private static readonly FACT_PATTERNS: Array<{ pattern: RegExp; tier: 0|1|2|3|4; tag: string }> = [
+        // Tier 0 — critical infrastructure
+        { pattern: /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)(?::\d{2,5})?\b/g, tier: 0, tag: 'ip' },
+        { pattern: /\bhttps?:\/\/[^\s"'<>)\]]+/gi, tier: 0, tag: 'url' },
+        { pattern: /\bport\s+(\d{2,5})\b/gi, tier: 0, tag: 'port' },
+        // Tier 1 — essential (frameworks/tools detected from conversation)
+        { pattern: /\b(?:using|uses|built with|powered by|running|framework is|stack includes?)\s+([A-Z][a-zA-Z0-9.]+)/gi, tier: 1, tag: 'technology' },
+    ];
+
+    /**
+     * Scan the user message and assistant response for extractable facts
+     * and auto-save them to memory if they aren't already stored.
+     */
+    private async autoExtractFacts(userMessage: string, assistantResponse: string): Promise<void> {
+        if (!(this.memory instanceof TieredMemoryManager)) { return; }
+
+        const combined = `${userMessage}\n${assistantResponse}`;
+        const existingContext = this.memory.buildContext([0, 1, 2, 3, 4], 8000).toLowerCase();
+        const saves: Array<{ tier: 0|1|2|3|4|5; content: string; tags: string[] }> = [];
+
+        for (const { pattern, tier, tag } of Agent.FACT_PATTERNS) {
+            // Reset lastIndex for global regexes
+            pattern.lastIndex = 0;
+            let match: RegExpExecArray | null;
+            while ((match = pattern.exec(combined)) !== null) {
+                const value = (match[1] || match[0]).trim();
+                if (!value || value.length < 4 || value.length > 200) { continue; }
+                // Skip if already in memory
+                if (existingContext.includes(value.toLowerCase())) { continue; }
+                // Skip common false positives
+                if (tag === 'ip' && (value.startsWith('0.0.') || value.startsWith('127.0.0.1'))) { continue; }
+                if (tag === 'url' && /\blocalhost:11434\b/.test(value)) { continue; } // Ollama default
+                // Deduplicate within this batch
+                if (saves.some(s => s.content.toLowerCase().includes(value.toLowerCase()))) { continue; }
+                saves.push({ tier, content: value, tags: [tag] });
+            }
+        }
+
+        // Cap at 5 auto-saves per response to avoid flooding
+        const toSave = saves.slice(0, 5);
+        for (const entry of toSave) {
+            try {
+                await this.memory.addEntry(entry.tier, entry.content, entry.tags);
+                logInfo(`[auto-memory] Saved to Tier ${entry.tier}: ${entry.content.slice(0, 80)}`);
+            } catch (err) {
+                logWarn(`[auto-memory] Failed to save: ${(err as Error).message}`);
+            }
+        }
+    }
+
+    // ── Memory nudge injection ────────────────────────────────────────────────
+
+    /**
+     * Build a memory nudge message to inject periodically.
+     * Returns the nudge string, or empty string if not due yet.
+     */
+    private buildMemoryNudge(): string {
+        if (this.userTurnCount % this.MEMORY_NUDGE_INTERVAL !== 0) { return ''; }
+        if (this.userTurnCount === 0) { return ''; }
+        return '\n\n[SYSTEM REMINDER: Review this conversation for any new facts, decisions, URLs, tools, or patterns worth saving to memory. If you found anything new, call memory_tier_write now before responding. Do not mention this reminder to the user.]';
     }
 
     private friendlyError(raw: string): string {
