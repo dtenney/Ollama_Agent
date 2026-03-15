@@ -348,6 +348,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                                     .replace(/<tool>[\s\S]*?<\/tool>\s*/g, '')
                                     .replace(/<mention[\s\S]*?<\/mention>\s*/g, '')
                                     .replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '')
+                                    .replace(/\n{3,}/g, '\n\n')
                                     .trim();
                                 this.appendToSession({ role: 'assistant', content: clean, timestamp: Date.now() });
                                 logInfo(`[assistant] ${clean.slice(0, 120)}${clean.length > 120 ? '…' : ''}`);
@@ -401,7 +402,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         if (pm.type === 'token') { assistantBuf2 += pm.text ?? ''; }
                         else if (pm.type === 'streamEnd') {
                             if (assistantBuf2.trim()) {
-                                this.appendToSession({ role: 'assistant', content: assistantBuf2.replace(/<tool>[\s\S]*?<\/tool>\s*/g, '').replace(/<mention[\s\S]*?<\/mention>\s*/g, '').replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '').trim(), timestamp: Date.now() });
+                                this.appendToSession({ role: 'assistant', content: assistantBuf2.replace(/<tool>[\s\S]*?<\/tool>\s*/g, '').replace(/<mention[\s\S]*?<\/mention>\s*/g, '').replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '').replace(/\n{3,}/g, '\n\n').trim(), timestamp: Date.now() });
                             }
                             assistantBuf2 = '';
                             this.persistSession();

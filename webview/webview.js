@@ -7,9 +7,14 @@ const vscode = acquireVsCodeApi();
 window.onerror = function(msg, src, line, col, err) {
     const detail = `[webview error] ${msg} at line ${line}:${col}\n${err?.stack || ''}`;
     try { vscode.postMessage({ command: 'webviewError', text: detail }); } catch(_) {}
-    // Also show in the UI so user can see it
     const el = document.getElementById('status-text');
     if (el) { el.textContent = 'JS Error — check Output panel'; el.style.color = '#f44747'; }
+    console.error(detail);
+};
+window.onunhandledrejection = function(event) {
+    const reason = event.reason;
+    const detail = `[webview unhandled rejection] ${reason?.message || reason}\n${reason?.stack || ''}`;
+    try { vscode.postMessage({ command: 'webviewError', text: detail }); } catch(_) {}
     console.error(detail);
 };
 

@@ -772,7 +772,7 @@ function stripToolBlocks(text: string): string {
         return true;
     });
     
-    return filtered.join('\n').trim();
+    return filtered.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 // ── Agent ─────────────────────────────────────────────────────────────────────

@@ -112,7 +112,7 @@ export async function getGitDiff(root: string): Promise<GitDiffResult | null> {
 // ── Smart diff relevance ──────────────────────────────────────────────────────
 
 /** Keywords that suggest the user is asking about recent changes. */
-const CHANGE_KEYWORDS = /\b(change[ds]?|diff|commit|uncommitted|staged|unstaged|modified|broke|break|breaking|fail|failing|error|bug|regress|recent|last\s+edit|what\s+did\s+i|review\s+(my|the|code)|what('s|\s+is)\s+(wrong|different)|fix(ed|ing)?|undo|revert|working\s+on)\b/i;
+const CHANGE_KEYWORDS = /\b(change[ds]?|diff|commit|uncommitted|staged|unstaged|modified|broke|break|breaking|fail|failing|bug|regress|recent|last\s+edit|what\s+did\s+i|review\s+(my|the|code)|what('s|\s+is)\s+(wrong|different)|undo|revert|working\s+on)\b|\b(fix|fixing|fixed)\s+(this|that|the|my|it|bug|issue|error)|\b(getting|got|seeing|having|hit|throws?)\s+(an?\s+)?error/i;
 
 /** Returns true if the user message appears to be about code changes. */
 export function isChangeRelated(message: string): boolean {
