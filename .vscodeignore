@@ -27,6 +27,8 @@ PYTHON_TOOLING_TODO.md
 SYNERGY_AUDIT.md
 NEXT_FEATURES.md
 GAP_ANALYSIS.md
+MANUAL_TESTS.md
+MEMORY_IMPROVEMENTS.md
 .ollamapilot/**
 
 # Build artefacts
@@ -35,6 +37,8 @@ package-lock.json
 .nycrc
 coverage/**
 .nyc_output/**
+.vscode-test.mjs
+.vscode-test/**
 
 # Git
 .gitignore

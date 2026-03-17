@@ -34,7 +34,7 @@ export class ProjectMemory {
     }
 
     /** Add a new note. Returns the created note. */
-    add(content: string, tag?: string): MemoryNote {
+    async add(content: string, tag?: string): Promise<MemoryNote> {
         if (!content.trim()) { throw new Error('Note content cannot be empty'); }
         const trimmed = content.slice(0, MAX_NOTE_LEN);
         const note: MemoryNote = {
@@ -44,35 +44,35 @@ export class ProjectMemory {
             ...(tag ? { tag: tag.trim().slice(0, 40) } : {}),
         };
         const notes = [note, ...this.list()].slice(0, MAX_NOTES);
-        this.context.workspaceState.update(STORAGE_KEY, notes);
+        await this.context.workspaceState.update(STORAGE_KEY, notes);
         logInfo(`[memory] Note added (${note.id}): "${trimmed.slice(0, 60)}…"`);
         return note;
     }
 
     /** Update the content of an existing note by id. */
-    update(id: string, content: string): boolean {
+    async update(id: string, content: string): Promise<boolean> {
         const notes = this.list();
         const idx = notes.findIndex((n) => n.id === id);
         if (idx === -1) { return false; }
         notes[idx] = { ...notes[idx], content: content.slice(0, MAX_NOTE_LEN) };
-        this.context.workspaceState.update(STORAGE_KEY, notes);
+        await this.context.workspaceState.update(STORAGE_KEY, notes);
         logInfo(`[memory] Note updated (${id})`);
         return true;
     }
 
     /** Delete a note by id. */
-    delete(id: string): boolean {
+    async delete(id: string): Promise<boolean> {
         const before = this.list();
         const after  = before.filter((n) => n.id !== id);
         if (after.length === before.length) { return false; }
-        this.context.workspaceState.update(STORAGE_KEY, after);
+        await this.context.workspaceState.update(STORAGE_KEY, after);
         logInfo(`[memory] Note deleted (${id})`);
         return true;
     }
 
     /** Clear all notes for this workspace. */
-    clearAll(): void {
-        this.context.workspaceState.update(STORAGE_KEY, []);
+    async clearAll(): Promise<void> {
+        await this.context.workspaceState.update(STORAGE_KEY, []);
         logInfo('[memory] All notes cleared');
     }
 

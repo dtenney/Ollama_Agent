@@ -4,96 +4,53 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { logInfo } from './logger';
 
-export interface DiffResult {
-    accepted: boolean;
-    hunks?: number[]; // Indices of accepted hunks (for partial accept)
-}
-
 export class DiffViewManager {
-    private disposables: vscode.Disposable[] = [];
-    private currentDiffUri?: vscode.Uri;
+    private currentTmpPath?: string;
 
     dispose(): void {
-        this.disposables.forEach(d => d.dispose());
-        this.disposables = [];
-        if (this.currentDiffUri) {
-            try { fs.unlinkSync(this.currentDiffUri.fsPath); } catch { /* ignore */ }
-        }
+        this.cleanup();
     }
 
     /**
-     * Show enhanced diff view with accept/reject options
+     * Open a diff view so the user can review the proposed changes.
+     * Accept/reject is handled separately via the chat confirmation UI.
      */
-    async showDiff(
+    async showDiffPreview(
         filePath: string,
         oldContent: string,
         newContent: string
-    ): Promise<DiffResult> {
+    ): Promise<void> {
         const fileName = path.basename(filePath);
         const ext = path.extname(filePath);
-        
+
         // Create temp file for new content
         const tmpPath = path.join(os.tmpdir(), `ollama-edit-${Date.now()}${ext}`);
         fs.writeFileSync(tmpPath, newContent, 'utf8');
-        this.currentDiffUri = vscode.Uri.file(tmpPath);
+        this.currentTmpPath = tmpPath;
 
-        try {
-            // Open diff view
-            await vscode.commands.executeCommand(
-                'vscode.diff',
-                vscode.Uri.file(filePath),
-                this.currentDiffUri,
-                `Ollama Agent — Edit: ${fileName}`,
-                { preview: false, preserveFocus: false }
-            );
+        await vscode.commands.executeCommand(
+            'vscode.diff',
+            vscode.Uri.file(filePath),
+            vscode.Uri.file(tmpPath),
+            `Ollama Agent — Edit: ${fileName}`,
+            { preview: false, preserveFocus: false }
+        );
 
-            logInfo(`[diffView] Opened diff for ${fileName}`);
-
-            // Show quick pick with options
-            const options: vscode.QuickPickItem[] = [
-                {
-                    label: '$(check) Accept All Changes',
-                    description: 'Apply all changes to the file',
-                    detail: 'Keyboard: Alt+A'
-                },
-                {
-                    label: '$(x) Reject All Changes',
-                    description: 'Discard all changes',
-                    detail: 'Keyboard: Alt+R'
-                },
-                {
-                    label: '$(diff) Keep Diff Open',
-                    description: 'Review changes manually and decide later'
-                }
-            ];
-
-            const selected = await vscode.window.showQuickPick(options, {
-                placeHolder: 'Review the diff and choose an action',
-                title: `Edit: ${fileName}`
-            });
-
-            if (!selected) {
-                // User dismissed - keep diff open
-                return { accepted: false };
-            }
-
-            if (selected.label.includes('Accept')) {
-                return { accepted: true };
-            } else if (selected.label.includes('Reject')) {
-                // Close diff editor
-                await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
-                return { accepted: false };
-            } else {
-                // Keep diff open
-                return { accepted: false };
-            }
-        } finally {
-            // Cleanup temp file
-            try {
-                fs.unlinkSync(tmpPath);
-            } catch { /* ignore */ }
-            this.currentDiffUri = undefined;
-        }
+        logInfo(`[diffView] Opened diff for ${fileName}`);
     }
 
+    /** Close the diff editor and clean up the temp file. */
+    async closeDiffPreview(): Promise<void> {
+        try {
+            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        } catch { /* ignore */ }
+        this.cleanup();
+    }
+
+    private cleanup(): void {
+        if (this.currentTmpPath) {
+            try { fs.unlinkSync(this.currentTmpPath); } catch { /* ignore */ }
+            this.currentTmpPath = undefined;
+        }
+    }
 }

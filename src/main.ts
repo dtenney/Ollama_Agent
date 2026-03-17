@@ -17,6 +17,8 @@ import { ChatExporter } from './chatExporter';
 import { MultiWorkspaceManager } from './multiWorkspace';
 import { buildReviewRequest, buildCommitReviewRequest } from './codeReview';
 import { showManageTemplatesUI } from './promptTemplates';
+import { ingestMarkdownFiles } from './markdownIngest';
+import { scanProjectDocs } from './docScanner';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -385,6 +387,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         })
     );
 
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.clearMemory', async () => {
+            const confirm = await vscode.window.showWarningMessage(
+                'Clear ALL memory entries? This cannot be undone.',
+                'Clear All', 'Cancel'
+            );
+            if (confirm === 'Clear All') {
+                await context.workspaceState.update('ollamaAgent.memoryCore', undefined);
+                // Also delete .ollamapilot/memory.json to prevent re-import on reload
+                const memRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                if (memRoot) {
+                    const memFile = path.join(memRoot, '.ollamapilot', 'memory.json');
+                    if (fs.existsSync(memFile)) {
+                        fs.unlinkSync(memFile);
+                        logInfo('[memory] Deleted .ollamapilot/memory.json');
+                    }
+                }
+                memoryViewProvider?.refresh();
+                vscode.window.showInformationMessage('Memory cleared.');
+                logInfo('[memory] All memory entries cleared');
+            }
+        })
+    );
+
     // ── Memory View Commands ─────────────────────────────────────────────────
     context.subscriptions.push(
         vscode.commands.registerCommand('ollamaAgent.refreshMemory', () => {
@@ -550,37 +576,90 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             
             const panel = vscode.window.createWebviewPanel(
                 'memoryStats',
-                'Memory Statistics',
+                'Memory Manager',
                 vscode.ViewColumn.One,
                 { enableScripts: true }
             );
             
-            // Add to subscriptions for proper disposal
             context.subscriptions.push(panel);
             
             const htmlPath = path.join(context.extensionPath, 'webview', 'memoryPanel.html');
             const html = await fs.promises.readFile(htmlPath, 'utf8');
+
+            async function sendFullData() {
+                const stats = memoryManager!.getStats();
+                const entriesByTier: Record<number, any[]> = {};
+                for (let tier = 0; tier <= 5; tier++) {
+                    entriesByTier[tier] = await memoryManager!.listByTier(tier);
+                }
+                panel.webview.postMessage({ type: 'fullData', stats, entries: entriesByTier });
+            }
             
             panel.webview.onDidReceiveMessage(async message => {
-                if (message.command === 'ready') {
-                    const stats = memoryManager!.getStats();
-                    const tierCounts = stats.map(s => s.count);
-                    const totalEntries = tierCounts.reduce((a, b) => a + b, 0);
-                    const totalAccesses = stats.reduce((sum, s) => sum + s.totalAccesses, 0);
-                    
-                    panel.webview.postMessage({
-                        type: 'stats',
-                        stats: { tierCounts, totalEntries, totalAccesses }
-                    });
-                } else if (message.command === 'export') {
-                    vscode.commands.executeCommand('ollamaAgent.exportMemory');
-                } else if (message.command === 'import') {
-                    try {
-                        const imported = await importMemoryData(message.data);
+                switch (message.command) {
+                    case 'ready':
+                    case 'refresh':
+                        await sendFullData();
+                        break;
+                    case 'promote': {
+                        const ok = await memoryManager!.promoteEntry(message.id);
+                        if (ok) { memoryViewProvider?.refresh(); }
+                        await sendFullData();
+                        break;
+                    }
+                    case 'demote': {
+                        const ok = await memoryManager!.demoteEntry(message.id);
+                        if (ok) { memoryViewProvider?.refresh(); }
+                        await sendFullData();
+                        break;
+                    }
+                    case 'deleteEntry': {
+                        await memoryManager!.deleteEntry(message.id);
                         memoryViewProvider?.refresh();
-                        vscode.window.showInformationMessage(`Imported ${imported} entries`);
-                    } catch (err) {
-                        vscode.window.showErrorMessage(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+                        await sendFullData();
+                        break;
+                    }
+                    case 'clearAll': {
+                        const confirmClear = await vscode.window.showWarningMessage(
+                            'Clear ALL memory entries? This cannot be undone.',
+                            'Clear All', 'Cancel'
+                        );
+                        if (confirmClear !== 'Clear All') { break; }
+                        await context.workspaceState.update('ollamaAgent.memoryCore', undefined);
+                        // Also delete .ollamapilot/memory.json to prevent re-import on reload
+                        const memRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                        if (memRoot) {
+                            const memFile = path.join(memRoot, '.ollamapilot', 'memory.json');
+                            if (fs.existsSync(memFile)) {
+                                fs.unlinkSync(memFile);
+                                logInfo('[memory] Deleted .ollamapilot/memory.json');
+                            }
+                        }
+                        memoryViewProvider?.refresh();
+                        await sendFullData();
+                        vscode.window.showInformationMessage('All memory cleared.');
+                        logInfo('[memory] All memory entries cleared from panel');
+                        break;
+                    }
+                    case 'export':
+                        vscode.commands.executeCommand('ollamaAgent.exportMemory');
+                        break;
+                    case 'scanDocs': {
+                        await scanProjectDocs(memoryManager!);
+                        memoryViewProvider?.refresh();
+                        await sendFullData();
+                        break;
+                    }
+                    case 'import': {
+                        try {
+                            const imported = await importMemoryData(message.data);
+                            memoryViewProvider?.refresh();
+                            vscode.window.showInformationMessage(`Imported ${imported} entries`);
+                            await sendFullData();
+                        } catch (err) {
+                            vscode.window.showErrorMessage(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+                        }
+                        break;
                     }
                 }
             });
@@ -668,6 +747,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             if (switched) {
                 vscode.window.showInformationMessage('Workspace switched. Start a new chat to use the new workspace.');
             }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.scanProjectDocs', async () => {
+            if (!memoryManager) {
+                vscode.window.showWarningMessage('Memory system not initialized.');
+                return;
+            }
+            await scanProjectDocs(memoryManager);
+            memoryViewProvider?.refresh();
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.ingestMarkdown', async () => {
+            if (!memoryManager) {
+                vscode.window.showWarningMessage('Memory system not initialized.');
+                return;
+            }
+            await ingestMarkdownFiles(memoryManager);
+            memoryViewProvider?.refresh();
         })
     );
 

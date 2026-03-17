@@ -48,7 +48,7 @@
     "bundle:prod": "npm run vendor && node esbuild.js --production",
     "build": "npm run compile",
     "vscode:prepublish": "npm run bundle:prod",
-    "test": "npm run compile && node ./dist/test/runTests.js",
+    "test": "npm run compile && vscode-test",
     "test:unit": "npm run compile && mocha dist/test/unit/**/*.test.js",
     "test:coverage": "npm run compile && nyc mocha dist/test/unit/**/*.test.js"
   },
@@ -57,7 +57,8 @@
     "@types/node": "^18.0.0",
     "@types/sinon": "^17.0.3",
     "@types/vscode": "^1.80.0",
-    "@vscode/test-electron": "^2.3.9",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^2.22.0",
     "esbuild": "^0.27.4",
     "highlight.js": "^11.11.1",
@@ -131,6 +132,10 @@
         "title": "Ollama: Run Memory Maintenance"
       },
       {
+        "command": "ollamaAgent.clearMemory",
+        "title": "Ollama: Clear All Memory"
+      },
+      {
         "command": "ollamaAgent.refreshMemory",
         "title": "Refresh",
         "icon": "$(refresh)"
@@ -190,6 +195,14 @@
       {
         "command": "ollamaAgent.switchWorkspace",
         "title": "Ollama: Switch Workspace Folder"
+      },
+      {
+        "command": "ollamaAgent.ingestMarkdown",
+        "title": "Ollama: Ingest Markdown Files into Memory"
+      },
+      {
+        "command": "ollamaAgent.scanProjectDocs",
+        "title": "Ollama: Scan Project Docs into Memory"
       }
     ],
     "menus": {
@@ -425,7 +438,7 @@
         "ollamaAgent.memory.autoSave": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Automatically save important information to memory as the AI discovers it (IPs, frameworks, tasks, solutions). The AI will proactively store context without being asked."
+          "markdownDescription": "Automatically save important information to memory as the AI discovers it. Saves are filtered through garbage patterns and semantic dedup to prevent noise."
         },
         "ollamaAgent.autoCompactContext": {
           "type": "boolean",

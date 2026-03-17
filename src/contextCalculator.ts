@@ -3,7 +3,7 @@
  * Provides utilities for estimating context size and determining when to compact.
  */
 
-import { OllamaMessage } from './ollamaClient';
+import { OllamaMessage, fetchModelInfo } from './ollamaClient';
 import { logInfo, logWarn, logError } from './logger';
 
 /** Message overhead tokens for role and structure */
@@ -67,15 +67,26 @@ const MODEL_CONTEXT_LIMITS: Record<string, number> = {
 /** Default context limit for unknown models */
 const DEFAULT_CONTEXT_LIMIT = 8192;
 
+/** Cache of resolved context limits from Ollama /api/show (persists for session) */
+const resolvedLimitsCache: Map<string, number> = new Map();
+
+/** Models currently being resolved (prevents duplicate concurrent requests) */
+const pendingResolutions: Map<string, Promise<number>> = new Map();
+
 /**
  * Get the context window size for a given model.
- * Returns the known limit or a safe default.
+ * Uses cached value from Ollama if available, otherwise falls back to hardcoded table.
+ * Call resolveModelContextLimit() first to populate the cache from Ollama.
  */
 export function getModelContextLimit(model: string): number {
-    // Normalize to lowercase for case-insensitive matching
     const modelLower = model.toLowerCase();
-    
-    // Try exact match first
+
+    // Check resolved cache first (from /api/show)
+    if (resolvedLimitsCache.has(modelLower)) {
+        return resolvedLimitsCache.get(modelLower)!;
+    }
+
+    // Try exact match in hardcoded table
     if (MODEL_CONTEXT_LIMITS[modelLower]) {
         return MODEL_CONTEXT_LIMITS[modelLower];
     }
@@ -89,6 +100,57 @@ export function getModelContextLimit(model: string): number {
     
     logWarn(`[context] Unknown model "${model}", using default limit of ${DEFAULT_CONTEXT_LIMIT} tokens`);
     return DEFAULT_CONTEXT_LIMIT;
+}
+
+/**
+ * Query Ollama for the actual context window of a model and cache the result.
+ * Safe to call multiple times — deduplicates concurrent requests and caches.
+ * Returns the resolved limit (from Ollama or fallback).
+ */
+export async function resolveModelContextLimit(model: string): Promise<number> {
+    const modelLower = model.toLowerCase();
+
+    // Already cached
+    if (resolvedLimitsCache.has(modelLower)) {
+        return resolvedLimitsCache.get(modelLower)!;
+    }
+
+    // Already in-flight
+    if (pendingResolutions.has(modelLower)) {
+        return pendingResolutions.get(modelLower)!;
+    }
+
+    const resolution = (async () => {
+        try {
+            const info = await fetchModelInfo(model);
+            if (info?.contextLength && info.contextLength > 0) {
+                resolvedLimitsCache.set(modelLower, info.contextLength);
+                logInfo(`[context] Resolved ${model} context limit from Ollama: ${info.contextLength} tokens`);
+                return info.contextLength;
+            }
+        } catch (err) {
+            logWarn(`[context] Failed to resolve context limit for ${model}: ${(err as Error).message}`);
+        }
+
+        // Fall back to hardcoded table
+        const fallback = getModelContextLimit(model);
+        resolvedLimitsCache.set(modelLower, fallback);
+        logInfo(`[context] Using fallback context limit for ${model}: ${fallback} tokens`);
+        return fallback;
+    })();
+
+    pendingResolutions.set(modelLower, resolution);
+    try {
+        return await resolution;
+    } finally {
+        pendingResolutions.delete(modelLower);
+    }
+}
+
+/** Clear the resolved limits cache (useful for testing or when Ollama config changes) */
+export function clearContextLimitCache(): void {
+    resolvedLimitsCache.clear();
+    logInfo('[context] Context limit cache cleared');
 }
 
 /**

@@ -50,6 +50,8 @@ const searchPrevBtn    = /** @type {HTMLButtonElement} */ (document.getElementBy
 const searchNextBtn    = /** @type {HTMLButtonElement} */ (document.getElementById('search-next'));
 const searchClearBtn   = /** @type {HTMLButtonElement} */ (document.getElementById('search-clear'));
 const contextUsageEl   = /** @type {HTMLSpanElement}   */ (document.getElementById('context-usage'));
+const compactBtnFooter = /** @type {HTMLButtonElement}  */ (document.getElementById('compact-btn-footer'));
+const settingsBtn      = /** @type {HTMLButtonElement}  */ (document.getElementById('settings-btn'));
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -228,8 +230,12 @@ function setStatus(state, text) {
  * @param {string[]} models
  * @param {boolean} connected
  */
-function populateModels(models, connected) {
+/** @type {string} Configured default model from settings */
+let defaultModel = '';
+
+function populateModels(models, connected, configuredModel) {
     modelSelect.innerHTML = '';
+    if (configuredModel) { defaultModel = configuredModel; }
     if (!connected || !models.length) {
         setStatus('disconnected', 'Ollama not running — run: ollama serve');
         const o = document.createElement('option');
@@ -248,7 +254,12 @@ function populateModels(models, connected) {
         modelSelect.appendChild(o);
     });
     
-    // Apply current preset if it exists and model is available
+    // Apply default model from settings if available
+    if (defaultModel && models.includes(defaultModel)) {
+        modelSelect.value = defaultModel;
+    }
+
+    // Apply current preset if it exists and model is available (overrides default)
     if (currentPreset && MODEL_PRESETS[currentPreset]) {
         const config = MODEL_PRESETS[currentPreset];
         if (models.includes(config.model)) {
@@ -475,7 +486,7 @@ messagesEl.addEventListener('click', (e) => {
 // ── Scroll helpers ────────────────────────────────────────────────────────────
 
 function scrollBottom(force = false) {
-    if (force || !userScrolledUp) {
+    if (force || (!userScrolledUp && streaming)) {
         messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 }
@@ -498,6 +509,7 @@ const TOOL_ICONS = {
     workspace_summary: '🗂️',
     read_file:         '📄',
     list_files:        '📁',
+    find_files:        '🔎',
     search_files:      '🔍',
     create_file:       '🆕',
     edit_file:         '✏️',
@@ -505,6 +517,7 @@ const TOOL_ICONS = {
     append_to_file:    '📝',
     rename_file:       '🔄',
     delete_file:       '🗑️',
+    shell_read:        '🐚',
     run_command:       '⚡',
     memory_list:       '🧠',
     memory_write:      '💡',
@@ -980,6 +993,43 @@ function addFileToastSimple(icon, text) {
 }
 
 /**
+ * Show an inline confirmation card with Accept/Reject buttons.
+ * @param {string} id   Unique confirmation ID
+ * @param {string} action  Action type: 'run', 'write', 'rename', 'delete'
+ * @param {string} detail  Human-readable description
+ */
+function addConfirmCard(id, action, detail) {
+    const icons = { run: '⚡', write: '💾', rename: '🔄', delete: '🗑️' };
+    const icon = icons[action] || '❓';
+    const div = document.createElement('div');
+    div.className = 'confirm-card';
+    div.id = `confirm-${id}`;
+    div.innerHTML =
+        `<div class="confirm-header">` +
+            `<span class="confirm-icon">${icon}</span>` +
+            `<span class="confirm-detail">${escHtml(detail)}</span>` +
+        `</div>` +
+        `<div class="confirm-actions">` +
+            `<button class="confirm-btn accept">Accept</button>` +
+            `<button class="confirm-btn reject">Reject</button>` +
+        `</div>`;
+    const acceptBtn = div.querySelector('.confirm-btn.accept');
+    const rejectBtn = div.querySelector('.confirm-btn.reject');
+    acceptBtn.addEventListener('click', () => {
+        vscode.postMessage({ command: 'confirmResponse', id, accepted: true });
+        div.classList.add('accepted');
+        div.querySelector('.confirm-actions').innerHTML = '<span class="confirm-resolved">✅ Accepted</span>';
+    });
+    rejectBtn.addEventListener('click', () => {
+        vscode.postMessage({ command: 'confirmResponse', id, accepted: false });
+        div.classList.add('rejected');
+        div.querySelector('.confirm-actions').innerHTML = '<span class="confirm-resolved">❌ Rejected</span>';
+    });
+    messagesEl.insertBefore(div, scrollBtn);
+    scrollBottom();
+}
+
+/**
  * Show a context warning/compacted/overflow toast in the chat.
  * @param {'warning'|'compacted'|'overflow'} kind
  * @param {string} text
@@ -1014,6 +1064,7 @@ function updateContextUsage(percentage) {
     if (percentage <= 0) {
         contextUsageEl.textContent = '';
         contextUsageEl.className = '';
+        if (compactBtnFooter) compactBtnFooter.classList.remove('visible');
         return;
     }
     const pct = Math.round(percentage);
@@ -1027,6 +1078,25 @@ function updateContextUsage(percentage) {
     } else {
         contextUsageEl.className = '';
     }
+    // Show compact button whenever context usage is visible
+    if (compactBtnFooter) compactBtnFooter.classList.toggle('visible', pct > 0);
+}
+
+// ── Footer compact button ─────────────────────────────────────────────────────
+if (compactBtnFooter) {
+    compactBtnFooter.addEventListener('click', () => {
+        vscode.postMessage({ command: 'compactContext' });
+        compactBtnFooter.textContent = 'Compacting…';
+        compactBtnFooter.disabled = true;
+        setTimeout(() => { compactBtnFooter.textContent = '🗜️ Compact'; compactBtnFooter.disabled = false; }, 3000);
+    });
+}
+
+// ── Settings button ───────────────────────────────────────────────────────────
+if (settingsBtn) {
+    settingsBtn.addEventListener('click', () => {
+        vscode.postMessage({ command: 'openSettings' });
+    });
 }
 
 // ── Mode-switch notice (native → text-mode tool calling) ─────────────────────
@@ -1644,7 +1714,7 @@ window.addEventListener('message', (event) => {
 
     switch (msg.type) {
         case 'models':
-            populateModels(msg.models, msg.connected);
+            populateModels(msg.models, msg.connected, msg.defaultModel);
             break;
 
         case 'streamStart':
@@ -1812,6 +1882,10 @@ window.addEventListener('message', (event) => {
         case 'undoResult':
             addFileToastSimple(msg.success ? '↩️' : '⚠️', msg.message);
             break;
+
+        case 'confirmAction':
+            addConfirmCard(msg.id, msg.action, msg.detail);
+            break;
     }
 });
 
@@ -1836,8 +1910,8 @@ historyBtn.addEventListener('click', () => {
 });
 historyCloseBtn.addEventListener('click', closeHistoryPanel);
 
-historyClearBtn.addEventListener('click', () => {
-    if (!confirm('Delete ALL saved chats? This cannot be undone.')) { return; }
+historyClearBtn.addEventListener('click', async () => {
+    // VS Code webviews don't support confirm(), so we use a simple approach
     vscode.postMessage({ command: 'clearAllSessions' });
     closeHistoryPanel();
 });

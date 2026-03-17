@@ -254,3 +254,95 @@ export async function fetchModels(): Promise<string[]> {
         return [];
     }
 }
+
+// ── Model info via /api/show ─────────────────────────────────────────────────
+
+export interface OllamaModelInfo {
+    contextLength: number | null;
+    parameterSize: string | null;
+    quantization: string | null;
+    family: string | null;
+}
+
+/**
+ * Fetch model metadata from Ollama's /api/show endpoint.
+ * Returns the actual context window (num_ctx) and other model details.
+ * Returns null if the request fails.
+ */
+export function fetchModelInfo(model: string): Promise<OllamaModelInfo | null> {
+    return new Promise((resolve) => {
+        const { hostname, port } = getEndpoint();
+        const body = JSON.stringify({ name: model });
+
+        const req = makeRequest(
+            {
+                hostname, port, path: '/api/show', method: 'POST',
+                timeout: 5000,
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(body),
+                },
+            },
+            (res) => {
+                if (res.statusCode !== 200) {
+                    let e = '';
+                    res.on('data', (c: Buffer) => (e += c.toString()));
+                    res.on('end', () => {
+                        logError(`/api/show HTTP ${res.statusCode}: ${e.slice(0, 200)}`);
+                        resolve(null);
+                    });
+                    return;
+                }
+
+                let raw = '';
+                res.on('data', (c: Buffer) => (raw += c.toString()));
+                res.on('end', () => {
+                    try {
+                        const data = JSON.parse(raw);
+                        // Extract context length from model_info or parameters
+                        let contextLength: number | null = null;
+
+                        // Method 1: model_info object (most reliable)
+                        const modelInfo = data.model_info;
+                        if (modelInfo) {
+                            // Keys vary by architecture, look for common patterns
+                            for (const key of Object.keys(modelInfo)) {
+                                if (key.endsWith('.context_length')) {
+                                    contextLength = Number(modelInfo[key]);
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Method 2: parameters string (fallback)
+                        if (!contextLength && data.parameters) {
+                            const match = String(data.parameters).match(/num_ctx\s+(\d+)/);
+                            if (match) { contextLength = Number(match[1]); }
+                        }
+
+                        // Extract other useful details
+                        const details = data.details || {};
+
+                        const info: OllamaModelInfo = {
+                            contextLength,
+                            parameterSize: details.parameter_size || null,
+                            quantization: details.quantization_level || null,
+                            family: details.family || null,
+                        };
+
+                        logInfo(`[model-info] ${model}: ctx=${info.contextLength ?? 'unknown'}, params=${info.parameterSize ?? '?'}, quant=${info.quantization ?? '?'}`);
+                        resolve(info);
+                    } catch (err) {
+                        logError(`[model-info] Failed to parse /api/show response: ${(err as Error).message}`);
+                        resolve(null);
+                    }
+                });
+            }
+        );
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.on('error', () => resolve(null));
+        req.write(body);
+        req.end();
+    });
+}
+

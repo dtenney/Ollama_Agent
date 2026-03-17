@@ -3,103 +3,178 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Memory Statistics</title>
+    <title>Memory Manager</title>
     <style>
         body {
-            padding: 20px;
+            padding: 16px;
             color: var(--vscode-foreground);
             font-family: var(--vscode-font-family);
+            font-size: var(--vscode-font-size, 13px);
         }
-        h1 { font-size: 24px; margin-bottom: 20px; }
-        h2 { font-size: 18px; margin-top: 30px; margin-bottom: 15px; }
+        h1 { font-size: 20px; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-            margin-bottom: 30px;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+            margin-bottom: 20px;
         }
         .stat-card {
             background: var(--vscode-editor-background);
             border: 1px solid var(--vscode-panel-border);
             border-radius: 4px;
-            padding: 15px;
+            padding: 12px;
         }
-        .stat-label {
-            font-size: 12px;
-            opacity: 0.7;
-            margin-bottom: 5px;
-        }
-        .stat-value {
-            font-size: 24px;
-            font-weight: bold;
-        }
-        .tier-bar {
-            margin-bottom: 15px;
-        }
-        .tier-label {
-            display: flex;
-            justify-content: space-between;
-            margin-bottom: 5px;
-            font-size: 13px;
-        }
-        .tier-progress {
-            height: 20px;
-            background: var(--vscode-editor-background);
-            border-radius: 3px;
+        .stat-label { font-size: 11px; opacity: 0.6; margin-bottom: 3px; }
+        .stat-value { font-size: 22px; font-weight: bold; }
+
+        /* Tier sections */
+        .tier-section {
+            margin-bottom: 8px;
+            border: 1px solid var(--vscode-panel-border);
+            border-radius: 4px;
             overflow: hidden;
         }
-        .tier-fill {
-            height: 100%;
-            transition: width 0.3s;
+        .tier-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            cursor: pointer;
+            user-select: none;
+            font-weight: 600;
+            font-size: 13px;
+            background: var(--vscode-editor-background);
         }
-        .tier-0 { background: #e74c3c; }
-        .tier-1 { background: #e67e22; }
-        .tier-2 { background: #f39c12; }
-        .tier-3 { background: #3498db; }
-        .tier-4 { background: #9b59b6; }
-        .tier-5 { background: #95a5a6; }
+        .tier-header:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.04)); }
+        .tier-arrow { font-size: 10px; transition: transform 0.15s; flex-shrink: 0; }
+        .tier-section.open .tier-arrow { transform: rotate(90deg); }
+        .tier-badge {
+            font-size: 10px;
+            padding: 1px 6px;
+            border-radius: 8px;
+            color: #fff;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+        .tier-badge-0 { background: #e74c3c; }
+        .tier-badge-1 { background: #e67e22; }
+        .tier-badge-2 { background: #f39c12; }
+        .tier-badge-3 { background: #3498db; }
+        .tier-badge-4 { background: #9b59b6; }
+        .tier-badge-5 { background: #95a5a6; }
+        .tier-count { margin-left: auto; font-size: 11px; opacity: 0.5; font-weight: 400; }
+        .tier-body { display: none; }
+        .tier-section.open .tier-body { display: block; }
+        .tier-empty {
+            padding: 12px 16px;
+            font-size: 12px;
+            opacity: 0.4;
+            font-style: italic;
+        }
+
+        /* Entry cards */
+        .entry {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            padding: 8px 12px;
+            border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.15));
+            font-size: 12px;
+        }
+        .entry:hover { background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.03)); }
+        .entry-content { flex: 1; min-width: 0; line-height: 1.5; word-break: break-word; }
+        .entry-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 3px;
+            margin-top: 4px;
+        }
+        .entry-tag {
+            font-size: 10px;
+            padding: 0 5px;
+            border-radius: 3px;
+            background: var(--vscode-badge-background, rgba(128,128,128,0.2));
+            color: var(--vscode-badge-foreground, #ccc);
+        }
+        .entry-meta {
+            font-size: 10px;
+            opacity: 0.4;
+            margin-top: 3px;
+        }
+        .entry-actions {
+            display: flex;
+            gap: 2px;
+            flex-shrink: 0;
+            opacity: 0;
+            transition: opacity 0.1s;
+        }
+        .entry:hover .entry-actions { opacity: 1; }
+        .entry-btn {
+            background: none;
+            border: 1px solid transparent;
+            color: var(--vscode-descriptionForeground, #888);
+            cursor: pointer;
+            font-size: 12px;
+            padding: 2px 5px;
+            border-radius: 3px;
+            line-height: 1;
+        }
+        .entry-btn:hover {
+            border-color: var(--vscode-panel-border, #444);
+            background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.06));
+        }
+        .entry-btn.danger:hover { color: #f44747; }
+        .entry-btn.promote:hover { color: #4ec94e; }
+        .entry-btn.demote:hover { color: #e5c07b; }
+
+        /* Footer actions */
         .actions {
             display: flex;
-            gap: 10px;
-            margin-top: 30px;
+            gap: 8px;
+            margin-top: 20px;
+            flex-wrap: wrap;
         }
         button {
             background: var(--vscode-button-background);
             color: var(--vscode-button-foreground);
             border: none;
-            padding: 8px 16px;
+            padding: 6px 14px;
             border-radius: 3px;
             cursor: pointer;
-            font-size: 13px;
+            font-size: 12px;
+            font-family: inherit;
         }
-        button:hover {
-            background: var(--vscode-button-hoverBackground);
-        }
+        button:hover { background: var(--vscode-button-hoverBackground); }
         .secondary {
-            background: var(--vscode-button-secondaryBackground);
-            color: var(--vscode-button-secondaryForeground);
+            background: #3a3d41;
+            color: #ccc;
+            border: 1px solid rgba(128,128,128,0.3);
         }
-        .secondary:hover {
-            background: var(--vscode-button-secondaryHoverBackground);
+        .secondary:hover { background: #50545a; }
+        .danger-btn {
+            background: rgba(244,71,71,0.15);
+            color: #f44747;
+            border: 1px solid rgba(244,71,71,0.35);
         }
+        .danger-btn:hover { background: rgba(244,71,71,0.3); }
         input[type="file"] { display: none; }
     </style>
 </head>
 <body>
-    <h1>Memory Statistics</h1>
-    
+    <h1>🧠 Memory Manager</h1>
+
     <div class="stats-grid">
         <div class="stat-card">
             <div class="stat-label">Total Entries</div>
             <div class="stat-value" id="totalEntries">0</div>
         </div>
         <div class="stat-card">
-            <div class="stat-label">Auto-Loaded</div>
+            <div class="stat-label">Auto-Loaded (T0-T2)</div>
             <div class="stat-value" id="autoLoaded">0</div>
         </div>
         <div class="stat-card">
-            <div class="stat-label">In Qdrant</div>
-            <div class="stat-value" id="inQdrant">0</div>
+            <div class="stat-label">Total Tokens</div>
+            <div class="stat-value" id="totalTokens">0</div>
         </div>
         <div class="stat-card">
             <div class="stat-label">Total Accesses</div>
@@ -107,58 +182,152 @@
         </div>
     </div>
 
-    <h2>Tier Distribution</h2>
-    <div id="tierBars"></div>
+    <div id="tierSections"></div>
 
     <div class="actions">
-        <button onclick="exportMemory()">Export Memory</button>
-        <button class="secondary" onclick="document.getElementById('importFile').click()">Import Memory</button>
+        <button onclick="vscode.postMessage({ command: 'scanDocs' })">📄 Scan Docs</button>
+        <button onclick="vscode.postMessage({ command: 'refresh' })">🔄 Refresh</button>
+        <button onclick="vscode.postMessage({ command: 'export' })">📤 Export</button>
+        <button class="secondary" onclick="document.getElementById('importFile').click()">📥 Import</button>
+        <button class="danger-btn" onclick="clearAll()">🗑 Clear All Memory</button>
         <input type="file" id="importFile" accept=".json" onchange="importMemory(event)">
     </div>
 
     <script>
         const vscode = acquireVsCodeApi();
         const tierNames = ['Critical', 'Essential', 'Operational', 'Collaboration', 'References', 'Archive'];
+        const tierIcons = ['🔴', '🟠', '🟡', '🔵', '🟣', '⚪'];
 
         window.addEventListener('message', event => {
-            const message = event.data;
-            if (message.type === 'stats') {
-                renderStats(message.stats);
+            const msg = event.data;
+            if (msg.type === 'fullData') {
+                renderAll(msg.stats, msg.entries);
             }
         });
 
-        function renderStats(stats) {
-            document.getElementById('totalEntries').textContent = stats.totalEntries;
-            document.getElementById('autoLoaded').textContent = stats.tierCounts[0] + stats.tierCounts[1] + stats.tierCounts[2];
-            document.getElementById('inQdrant').textContent = stats.tierCounts[4] + stats.tierCounts[5];
-            document.getElementById('totalAccesses').textContent = stats.totalAccesses;
+        function renderAll(stats, entriesByTier) {
+            // Stats cards
+            const tierCounts = stats.map(s => s.count);
+            const totalEntries = tierCounts.reduce((a, b) => a + b, 0);
+            const totalTokens = stats.reduce((sum, s) => sum + s.tokens, 0);
+            const totalAccesses = stats.reduce((sum, s) => sum + s.totalAccesses, 0);
 
-            const maxCount = Math.max(...stats.tierCounts, 1);
-            const barsHtml = stats.tierCounts.map((count, tier) => {
-                const percentage = (count / maxCount) * 100;
-                return `
-                    <div class="tier-bar">
-                        <div class="tier-label">
-                            <span>Tier ${tier}: ${tierNames[tier]}</span>
-                            <span>${count} entries</span>
-                        </div>
-                        <div class="tier-progress">
-                            <div class="tier-fill tier-${tier}" style="width: ${percentage}%"></div>
-                        </div>
-                    </div>
-                `;
-            }).join('');
-            document.getElementById('tierBars').innerHTML = barsHtml;
+            document.getElementById('totalEntries').textContent = totalEntries;
+            document.getElementById('autoLoaded').textContent = tierCounts[0] + tierCounts[1] + tierCounts[2];
+            document.getElementById('totalTokens').textContent = totalTokens > 1000 ? (totalTokens / 1000).toFixed(1) + 'k' : totalTokens;
+            document.getElementById('totalAccesses').textContent = totalAccesses;
+
+            // Tier sections
+            const container = document.getElementById('tierSections');
+            container.innerHTML = '';
+
+            for (let tier = 0; tier < 6; tier++) {
+                const entries = entriesByTier[tier] || [];
+                const count = entries.length;
+
+                const section = document.createElement('div');
+                section.className = 'tier-section' + (tier <= 2 ? ' open' : '');
+
+                const header = document.createElement('div');
+                header.className = 'tier-header';
+                header.innerHTML =
+                    `<span class="tier-arrow">▶</span>` +
+                    `<span class="tier-badge tier-badge-${tier}">T${tier}</span>` +
+                    `<span>${tierIcons[tier]} ${tierNames[tier]}</span>` +
+                    `<span class="tier-count">${count} entr${count === 1 ? 'y' : 'ies'}</span>`;
+                header.addEventListener('click', () => section.classList.toggle('open'));
+
+                const body = document.createElement('div');
+                body.className = 'tier-body';
+
+                if (!count) {
+                    body.innerHTML = '<div class="tier-empty">No entries</div>';
+                } else {
+                    entries.forEach(entry => {
+                        body.appendChild(createEntryEl(entry, tier));
+                    });
+                }
+
+                section.appendChild(header);
+                section.appendChild(body);
+                container.appendChild(section);
+            }
         }
 
-        function exportMemory() {
-            vscode.postMessage({ command: 'export' });
+        function createEntryEl(entry, tier) {
+            const div = document.createElement('div');
+            div.className = 'entry';
+            div.dataset.id = entry.id;
+
+            // Content + tags + meta
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'entry-content';
+            contentDiv.textContent = entry.content;
+
+            if (entry.tags && entry.tags.length) {
+                const tagsDiv = document.createElement('div');
+                tagsDiv.className = 'entry-tags';
+                entry.tags.forEach(t => {
+                    const tag = document.createElement('span');
+                    tag.className = 'entry-tag';
+                    tag.textContent = t;
+                    tagsDiv.appendChild(tag);
+                });
+                contentDiv.appendChild(tagsDiv);
+            }
+
+            const meta = document.createElement('div');
+            meta.className = 'entry-meta';
+            const created = new Date(entry.createdAt).toLocaleDateString();
+            meta.textContent = `${entry.id} · created ${created} · ${entry.accessCount} access${entry.accessCount !== 1 ? 'es' : ''}`;
+            contentDiv.appendChild(meta);
+
+            // Action buttons
+            const actions = document.createElement('div');
+            actions.className = 'entry-actions';
+
+            if (tier > 0) {
+                const promoteBtn = document.createElement('button');
+                promoteBtn.className = 'entry-btn promote';
+                promoteBtn.title = `Promote to Tier ${tier - 1} (${tierNames[tier - 1]})`;
+                promoteBtn.textContent = '⬆';
+                promoteBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    vscode.postMessage({ command: 'promote', id: entry.id });
+                });
+                actions.appendChild(promoteBtn);
+            }
+
+            if (tier < 5) {
+                const demoteBtn = document.createElement('button');
+                demoteBtn.className = 'entry-btn demote';
+                demoteBtn.title = `Demote to Tier ${tier + 1} (${tierNames[tier + 1]})`;
+                demoteBtn.textContent = '⬇';
+                demoteBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    vscode.postMessage({ command: 'demote', id: entry.id });
+                });
+                actions.appendChild(demoteBtn);
+            }
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'entry-btn danger';
+            deleteBtn.title = 'Delete entry';
+            deleteBtn.textContent = '🗑';
+            deleteBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                vscode.postMessage({ command: 'deleteEntry', id: entry.id });
+            });
+            actions.appendChild(deleteBtn);
+
+            div.appendChild(contentDiv);
+            div.appendChild(actions);
+            return div;
         }
 
         function importMemory(event) {
             const file = event.target.files[0];
             if (!file) return;
-
             const reader = new FileReader();
             reader.onload = e => {
                 try {
@@ -171,7 +340,10 @@
             reader.readAsText(file);
         }
 
-        // Request initial stats
+        function clearAll() {
+            vscode.postMessage({ command: 'clearAll' });
+        }
+
         vscode.postMessage({ command: 'ready' });
     </script>
 </body>

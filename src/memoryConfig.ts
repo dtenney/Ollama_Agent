@@ -68,7 +68,7 @@ export function getMemoryConfig(): MemoryConfig {
         demotionThresholdDays: config.get<number>('memory.demotionThresholdDays', 30),
         promotionAccessCount: config.get<number>('memory.promotionAccessCount', 5),
         archiveThresholdDays: config.get<number>('memory.archiveThresholdDays', 90),
-        maxContextTokens: config.get<number>('memory.maxContextTokens', 4000),
+        maxContextTokens: config.get<number>('memory.maxContextTokens', 1500),
         semanticSearchLimit: config.get<number>('memory.semanticSearchLimit', 5),
         fallbackToLocal: config.get<boolean>('memory.fallbackToLocal', true)
     };

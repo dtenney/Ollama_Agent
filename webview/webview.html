@@ -667,6 +667,33 @@
     .file-toast.edited  { background: rgba(79,193,255,0.08); border-color: rgba(79,193,255,0.3); color: var(--vscode-textLink-foreground, #4fc1ff); }
     .file-toast.deleted { background: rgba(244,71,71,0.08);  border-color: rgba(244,71,71,0.3);  color: #f44747; }
 
+    /* Inline confirmation card */
+    .confirm-card {
+        display: flex; flex-direction: column; gap: 8px;
+        margin: 6px 0; padding: 10px 12px;
+        border-radius: 8px; font-size: 12px;
+        background: rgba(229,192,123,0.08); border: 1px solid rgba(229,192,123,0.35); color: #e5c07b;
+    }
+    .confirm-header { display: flex; align-items: center; gap: 8px; }
+    .confirm-icon { font-size: 16px; }
+    .confirm-detail { flex: 1; word-break: break-word; font-family: var(--vscode-editor-font-family, monospace); }
+    .confirm-actions { display: flex; gap: 8px; }
+    .confirm-btn {
+        padding: 4px 14px; border-radius: 4px; border: none; cursor: pointer;
+        font-size: 12px; font-weight: 500;
+    }
+    .confirm-btn.accept {
+        background: rgba(80,200,120,0.2); color: #50c878; border: 1px solid rgba(80,200,120,0.4);
+    }
+    .confirm-btn.accept:hover { background: rgba(80,200,120,0.35); }
+    .confirm-btn.reject {
+        background: rgba(244,71,71,0.15); color: #f44747; border: 1px solid rgba(244,71,71,0.35);
+    }
+    .confirm-btn.reject:hover { background: rgba(244,71,71,0.3); }
+    .confirm-card.accepted { border-color: rgba(80,200,120,0.4); opacity: 0.7; }
+    .confirm-card.rejected { border-color: rgba(244,71,71,0.35); opacity: 0.7; }
+    .confirm-resolved { font-size: 12px; opacity: 0.8; }
+
     /* ── Markdown elements ───────────────────────────────────────────────── */
     strong { font-weight: 700; }
     em     { font-style: italic; }
@@ -863,6 +890,21 @@
     #context-usage.critical { color: #f48771; opacity: 1; }
     #context-usage.over  { color: #f44747; opacity: 1; font-weight: 600; }
 
+    #compact-btn-footer {
+      font-size: 10px;
+      background: none;
+      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
+      color: var(--vscode-descriptionForeground, #888);
+      border-radius: 3px;
+      padding: 1px 6px;
+      cursor: pointer;
+      display: none;
+      font-family: inherit;
+      white-space: nowrap;
+    }
+    #compact-btn-footer:hover { background: rgba(255,255,255,0.08); color: var(--vscode-sideBar-foreground, #ccc); }
+    #compact-btn-footer.visible { display: inline-block; }
+
     /* ── Context toast notifications ─────────────────────────────────────── */
     .context-toast {
       margin: 2px 14px;
@@ -918,6 +960,7 @@
     <select id="model-select"><option value="" disabled selected>Loading…</option></select>
     <button id="search-btn" class="header-btn" title="Search in chat">🔍</button>
     <button id="history-btn" class="header-btn" title="Chat History">🕐</button>
+    <button id="settings-btn" class="header-btn" title="Extension Settings">⚙️</button>
     <button id="new-chat-btn" class="header-btn" title="New Chat">＋</button>
   </div>
 
@@ -992,6 +1035,7 @@
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <span id="context-usage"></span>
+        <button id="compact-btn-footer" title="Compact conversation context">🗜️ Compact</button>
         <span id="token-indicator"></span>
         <button id="stop-btn">■ Stop</button>
       </div>

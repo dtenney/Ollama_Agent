@@ -1,11 +1,23 @@
 import axios, { AxiosInstance } from 'axios';
+import * as crypto from 'crypto';
 import { logInfo, logError } from './logger';
 import { MemoryConfig } from './memoryConfig';
+
+/**
+ * Convert an arbitrary string ID to a deterministic UUID.
+ * Qdrant requires point IDs to be unsigned integers or UUIDs.
+ */
+function stringToUuid(id: string): string {
+    const hash = crypto.createHash('md5').update(id).digest('hex');
+    // Format as UUID v4-like: 8-4-4-4-12
+    return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20, 32)}`;
+}
 
 export interface QdrantPoint {
     id: string;
     vector: number[];
     payload: {
+        memoryId: string;
         content: string;
         tier: number;
         tags?: string[];
@@ -106,7 +118,7 @@ export class QdrantClient {
     async upsertPoint(point: QdrantPoint): Promise<void> {
         try {
             await this.client.put(`/collections/${this.collectionName}/points`, {
-                points: [point]
+                points: [{ ...point, id: stringToUuid(point.id) }]
             });
         } catch (error) {
             if (axios.isAxiosError(error)) {
@@ -126,7 +138,7 @@ export class QdrantClient {
             // Batch in groups of 100 to avoid overwhelming Qdrant
             const batchSize = 100;
             for (let i = 0; i < points.length; i += batchSize) {
-                const batch = points.slice(i, i + batchSize);
+                const batch = points.slice(i, i + batchSize).map(p => ({ ...p, id: stringToUuid(p.id) }));
                 await this.client.put(`/collections/${this.collectionName}/points`, {
                     points: batch
                 });
@@ -181,7 +193,7 @@ export class QdrantClient {
             }
 
             return response.data.result.map((r: any) => ({
-                id: r.id,
+                id: r.payload?.memoryId || r.id,
                 score: r.score,
                 payload: r.payload
             }));
@@ -203,7 +215,7 @@ export class QdrantClient {
     async deletePoint(id: string): Promise<void> {
         try {
             await this.client.post(`/collections/${this.collectionName}/points/delete`, {
-                points: [id]
+                points: [stringToUuid(id)]
             });
         } catch (error) {
             if (axios.isAxiosError(error)) {
@@ -221,7 +233,7 @@ export class QdrantClient {
 
         try {
             await this.client.post(`/collections/${this.collectionName}/points/delete`, {
-                points: ids
+                points: ids.map(stringToUuid)
             });
             logInfo(`[qdrant] Deleted ${ids.length} points`);
         } catch (error) {

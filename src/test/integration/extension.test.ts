@@ -35,22 +35,18 @@ describe('Extension Integration Tests', () => {
     });
   });
 
-  it('should register chat view', () => {
-    const view = vscode.window.registerWebviewViewProvider(
-      'ollamaAgent.chatView',
-      {} as any
-    );
-
-    assert.ok(view);
+  it('should register chat view', async () => {
+    // The extension registers the chatView provider on activation.
+    // Verify by checking the extension activated successfully (provider registered without error).
+    const ext = vscode.extensions.getExtension('dtenney.ollamapilot');
+    assert.ok(ext?.isActive, 'Extension should be active, meaning chatView provider was registered');
   });
 
-  it('should register memory view', () => {
-    const view = vscode.window.registerTreeDataProvider(
-      'ollamaAgent.memoryView',
-      {} as any
-    );
-
-    assert.ok(view);
+  it('should register memory view', async () => {
+    // The extension registers the memoryView tree data provider on activation.
+    // Verify by checking the extension activated successfully.
+    const ext = vscode.extensions.getExtension('dtenney.ollamapilot');
+    assert.ok(ext?.isActive, 'Extension should be active, meaning memoryView provider was registered');
   });
 
   it('should load configuration', () => {

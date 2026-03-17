@@ -40,8 +40,10 @@ type WebviewMsg =
     | { command: 'searchSymbols'; query: string }
     | { command: 'updatePins'; pins: string[] }
     | { command: 'updatePinnedFiles'; files: string[] }
+    | { command: 'openSettings' }
     | { command: 'compactContext' }
     | { command: 'undoLastTool' }
+    | { command: 'confirmResponse'; id: string; accepted: boolean }
     | { command: 'applyCodeBlock'; code: string; lang: string }
     | { command: 'webviewError'; text: string };
 
@@ -192,7 +194,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                 // ── Model discovery ───────────────────────────────────────
                 case 'getModels': {
                     const models = await fetchModels();
-                    post({ type: 'models', models, connected: models.length > 0 });
+                    post({ type: 'models', models, connected: models.length > 0, defaultModel: getConfig().model });
                     break;
                 }
 
@@ -442,6 +444,12 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     if (session.agentHistory.length) {
                         this._agent.restoreHistory(session.agentHistory);
                     }
+                    // Log memory state so we can verify it's available on restore
+                    if (this.memory instanceof TieredMemoryManager) {
+                        const stats = this.memory.getStats();
+                        const total = stats.reduce((sum, s) => sum + s.count, 0);
+                        logInfo(`[provider] Session loaded with ${total} memory entries available`);
+                    }
                     logInfo(`[provider] Loaded session "${session.title}"`);
                     post({
                         type: 'sessionLoaded',
@@ -538,6 +546,12 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
+                // ── Open extension settings ──────────────────────────────
+                case 'openSettings': {
+                    vscode.commands.executeCommand('workbench.action.openSettings', 'ollamaAgent');
+                    break;
+                }
+
                 // ── Manual context compaction ─────────────────────────────
                 case 'compactContext': {
                     const result = await this._agent!.compactContext(50);
@@ -568,6 +582,13 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                 case 'applyCodeBlock': {
                     const applyMsg = raw as { command: 'applyCodeBlock'; code: string; lang: string };
                     await this.applyCodeBlock(applyMsg.code, applyMsg.lang);
+                    break;
+                }
+
+                // ── Inline confirmation response from webview ─────────────────
+                case 'confirmResponse': {
+                    const crMsg = raw as unknown as { command: 'confirmResponse'; id: string; accepted: boolean };
+                    this._agent?.resolveConfirmation(crMsg.accepted);
                     break;
                 }
 
@@ -699,12 +720,17 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         // Show diff preview
         const diffManager = new DiffViewManager();
         try {
-            const result = await diffManager.showDiff(filePath, original, newContent);
-            if (result.accepted) {
+            await diffManager.showDiffPreview(filePath, original, newContent);
+            const choice = await vscode.window.showInformationMessage(
+                `Apply changes to ${path.basename(filePath)}?`,
+                'Accept', 'Reject'
+            );
+            if (choice === 'Accept') {
                 const fullRange = new vscode.Range(doc.positionAt(0), doc.positionAt(original.length));
                 await editor.edit(eb => eb.replace(fullRange, newContent));
                 logInfo(`[provider] Applied code block to ${vscode.workspace.asRelativePath(doc.uri)}`);
             }
+            await diffManager.closeDiffPreview();
         } finally {
             diffManager.dispose();
         }

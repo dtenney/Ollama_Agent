@@ -13,6 +13,7 @@ webview/vendor/highlight.bundle.js
 
 # ── Dev scripts (not needed by users) ─────────────────────────────────────────
 scripts/generate-banner.py
+.vscode-test.mjs
 
 # ── Session / planning docs (internal) ────────────────────────────────────────
 SESSION_STATE.md
@@ -75,9 +76,10 @@ npm-debug.log*
 # ── TypeScript build info ─────────────────────────────────────────────────────
 *.tsbuildinfo
 
-# ── Test coverage ─────────────────────────────────────────────────────────────
+# ── Test coverage / VS Code test downloads ───────────────────────────────────
 coverage/
 .nyc_output/
+.vscode-test/
 
 # ── IDE ───────────────────────────────────────────────────────────────────────
 .idea/
@@ -88,5 +90,9 @@ coverage/
 qdrant_storage/
 .qdrant/
 
-# ── User-specific MCP config ─────────────────────────────────────────────────
+# ── User-specific runtime data ────────────────────────────────────────────────
 .ollamapilot/mcp.json
+.ollamapilot/memory.json
+
+# ── Internal test notes ──────────────────────────────────────────────────────
+MANUAL_TESTS.md

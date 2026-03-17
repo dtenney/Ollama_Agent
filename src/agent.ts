@@ -10,9 +10,10 @@ import { buildWorkspaceSummary, SKIP_DIRS, detectPythonEnvironment, formatPython
 import { ProjectMemory } from './projectMemory';
 import { TieredMemoryManager } from './memoryCore';
 import { isMCPTool, parseMCPToolName, callMCPTool, mcpToolsToOllamaFormat } from './mcpClient';
-import { calculateContextStats, compactHistory, ContextLevel } from './contextCalculator';
+import { calculateContextStats, compactHistory, ContextLevel, resolveModelContextLimit } from './contextCalculator';
 import { DiffViewManager } from './diffView';
 import { MultiFileRefactoringManager, RefactoringPlan } from './multiFileRefactor';
+import { GARBAGE_PATTERNS } from './docScanner';
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -161,8 +162,37 @@ export const TOOL_DEFINITIONS = [
     {
         type: 'function',
         function: {
+            name: 'find_files',
+            description: 'Find files by name or glob pattern in the workspace. Use this to locate files (e.g., "*.test.ts", "Dockerfile", "*.py"). For searching TEXT CONTENT inside files, use search_files instead.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    pattern: { type: 'string', description: 'Filename or glob pattern (e.g., "*.ts", "README*", "Dockerfile", "*.test.js")' },
+                    path: { type: 'string', description: 'Directory to search in (default ".")' },
+                },
+                required: ['pattern'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'shell_read',
+            description: 'Run a read-only shell command that does NOT modify files or state. No confirmation required. Use for: git log, git status, git diff, ls, tree, cat, head, tail, wc, find, grep, env, which, node -v, python --version, etc. Do NOT use for commands that write, install, build, or delete.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    command: { type: 'string', description: 'Read-only shell command to execute' },
+                },
+                required: ['command'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
             name: 'run_command',
-            description: 'Run a shell command in the workspace directory. Output streams live to the chat. Requires user confirmation. Use this for: running tests (pytest, npm test), linting (ruff, eslint), type checking (mypy, tsc), installing dependencies, running scripts, git operations, and any other CLI tool.',
+            description: 'Run a shell command that may MODIFY files or state. Requires user confirmation. Use for: running tests, linting, installing dependencies, building, running scripts, npm/pip install, make, etc. For read-only commands (git log, ls, cat, etc.) prefer shell_read instead.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -176,7 +206,7 @@ export const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'memory_list',
-            description: 'List all saved project memory notes for this workspace. Use this to recall previously stored facts, decisions, or context about the project.',
+            description: 'List all saved project memory notes for this workspace. ALWAYS call this tool when user asks "what do you know", "what have you learned", or asks about project knowledge — do not answer from conversation history alone.',
             parameters: { type: 'object', properties: {}, required: [] },
         },
     },
@@ -199,7 +229,7 @@ export const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'memory_delete',
-            description: 'Delete a saved project memory note by its id. Use memory_list first to get the id.',
+            description: 'Delete a saved project memory note by its id. IMPORTANT: You MUST call memory_list FIRST to get the actual entry IDs — do not guess or fabricate IDs.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -245,7 +275,7 @@ export const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'memory_tier_list',
-            description: 'List memories from specific tiers. Use to view only relevant tier(s) instead of all memories.',
+            description: 'List memories from specific tiers. ALWAYS call this tool when user asks to see specific tier memories — do not answer from conversation history alone. Use to view only relevant tier(s) instead of all memories.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -427,15 +457,17 @@ You have access to the user's workspace through the following tools:
 
   workspace_summary  — understand the project structure (call this first)
   read_file          — read any file
-  list_files         — list a directory (use this to find files by name)
-  search_files       — search for TEXT CONTENT across files (NOT filenames - use list_files for that)
+  list_files         — list a directory
+  find_files         — find files by name/glob pattern (e.g., "*.ts", "Dockerfile")
+  search_files       — search for TEXT CONTENT across files (NOT filenames - use find_files for that)
   create_file        — create a new file
   edit_file          — make targeted edits (old_string → new_string). Preferred for code changes.
   write_file         — overwrite a file entirely (use only when necessary)
   append_to_file     — append text to a file
   rename_file        — rename or move a file
   delete_file        — delete a file (destructive, use carefully)
-  run_command        — execute shell commands (tests, linters, type checkers, package managers, git, etc.)
+  shell_read         — run read-only shell commands WITHOUT confirmation (git log, git status, git diff, ls, cat, head, wc, find, grep, env, which, etc.)
+  run_command        — run shell commands that MODIFY state WITH confirmation (tests, installs, builds, scripts)
   memory_list        — recall saved facts/decisions about this project
   memory_write       — persist important facts, decisions, or context across sessions
   memory_delete      — remove a stale memory note
@@ -444,17 +476,28 @@ You have access to the user's workspace through the following tools:
   memory_tier_list   — list memories from specific tiers
   memory_stats       — get memory statistics (entry count and tokens per tier)
   read_terminal      — read recent output from VS Code integrated terminals
-  get_diagnostics    — get VS Code errors/warnings for a file (use after editing to verify changes)
+  get_diagnostics    — get VS Code errors/warnings for a file or workspace. ALWAYS use this when user asks about errors/warnings — do NOT use external linters instead.
 
 Guidelines:
 - ALWAYS CALL TOOLS DIRECTLY - never explain what tool to call, just call it immediately
 - Always call workspace_summary or read_file before proposing code changes.
 - Prefer edit_file over write_file for targeted modifications.
+- CRITICAL: When user asks about errors, warnings, or diagnostics in their code, ALWAYS call get_diagnostics FIRST — do NOT run external linters (ruff, eslint, tsc, etc.) unless the user specifically asks for a linter.
 - After editing or creating files, call get_diagnostics to check for errors introduced by your changes. If errors exist, fix them.
+- Prefer shell_read over run_command for read-only operations (git log, git status, git diff, ls, cat, head, wc, find, grep, etc.) — it requires no user confirmation and is faster.
+- Use find_files to locate files by name or pattern instead of multiple list_files calls.
 - Your persistent memory is automatically loaded (Tiers 0-2) and shown above.
 ${memoryGuidelines}
 - Use memory_search to find relevant past solutions without loading all memories.
+- CRITICAL: When user asks "what do you know about this project" or similar, ALWAYS call memory_list or memory_tier_list — do not answer from conversation history alone.
+- CRITICAL: Before calling memory_delete, ALWAYS call memory_list first to get the actual entry ID — never guess or fabricate IDs.
 - Be concise and accurate. Format all code with markdown fenced code blocks.
+
+CRITICAL — Action-Oriented Responses:
+- When asked to review, analyze, audit, fix, or improve code: ALWAYS use read_file/list_files to read the ACTUAL source files first, then propose REAL edits using edit_file on the actual code you read.
+- NEVER generate hypothetical examples, placeholder code, or generic "Example:" blocks. The user wants you to act on THEIR code, not see textbook examples.
+- If the user says "look at src/" or "check this file" — call list_files and read_file immediately. Do not describe what you would do.
+- When you find an issue, fix it with edit_file right away (or explain why you can't). Do not just list the issue with a generic code sample.
 ${workspaceRoot ? buildProjectTypeGuidance(workspaceRoot) : ''}`;
 }
 
@@ -541,11 +584,31 @@ WRONG: "You can call search_files with query README"
 WRONG: Showing JSON in a code block
 CORRECT: <tool>{"name": "search_files", "arguments": {"query": "README"}}</tool>
 
+EXAMPLE - User says "what do you know about this project?":
+WRONG: Answering from conversation history without calling a tool
+CORRECT: <tool>{"name": "memory_list", "arguments": {}}</tool>
+
+EXAMPLE - User says "delete the memory about the old API endpoint":
+WRONG: <tool>{"name": "memory_delete", "arguments": {"id": "SOME_GUESSED_ID"}}</tool>
+CORRECT (call memory_list FIRST, then delete with the real ID):
+<tool>{"name": "memory_list", "arguments": {}}</tool>
+[wait for result — find the actual ID]
+<tool>{"name": "memory_delete", "arguments": {"id": "t0_1234567890_abc1"}}</tool>
+
 EXAMPLE - User says "run the tests":
 CORRECT: <tool>{"name": "run_command", "arguments": {"command": "python -m pytest -v"}}</tool>
 
 EXAMPLE - User says "check for lint errors":
 CORRECT: <tool>{"name": "run_command", "arguments": {"command": "ruff check ."}}</tool>
+
+EXAMPLE - User says "find all test files":
+CORRECT: <tool>{"name": "find_files", "arguments": {"pattern": "*.test.ts"}}</tool>
+
+EXAMPLE - User says "what branch am I on":
+CORRECT: <tool>{"name": "shell_read", "arguments": {"command": "git branch --show-current"}}</tool>
+
+EXAMPLE - User says "show me the git log":
+CORRECT: <tool>{"name": "shell_read", "arguments": {"command": "git log --oneline -20"}}</tool>
 
 Available tools and their argument schemas:
   workspace_summary   — {}
@@ -558,23 +621,58 @@ Available tools and their argument schemas:
   append_to_file      — {"path": "path", "content": "text to append"}
   rename_file         — {"old_path": "current", "new_path": "new name"}
   delete_file         — {"path": "path"}
-  run_command         — {"command": "shell command"}
-  memory_list         — {}
+  find_files          — {"pattern": "glob pattern", "path": "optional dir"}
+  shell_read          — {"command": "read-only shell command (no confirmation)"}
+  run_command         — {"command": "shell command (requires confirmation)"}
+  memory_list         — {} — ALWAYS call when user asks "what do you know" or about project knowledge
   memory_write        — {"content": "note text", "tag": "optional tag"}
-  memory_delete       — {"id": "note id from memory_list"}
+  memory_delete       — {"id": "note id from memory_list"} — MUST call memory_list FIRST to get real IDs
   memory_search       — {"query": "search text", "tier": "optional", "limit": "optional"}
   memory_tier_write   — {"tier": 0-5, "content": "note text", "tags": ["optional"]}
-  memory_tier_list    — {"tiers": [0, 1, 2]}
+  memory_tier_list    — {"tiers": [0, 1, 2]} — ALWAYS call when user asks about specific tier memories
   memory_stats        — {}
   read_terminal       — {"index": "optional terminal index"}
-  get_diagnostics     — {"path": "optional relative/path"}
+  get_diagnostics     — {"path": "optional relative/path"} — ALWAYS use for error/warning checks, NOT external linters
+
+EXAMPLE - User says "are there any errors in my code?" or "check for errors":
+WRONG: <tool>{"name": "run_command", "arguments": {"command": "ruff check ."}}</tool>
+WRONG: <tool>{"name": "run_command", "arguments": {"command": "eslint ."}}</tool>
+CORRECT: <tool>{"name": "get_diagnostics", "arguments": {}}</tool>
+
+EXAMPLE - User says "check for errors in src/agent.ts":
+CORRECT: <tool>{"name": "get_diagnostics", "arguments": {"path": "src/agent.ts"}}</tool>
 ===================`;
 }
 
-/** Parse <tool>...</tool> blocks or raw JSON from text-mode model output. */
+/** Parse <tool>...</tool> blocks, raw JSON, or JSON in markdown code blocks from text-mode model output. */
 function parseTextToolCalls(text: string): OllamaToolCall[] {
     const calls: OllamaToolCall[] = [];
     const seenIds = new Set<string>(); // Prevent duplicates
+    
+    // Helper to add a parsed tool call
+    const addCall = (parsed: { name?: string; arguments?: Record<string, unknown>; [key: string]: unknown }, source: string) => {
+        if (!parsed.name || typeof parsed.name !== 'string') return;
+        
+        let args: Record<string, unknown>;
+        if (parsed.arguments !== undefined) {
+            args = parsed.arguments;
+        } else {
+            const { name, ...rest } = parsed;
+            args = rest;
+        }
+        
+        const callId = `${parsed.name}_${JSON.stringify(args)}`;
+        if (!seenIds.has(callId)) {
+            seenIds.add(callId);
+            logInfo(`[parseTextToolCalls] Found ${source} tool call: ${parsed.name}`);
+            calls.push({
+                function: {
+                    name: parsed.name,
+                    arguments: args,
+                },
+            });
+        }
+    };
     
     // Try <tool>...</tool> format first (also handle malformed <tool>...<tool>)
     // Use bracket counting for robust JSON extraction
@@ -626,36 +724,8 @@ function parseTextToolCalls(text: string): OllamaToolCall[] {
         if (foundJson && braceCount === 0) {
             const jsonStr = text.slice(jsonStart, jsonEnd).trim();
             try {
-                const parsed = JSON.parse(jsonStr) as {
-                    name?: string;
-                    arguments?: Record<string, unknown>;
-                    [key: string]: unknown;
-                };
-                if (parsed.name && typeof parsed.name === 'string') {
-                    // Handle both formats:
-                    // 1. {"name": "tool", "arguments": {...}}
-                    // 2. {"name": "tool", "arg1": "val1", ...}
-                    let args: Record<string, unknown>;
-                    if (parsed.arguments !== undefined) {
-                        args = parsed.arguments;
-                    } else {
-                        // Extract all fields except 'name' as arguments
-                        const { name, ...rest } = parsed;
-                        args = rest;
-                    }
-                    
-                    const callId = `${parsed.name}_${JSON.stringify(args)}`;
-                    if (!seenIds.has(callId)) {
-                        seenIds.add(callId);
-                        logInfo(`[parseTextToolCalls] Found XML tool call: ${parsed.name}`);
-                        calls.push({
-                            function: {
-                                name: parsed.name,
-                                arguments: args,
-                            },
-                        });
-                    }
-                }
+                const parsed = JSON.parse(jsonStr);
+                addCall(parsed, 'XML');
             } catch (e) {
                 logWarn(`[parseTextToolCalls] Failed to parse XML JSON: ${jsonStr.slice(0, 100)}`);
             }
@@ -665,42 +735,42 @@ function parseTextToolCalls(text: string): OllamaToolCall[] {
         }
     }
     
-    // If no XML format found, try raw JSON format: {"name": "...", "arguments": {...}}
+    // Try JSON inside markdown code blocks: ```json\n{...}\n```
     if (calls.length === 0) {
+        const codeBlockRegex = /```(?:json)?\s*\n?\s*(\{[\s\S]*?\})\s*\n?```/gi;
+        let match: RegExpExecArray | null;
+        while ((match = codeBlockRegex.exec(text)) !== null) {
+            try {
+                const parsed = JSON.parse(match[1]);
+                addCall(parsed, 'markdown code block');
+            } catch { /* not valid JSON */ }
+        }
+    }
+    
+    // Try raw JSON format: {"name": "...", "arguments": {...}} — may span multiple lines
+    if (calls.length === 0) {
+        // First try single-line JSON
         const lines = text.split('\n');
         for (const line of lines) {
             const trimmed = line.trim();
             if (trimmed.startsWith('{') && trimmed.includes('"name"')) {
                 try {
-                    const parsed = JSON.parse(trimmed) as {
-                        name?: string;
-                        arguments?: Record<string, unknown>;
-                        [key: string]: unknown;
-                    };
-                    if (parsed.name && typeof parsed.name === 'string') {
-                        // Handle both formats
-                        let args: Record<string, unknown>;
-                        if (parsed.arguments !== undefined) {
-                            args = parsed.arguments;
-                        } else {
-                            const { name, ...rest } = parsed;
-                            args = rest;
-                        }
-                        
-                        const callId = `${parsed.name}_${JSON.stringify(args)}`;
-                        if (!seenIds.has(callId)) {
-                            seenIds.add(callId);
-                            logInfo(`[parseTextToolCalls] Found raw JSON tool call: ${parsed.name}`);
-                            calls.push({
-                                function: {
-                                    name: parsed.name,
-                                    arguments: args,
-                                },
-                            });
-                        }
-                    }
-                } catch (e) {
-                    // Not valid JSON, skip
+                    const parsed = JSON.parse(trimmed);
+                    addCall(parsed, 'raw JSON (single line)');
+                } catch { /* not valid JSON */ }
+            }
+        }
+        
+        // If no single-line JSON found, try to find multi-line JSON object
+        if (calls.length === 0) {
+            // Look for a JSON object that contains "name" field
+            const jsonMatch = text.match(/\{[\s\S]*?"name"\s*:\s*"[^"]+"[\s\S]*?\}/g);
+            if (jsonMatch) {
+                for (const match of jsonMatch) {
+                    try {
+                        const parsed = JSON.parse(match);
+                        addCall(parsed, 'raw JSON (multi-line)');
+                    } catch { /* not valid JSON */ }
                 }
             }
         }
@@ -713,9 +783,12 @@ function parseTextToolCalls(text: string): OllamaToolCall[] {
     return calls;
 }
 
-/** Remove <tool>...</tool> blocks and raw JSON tool calls from content before storing in history / rendering. */
+/** Remove <tool>...</tool> blocks, raw JSON tool calls, and markdown code blocks with tool calls from content. */
 function stripToolBlocks(text: string): string {
     let result = text;
+    
+    // Remove markdown code blocks containing tool calls first
+    result = result.replace(/```(?:json)?\s*\n?\s*\{[\s\S]*?"name"[\s\S]*?\}\s*\n?```/gi, '');
     
     // Remove XML format using bracket counting (more robust than regex)
     let pos = 0;
@@ -817,12 +890,16 @@ export class Agent {
      * 'text'   — model rejected native tools; fall back to <tool> XML in text.
      * This persists across turns so the mode-switch only happens once per session.
      */
-    private toolMode: 'native' | 'text' = 'native';
+    private toolMode: 'native' | 'text' = 'text';
     /** Track if we've detected the model outputting JSON instead of calling tools */
     private detectedFakeToolCalls = false;
     /** Track consecutive failed tool calls to prevent infinite loops */
     private consecutiveFailures = 0;
     private readonly MAX_CONSECUTIVE_FAILURES = 3;
+    /** Track repeated identical tool calls to prevent infinite loops */
+    private lastToolSignature = '';
+    private consecutiveRepeats = 0;
+    private readonly MAX_CONSECUTIVE_REPEATS = 2;
     /** Track mode-switch retries to prevent infinite retry loops */
     private modeSwitchRetries = 0;
     private readonly MAX_MODE_SWITCH_RETRIES = 2;
@@ -841,6 +918,8 @@ export class Agent {
     private refactorManager: MultiFileRefactoringManager;
     /** Last file operation for undo support */
     private _lastFileOp: { path: string; originalContent: string | null; action: string } | null = null;
+    /** Pending inline confirmation resolver */
+    private _confirmResolver: ((accepted: boolean) => void) | null = null;
 
     constructor(
         private workspaceRoot: string,
@@ -977,6 +1056,23 @@ export class Agent {
     /** Whether an undo operation is available */
     get canUndo(): boolean { return this._lastFileOp !== null; }
 
+    /** Resolve a pending inline confirmation from the webview */
+    resolveConfirmation(accepted: boolean): void {
+        if (this._confirmResolver) {
+            this._confirmResolver(accepted);
+            this._confirmResolver = null;
+        }
+    }
+
+    /** Request inline confirmation from the webview chat UI */
+    private requestConfirmation(action: string, detail: string): Promise<boolean> {
+        return new Promise<boolean>((resolve) => {
+            this._confirmResolver = resolve;
+            const confirmId = `confirm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+            this.postFn({ type: 'confirmAction', id: confirmId, action, detail });
+        });
+    }
+
     async run(userMessage: string, model: string, post: PostFn): Promise<void> {
         this.stopRef = { stop: false };
         this.postFn  = post;
@@ -991,8 +1087,12 @@ export class Agent {
         
         this.history.push({ role: 'user', content: userMessage });
         this.userTurnCount++;
+        this.memoryWritesThisResponse = 0; // Reset rate limiter for this response
         
         logInfo(`Agent run — model: ${model}, mode: ${this.toolMode}, history: ${this.history.length}`);
+
+        // Resolve actual context limit from Ollama (cached after first call)
+        await resolveModelContextLimit(model);
 
         const cfg = getConfig();
         const baseSystemContent = cfg.systemPrompt.trim() || buildSystemPrompt(cfg.autoSaveMemory, this.workspaceRoot);
@@ -1013,16 +1113,16 @@ export class Agent {
             }
         }
 
-        // Build memory context from auto-load tiers
+        // Build memory context — use relevance-based loading when possible
         let memoryContext = '';
         if (this.memory && this.memory instanceof TieredMemoryManager) {
             try {
                 const memoryConfig = (this.memory as any).config;
-                const autoLoadTiers = memoryConfig?.autoLoadTiers || [0, 1, 2];
                 const maxTokens = memoryConfig?.maxContextTokens || 4000;
-                memoryContext = this.memory.buildContext(autoLoadTiers, maxTokens);
+                // Use semantic search to pull only relevant memories
+                memoryContext = await this.memory.buildRelevantContext(userMessage, maxTokens);
                 if (memoryContext) {
-                    logInfo(`[agent] Loaded memory context: ${Math.ceil(memoryContext.length / 4)} tokens from tiers ${autoLoadTiers.join(', ')}`);
+                    logInfo(`[agent] Loaded relevant memory context: ${Math.ceil(memoryContext.length / 4)} tokens`);
                 }
             } catch (error) {
                 const errorMsg = error instanceof Error ? error.message : String(error);
@@ -1030,7 +1130,7 @@ export class Agent {
             }
         }
 
-        const MAX_TURNS = 5;
+        const MAX_TURNS = 15;
         this.modeSwitchRetries = 0;
         let loopExhausted = true;
         for (let turn = 0; turn < MAX_TURNS; turn++) {
@@ -1047,7 +1147,7 @@ export class Agent {
 ## Your Persistent Memory
 ${memoryContext}
 
-This memory persists across all conversations. Use memory_write to add new information, memory_search to find past solutions.`;
+IMPORTANT: Only critical infrastructure is shown above. You have MORE memories stored across tiers 1-5. Before answering questions about project setup, conventions, frameworks, past decisions, or known issues, call memory_search("<topic>") or memory_tier_list to retrieve relevant context. Do NOT assume you have no memory — check first.`;
             }
             
             if (isTextMode) {
@@ -1177,20 +1277,44 @@ This memory persists across all conversations. Use memory_write to add new infor
                     const content = result.content;
                     // Use same detection logic as parser for consistency
                     const hasXmlToolCall = content.includes('<tool>');
-                    const hasJsonToolCall = content.split('\n').some(line => {
-                        const trimmed = line.trim();
-                        if (trimmed.startsWith('{') && trimmed.includes('"name"')) {
+                    const hasCodeBlockToolCall = (() => {
+                        const codeBlockRegex = /```(?:json)?\s*\n?\s*(\{[\s\S]*?\})\s*\n?```/gi;
+                        let m: RegExpExecArray | null;
+                        while ((m = codeBlockRegex.exec(content)) !== null) {
                             try {
-                                const parsed = JSON.parse(trimmed);
-                                return parsed.name && typeof parsed.name === 'string';
-                            } catch {
-                                return false;
-                            }
+                                const parsed = JSON.parse(m[1]);
+                                if (parsed.name && typeof parsed.name === 'string') { return true; }
+                            } catch { /* not valid JSON */ }
                         }
                         return false;
-                    });
+                    })();
+                    const hasJsonToolCall = (() => {
+                        // Check single-line JSON
+                        const singleLine = content.split('\n').some(line => {
+                            const trimmed = line.trim();
+                            if (trimmed.startsWith('{') && trimmed.includes('"name"')) {
+                                try {
+                                    const parsed = JSON.parse(trimmed);
+                                    return parsed.name && typeof parsed.name === 'string';
+                                } catch {
+                                    return false;
+                                }
+                            }
+                            return false;
+                        });
+                        if (singleLine) return true;
+                        // Check multi-line JSON with "name" field
+                        const multiLine = content.match(/\{[\s\S]*?"name"\s*:\s*"[^"]+"[\s\S]*?\}/);
+                        if (multiLine) {
+                            try {
+                                const parsed = JSON.parse(multiLine[0]);
+                                return parsed.name && typeof parsed.name === 'string';
+                            } catch { return false; }
+                        }
+                        return false;
+                    })();
                     
-                    if (hasJsonToolCall || hasXmlToolCall) {
+                    if (hasJsonToolCall || hasXmlToolCall || hasCodeBlockToolCall) {
                         this.detectedFakeToolCalls = true;
                         this.toolMode = 'text';
                         logInfo(`Model ${model} outputting fake tool calls instead of using native API → switching to text mode`);
@@ -1254,6 +1378,29 @@ This memory persists across all conversations. Use memory_write to add new infor
                 const toolId = `t_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
                 logInfo(`Tool [${this.toolMode}]: ${name}  args=${JSON.stringify(args)}`);
                 post({ type: 'toolCall', id: toolId, name, args });
+
+                // Detect repeated identical tool calls
+                const toolSig = `${name}_${JSON.stringify(args)}`;
+                if (toolSig === this.lastToolSignature) {
+                    this.consecutiveRepeats++;
+                } else {
+                    this.lastToolSignature = toolSig;
+                    this.consecutiveRepeats = 0;
+                }
+
+                if (this.consecutiveRepeats >= this.MAX_CONSECUTIVE_REPEATS) {
+                    logWarn(`[agent] Breaking repeat loop: ${name} called ${this.consecutiveRepeats + 1} times with same args`);
+                    const hint = `You already called ${name} with the same arguments ${this.consecutiveRepeats + 1} times and got the same result. DO NOT call this tool again. Use the result you already have and respond to the user with a text answer now.`;
+                    if (isTextMode) {
+                        this.history.push({ role: 'user', content: `[SYSTEM: ${hint}]` });
+                    } else {
+                        this.history.push({ role: 'tool', content: hint });
+                    }
+                    post({ type: 'toolResult', id: toolId, name, success: true, preview: '(duplicate call skipped)' });
+                    this.consecutiveRepeats = 0;
+                    this.lastToolSignature = '';
+                    break;
+                }
 
                 let toolResult: string;
                 try {
@@ -1502,10 +1649,12 @@ This memory persists across all conversations. Use memory_write to add new infor
 
                 const newContent = original.replace(oldString, newString);
 
-                // Show enhanced diff view with accept/reject options
-                const diffResult = await this.diffViewManager.showDiff(full, original, newContent);
+                // Open diff view for review, then ask for confirmation in chat
+                await this.diffViewManager.showDiffPreview(full, original, newContent);
+                const accepted = await this.requestConfirmation('edit', `Edit "${rel}" — ${oldString.split('\n').length} line(s) changed`);
+                this.diffViewManager.closeDiffPreview();
 
-                if (!diffResult.accepted) { return 'Edit cancelled by user.'; }
+                if (!accepted) { return 'Edit cancelled by user.'; }
 
                 fs.writeFileSync(full, newContent, 'utf8');
                 this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
@@ -1521,11 +1670,8 @@ This memory persists across all conversations. Use memory_write to add new infor
                 const full = this.safePath(root, rel);
                 const originalContent = fs.existsSync(full) ? fs.readFileSync(full, 'utf8') : null;
 
-                const action = await vscode.window.showWarningMessage(
-                    `Ollama Agent wants to overwrite "${rel}" (${content.split('\n').length} lines)`,
-                    { modal: true }, 'Write', 'Cancel'
-                );
-                if (action !== 'Write') { return 'Write cancelled by user.'; }
+                const accepted = await this.requestConfirmation('write', `Overwrite "${rel}" (${content.split('\n').length} lines)`);
+                if (!accepted) { return 'Write cancelled by user.'; }
 
                 fs.mkdirSync(path.dirname(full), { recursive: true });
                 fs.writeFileSync(full, content, 'utf8');
@@ -1558,11 +1704,8 @@ This memory persists across all conversations. Use memory_write to add new infor
                 const oldFull = this.safePath(root, oldRel);
                 const newFull = this.safePath(root, newRel);
 
-                const action = await vscode.window.showWarningMessage(
-                    `Ollama Agent wants to rename "${oldRel}" → "${newRel}"`,
-                    { modal: true }, 'Rename', 'Cancel'
-                );
-                if (action !== 'Rename') { return 'Rename cancelled by user.'; }
+                const accepted = await this.requestConfirmation('rename', `Rename "${oldRel}" → "${newRel}"`);
+                if (!accepted) { return 'Rename cancelled by user.'; }
 
                 fs.mkdirSync(path.dirname(newFull), { recursive: true });
                 fs.renameSync(oldFull, newFull);
@@ -1577,16 +1720,107 @@ This memory persists across all conversations. Use memory_write to add new infor
                 const full = this.safePath(root, rel);
                 const originalContent = fs.readFileSync(full, 'utf8');
 
-                const action = await vscode.window.showWarningMessage(
-                    `Ollama Agent wants to DELETE "${rel}". This cannot be undone.`,
-                    { modal: true }, 'Delete', 'Cancel'
-                );
-                if (action !== 'Delete') { return 'Delete cancelled by user.'; }
+                const accepted = await this.requestConfirmation('delete', `Delete "${rel}" — this cannot be undone`);
+                if (!accepted) { return 'Delete cancelled by user.'; }
 
                 fs.unlinkSync(full);
                 this._lastFileOp = { path: rel, originalContent, action: 'deleted' };
                 this.postFn({ type: 'fileChanged', path: rel, action: 'deleted' });
                 return `Deleted: ${rel}`;
+            }
+
+            // ── find_files ─────────────────────────────────────────────────
+            case 'find_files': {
+                const pattern = String(args.pattern ?? '');
+                if (!pattern) { throw new Error('pattern is required'); }
+                const searchDir = args.path ? this.safePath(root, String(args.path)) : root;
+                const isWindows = process.platform === 'win32';
+                const MAX_RESULTS = 200;
+                const SKIP_PATTERNS = ['node_modules', '.git', 'dist', '__pycache__', '.nyc_output', 'coverage'];
+
+                return new Promise<string>((resolve) => {
+                    let cmd: string;
+                    let cmdArgs: string[];
+
+                    if (isWindows) {
+                        // Use PowerShell for reliable glob + exclusion on Windows
+                        const excludeFilter = SKIP_PATTERNS.map(d => `'*\\${d}\\*'`).join(',');
+                        const psCmd = `Get-ChildItem -Path . -Recurse -Filter '${pattern}' -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '(${SKIP_PATTERNS.join('|')})' } | Resolve-Path -Relative`;
+                        cmd = 'powershell';
+                        cmdArgs = ['-NoProfile', '-Command', psCmd];
+                    } else {
+                        cmd = 'find';
+                        cmdArgs = ['.', '-name', pattern];
+                        for (const skip of SKIP_PATTERNS) {
+                            cmdArgs.push('-not', '-path', `*/${skip}/*`);
+                        }
+                    }
+
+                    const child = spawn(cmd, cmdArgs, { cwd: searchDir, shell: false });
+                    let output = '';
+
+                    child.stdout?.on('data', (data: Buffer) => { output += data.toString(); });
+                    child.stderr?.on('data', () => { /* ignore */ });
+
+                    child.on('close', () => {
+                        if (!output.trim()) {
+                            resolve(`No files matching "${pattern}"`);
+                            return;
+                        }
+                        const lines = output.trim().split('\n')
+                            .map(l => l.trim().replace(/^\.\//, '').replace(/^\.\\/, ''))
+                            .filter(Boolean)
+                            .map(l => {
+                                // Make paths relative to workspace root
+                                const abs = path.resolve(searchDir, l);
+                                return path.relative(root, abs).replace(/\\/g, '/');
+                            })
+                            .filter(l => !l.startsWith('..'));
+
+                        const truncated = lines.length > MAX_RESULTS;
+                        const results = lines.slice(0, MAX_RESULTS);
+                        const suffix = truncated ? `\n(showing first ${MAX_RESULTS} of ${lines.length})` : '';
+                        resolve(`Files matching "${pattern}" (${results.length}):${suffix}\n${results.join('\n')}`);
+                    });
+
+                    child.on('error', (err) => {
+                        resolve(`find_files failed: ${err.message}`);
+                    });
+
+                    setTimeout(() => { child.kill(); resolve('find_files timed out after 15s'); }, 15_000);
+                });
+            }
+
+            // ── shell_read ─────────────────────────────────────────────────
+            case 'shell_read': {
+                const cmd = String(args.command ?? '');
+                if (!cmd) { throw new Error('command is required'); }
+
+                // Block commands that modify state
+                const WRITE_PATTERNS = [
+                    /\brm\b/, /\bdel\b/, /\bmkdir\b/, /\brmdir\b/,
+                    /\bmv\b/, /\bcp\b/, /\bmove\b/, /\bcopy\b/,
+                    /\bnpm\s+(install|i|ci|uninstall|update|run|exec|start)\b/,
+                    /\byarn\s+(add|remove|install|run|start)\b/,
+                    /\bpip\s+(install|uninstall)\b/,
+                    /\bpnpm\s+(add|remove|install|run|start)\b/,
+                    /\bcargo\s+(build|run|install)\b/,
+                    /\bmake\b/, /\bcmake\b/,
+                    /\bgit\s+(push|commit|merge|rebase|reset|checkout\s+-b|branch\s+-[dD]|stash\s+drop|clean)\b/,
+                    /\btee\b/, /\bsed\s+-i\b/,
+                    /\bchmod\b/, /\bchown\b/,
+                    /\bkill\b/, /\bpkill\b/,
+                    /\bdocker\s+(run|build|push|rm|stop|kill)\b/,
+                    /\bsudo\b/,
+                    /[>|]\s*[^|]/, // redirect to file
+                ];
+                for (const pattern of WRITE_PATTERNS) {
+                    if (pattern.test(cmd)) {
+                        throw new Error(`shell_read blocked: "${cmd}" looks like a write/modify command. Use run_command instead.`);
+                    }
+                }
+
+                return this.runShellRead(cmd, root, _toolId);
             }
 
             // ── run_command ────────────────────────────────────────────────
@@ -1605,11 +1839,8 @@ This memory persists across all conversations. Use memory_write to add new infor
                     }
                 }
 
-                const action = await vscode.window.showWarningMessage(
-                    `Ollama Agent wants to run:\n${cmd}`,
-                    { modal: true }, 'Run', 'Cancel'
-                );
-                if (action !== 'Run') { return 'Command cancelled by user.'; }
+                const accepted = await this.requestConfirmation('run', cmd);
+                if (!accepted) { return 'Command cancelled by user.'; }
 
                 return this.runCommandStreaming(cmd, root, _toolId);
             }
@@ -1636,7 +1867,7 @@ This memory persists across all conversations. Use memory_write to add new infor
                     const note = await this.memory.addEntry(2, content, tag ? [tag] : undefined);
                     return `Note saved to Tier 2 (id: ${note.id}). Use memory_list to view all notes.`;
                 } else {
-                    const note = this.memory.add(content, tag);
+                    const note = await this.memory.add(content, tag);
                     return `Note saved (id: ${note.id}). Use memory_list to view all notes.`;
                 }
             }
@@ -1649,9 +1880,19 @@ This memory persists across all conversations. Use memory_write to add new infor
                 
                 if (this.memory instanceof TieredMemoryManager) {
                     const ok = await this.memory.deleteEntry(id);
-                    return ok ? `Deleted note ${id}.` : `Note ${id} not found. Use memory_list to see current notes.`;
+                    if (ok) { return `Deleted note ${id}.`; }
+                    // List actual IDs so the model can self-correct
+                    const idLines: string[] = [];
+                    for (let t = 0; t <= 5; t++) {
+                        for (const e of this.memory.getTier(t as 0|1|2|3|4|5)) {
+                            idLines.push(`  ${e.id} — Tier ${t}: ${e.content.slice(0, 60)}`);
+                            if (idLines.length >= 30) { break; }
+                        }
+                        if (idLines.length >= 30) { break; }
+                    }
+                    return `Note ${id} not found. Available entries:\n${idLines.join('\n')}\n\nCall memory_delete again with the correct id from above.`;
                 } else {
-                    const ok = this.memory.delete(id);
+                    const ok = await this.memory.delete(id);
                     return ok ? `Deleted note ${id}.` : `Note ${id} not found. Use memory_list to see current notes.`;
                 }
             }
@@ -1698,8 +1939,50 @@ This memory persists across all conversations. Use memory_write to add new infor
                     
                     if (tier < 0 || tier > 5) { throw new Error('tier must be 0-5'); }
                     if (!content.trim()) { throw new Error('content is required'); }
+
+                    // Rate-limit: max 3 memory writes per agent response
+                    if (this.memoryWritesThisResponse >= Agent.MAX_MEMORY_WRITES_PER_RESPONSE) {
+                        return `Rate limited: already saved ${this.memoryWritesThisResponse} entries this response. Try again in the next message.`;
+                    }
+
+                    // Tier 0 validation: must contain actual infrastructure data
+                    if (tier === 0) {
+                        const hasIP = /\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d?)\.)(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){2}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/.test(content);
+                        const hasURL = /https?:\/\/[^\s]+/.test(content);
+                        const hasPath = /^[\/~]|[A-Z]:\\/.test(content);
+                        const hasPort = /(?:port\s*[:=]?\s*\d{2,5}|:\d{2,5}\b)/.test(content);
+                        const hasCredential = /(?:key|token|password|secret|credential)/i.test(content);
+                        if (!hasIP && !hasURL && !hasPath && !hasPort && !hasCredential) {
+                            return `Tier 0 is reserved for critical infrastructure (IPs, URLs, ports, paths, credentials). "${content.slice(0, 60)}" doesn't match. Use Tier 1 for frameworks/tools or Tier 2 for operational context.`;
+                        }
+                    }
+
+                    // Content quality: reject very short or generic entries
+                    if (content.trim().length < 5) {
+                        return `Content too short. Memory entries should be meaningful and specific.`;
+                    }
+
+                    // Garbage filter: reject entries matching known junk patterns
+                    if (GARBAGE_PATTERNS.some(p => p.test(content))) {
+                        logInfo(`[memory] Garbage-filtered: "${content.slice(0, 60)}"`);
+                        return `Filtered: content matches a known low-value pattern. Save only specific, actionable facts.`;
+                    }
+
+                    // Semantic dedup: reject if too similar to existing memory
+                    if (this.memory instanceof TieredMemoryManager) {
+                        try {
+                            const isDupe = await this.memory.isSemanticDuplicate(content, 0.80);
+                            if (isDupe) {
+                                logInfo(`[memory] Semantic-deduped: "${content.slice(0, 60)}"`);
+                                return `Duplicate: a semantically similar entry already exists in memory.`;
+                            }
+                        } catch {
+                            // Qdrant unavailable — skip semantic check, allow save
+                        }
+                    }
                     
                     const note = await this.memory.addEntry(tier as 0|1|2|3|4|5, content, tags);
+                    this.memoryWritesThisResponse++;
                     const tierName = ['Critical', 'Essential', 'Operational', 'Collaboration', 'References', 'Archive'][tier];
                     return `Note saved to Tier ${tier} (${tierName}) with id: ${note.id}.`;
                 } else {
@@ -1712,7 +1995,16 @@ This memory persists across all conversations. Use memory_write to add new infor
                 if (!this.memory) { return '(project memory not available in this session)'; }
                 
                 if (this.memory instanceof TieredMemoryManager) {
-                    const tiers = args.tiers ? (args.tiers as number[]) : [0, 1, 2, 3, 4, 5];
+                    // Accept both 'tiers' (correct) and 'tier' (common model mistake)
+                    let tiers: number[];
+                    if (args.tiers) {
+                        tiers = args.tiers as number[];
+                    } else if (args.tier !== undefined) {
+                        // Model passed singular 'tier' — convert to array
+                        tiers = Array.isArray(args.tier) ? args.tier as number[] : [Number(args.tier)];
+                    } else {
+                        tiers = [0, 1, 2, 3, 4, 5];
+                    }
                     return `Memory from tiers ${tiers.join(', ')}:\n\n${this.memory.formatTiers(tiers)}`;
                 } else {
                     return `Project memory notes:\n\n${this.memory.formatAll()}`;
@@ -1880,6 +2172,63 @@ This memory persists across all conversations. Use memory_write to add new infor
         });
     }
 
+    // ── Read-only shell execution (no confirmation) ──────────────────────────
+
+    private runShellRead(cmd: string, cwd: string, cmdId: string): Promise<string> {
+        return new Promise((resolve) => {
+            const post = this.postFn;
+            post({ type: 'commandStart', id: cmdId, cmd });
+
+            const child = spawn(cmd, {
+                cwd,
+                env: { ...process.env },
+                shell: true,
+            });
+
+            let output = '';
+            let finished = false;
+            const LIMIT = 16_000; // Higher limit for read-only — no risk
+
+            child.stdout?.on('data', (data: Buffer) => {
+                const text = data.toString();
+                output += text;
+                if (output.length <= LIMIT) {
+                    post({ type: 'commandChunk', id: cmdId, text, stream: 'stdout' });
+                }
+            });
+
+            child.stderr?.on('data', (data: Buffer) => {
+                const text = data.toString();
+                output += text;
+                if (output.length <= LIMIT) {
+                    post({ type: 'commandChunk', id: cmdId, text, stream: 'stderr' });
+                }
+            });
+
+            const finish = (code: number | null) => {
+                if (finished) return;
+                finished = true;
+                clearTimeout(timer);
+                post({ type: 'commandEnd', id: cmdId, exitCode: code ?? 0 });
+                resolve(output.slice(0, LIMIT) || `(exited with code ${code ?? 0})`);
+            };
+
+            child.on('close', finish);
+            child.on('error', (err) => {
+                post({ type: 'commandChunk', id: cmdId, text: `\nError: ${err.message}`, stream: 'stderr' });
+                finish(-1);
+            });
+
+            const timer = setTimeout(() => {
+                if (!finished) {
+                    child.kill();
+                    post({ type: 'commandChunk', id: cmdId, text: '\n(timed out after 30s)', stream: 'stderr' });
+                    finish(-1);
+                }
+            }, 30_000);
+        });
+    }
+
     // ── Utilities ─────────────────────────────────────────────────────────────
 
     private readTerminal(index?: number): string {
@@ -1949,15 +2298,33 @@ This memory persists across all conversations. Use memory_write to add new infor
 
     // ── Auto-extract facts from conversation for memory ─────────────────────
 
-    /** Regex patterns for extractable facts, mapped to tier + tag */
-    private static readonly FACT_PATTERNS: Array<{ pattern: RegExp; tier: 0|1|2|3|4; tag: string }> = [
-        // Tier 0 — critical infrastructure
-        { pattern: /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)(?::\d{2,5})?\b/g, tier: 0, tag: 'ip' },
-        { pattern: /\bhttps?:\/\/[^\s"'<>)\]]+/gi, tier: 0, tag: 'url' },
-        { pattern: /\bport\s+(\d{2,5})\b/gi, tier: 0, tag: 'port' },
+    // ── Auto-extract: patterns that require USER INTENT context ─────────────
+
+    /** Phrases that indicate the user is stating a project fact (not just mentioning something) */
+    private static readonly INTENT_PATTERNS: RegExp[] = [
+        /\b(?:we|i|our project|this project|the project)\s+(?:use|uses|using|run|runs|running|deploy|deploys|host|hosts)\s+/i,
+        /\b(?:built with|written in|powered by|running on|deployed (?:on|to|at|via)|hosted (?:on|at))\s+/i,
+        /\b(?:the|our)\s+(?:server|database|db|api|app|service|backend|frontend)\s+(?:is|runs|lives)\s+(?:at|on)\s+/i,
+        /\b(?:remember|save|note|store)\s*(?:that|:)?\s+/i,
+        /\b(?:always|never|convention|standard|rule)\s*(?::|—)?\s+/i,
     ];
 
-    /** Known technology names to match in conversation text (case-insensitive) */
+    /** Negative context — if these surround a keyword, skip it */
+    private static readonly NEGATIVE_CONTEXT: RegExp[] = [
+        /\b(?:don'?t|doesn'?t|not|never|no longer|instead of|unlike|without|avoid|removed|dropped|migrated (?:away|from))\s+/i,
+        /\b(?:compared to|versus|vs\.?|alternative to|rather than)\s+/i,
+    ];
+
+    /** IP pattern that excludes version-like strings (X.Y.Z where all < 100) */
+    private static readonly IP_WITH_CONTEXT = /\b(?:(?:server|host|address|ip|connect(?:ion)?|running|deployed|at|on)\s+(?:is\s+)?)?(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d?)\.)(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){2}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)(?::\d{2,5})?\b/gi;
+
+    /** URL pattern that requires infrastructure context */
+    private static readonly URL_WITH_CONTEXT = /\b(?:(?:server|api|endpoint|service|deployed|hosted|running|available|connect)\s+(?:at|on|is)\s+)?https?:\/\/[^\s"'<>)\]]+/gi;
+
+    /** Port pattern that requires explicit "on port" / "port:" context */
+    private static readonly PORT_WITH_CONTEXT = /\b(?:(?:on|listening|running|connect)\s+)?port\s+(\d{2,5})\b/gi;
+
+    /** Known technology names (same set, used only with intent context now) */
     private static readonly KNOWN_TECHNOLOGIES = new Set([
         'react', 'vue', 'angular', 'svelte', 'next.js', 'nuxt', 'express', 'fastify', 'koa', 'hapi',
         'django', 'flask', 'fastapi', 'rails', 'spring', 'laravel', 'symfony', 'gin', 'echo', 'fiber',
@@ -1970,54 +2337,114 @@ This memory persists across all conversations. Use memory_write to add new infor
         'eslint', 'prettier', 'ruff', 'black', 'flake8', 'pylint', 'mypy',
         'prisma', 'sequelize', 'typeorm', 'drizzle', 'sqlalchemy', 'alembic',
         'graphql', 'grpc', 'rest', 'websocket',
-        'aws', 'gcp', 'azure', 's3', 'ec2', 'lambda', 'cloudflare',
-        'git', 'github', 'gitlab', 'bitbucket',
         'tailwind', 'bootstrap', 'material-ui', 'chakra',
         'celery', 'rabbitmq', 'kafka', 'nats',
         'sentry', 'datadog', 'grafana', 'prometheus',
         'gunicorn', 'uvicorn', 'pm2', 'supervisor',
     ]);
 
+    /** Track memory writes this response to enforce rate limit */
+    private memoryWritesThisResponse = 0;
+    private static readonly MAX_MEMORY_WRITES_PER_RESPONSE = 3;
+
     /**
-     * Scan the user message and assistant response for extractable facts
-     * and auto-save them to memory if they aren't already stored.
+     * Scan ONLY the user message for extractable facts.
+     * Requires intent context ("we use X", "server is at X") — bare keyword mentions are ignored.
+     * Skips negative context ("we don't use X", "instead of X").
      */
-    private async autoExtractFacts(userMessage: string, assistantResponse: string): Promise<void> {
+    private async autoExtractFacts(userMessage: string, _assistantResponse: string): Promise<void> {
         if (!(this.memory instanceof TieredMemoryManager)) { return; }
 
-        const combined = `${userMessage}\n${assistantResponse}`;
+        // Only extract from user message — assistant responses are too noisy
+        const text = userMessage;
+        if (text.length < 10) { return; } // Too short to contain meaningful facts
+
         const existingContext = this.memory.buildContext([0, 1, 2, 3, 4], 8000).toLowerCase();
         const saves: Array<{ tier: 0|1|2|3|4|5; content: string; tags: string[] }> = [];
 
-        // Extract IPs, URLs, ports via regex
-        for (const { pattern, tier, tag } of Agent.FACT_PATTERNS) {
-            pattern.lastIndex = 0;
-            let match: RegExpExecArray | null;
-            while ((match = pattern.exec(combined)) !== null) {
-                const value = (match[1] || match[0]).trim();
-                if (!value || value.length < 4 || value.length > 200) { continue; }
-                if (existingContext.includes(value.toLowerCase())) { continue; }
-                if (tag === 'ip' && (value.startsWith('0.0.') || value.startsWith('127.0.0.1'))) { continue; }
-                if (tag === 'url' && /\blocalhost:11434\b/.test(value)) { continue; }
-                if (saves.some(s => s.content.toLowerCase().includes(value.toLowerCase()))) { continue; }
-                saves.push({ tier, content: value, tags: [tag] });
-            }
+        // Check if user message has any intent signals at all
+        const hasIntent = Agent.INTENT_PATTERNS.some(p => p.test(text));
+        // Check for negative context
+        const hasNegative = (surrounding: string) =>
+            Agent.NEGATIVE_CONTEXT.some(p => p.test(surrounding));
+
+        // ── Extract IPs with context ──────────────────────────────────────
+        Agent.IP_WITH_CONTEXT.lastIndex = 0;
+        let match: RegExpExecArray | null;
+        while ((match = Agent.IP_WITH_CONTEXT.exec(text)) !== null) {
+            // Extract just the IP portion
+            const ipMatch = match[0].match(/(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d?)\.)(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){2}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)(?::\d{2,5})?/);
+            if (!ipMatch) { continue; }
+            const ip = ipMatch[0];
+            // Skip loopback, link-local, and version-like patterns
+            if (ip.startsWith('127.') || ip.startsWith('0.') || ip.startsWith('169.254.')) { continue; }
+            // Skip if it looks like a version number (all octets < 20)
+            const octets = ip.split('.').map(Number);
+            if (octets.every(o => o < 20)) { continue; }
+            if (existingContext.includes(ip)) { continue; }
+            // Check surrounding text for negative context
+            const start = Math.max(0, match.index - 30);
+            const surrounding = text.slice(start, match.index + match[0].length + 10);
+            if (hasNegative(surrounding)) { continue; }
+            saves.push({ tier: 0, content: `IP: ${ip}`, tags: ['ip', 'infrastructure'] });
         }
 
-        // Extract known technologies from conversation text
-        const words = combined.toLowerCase().split(/[\s,;:()\[\]{}"'`]+/);
-        for (const word of words) {
-            if (Agent.KNOWN_TECHNOLOGIES.has(word) && !existingContext.includes(word)) {
-                if (!saves.some(s => s.content.toLowerCase() === word)) {
-                    saves.push({ tier: 1, content: word, tags: ['technology'] });
+        // ── Extract URLs with context ─────────────────────────────────────
+        Agent.URL_WITH_CONTEXT.lastIndex = 0;
+        while ((match = Agent.URL_WITH_CONTEXT.exec(text)) !== null) {
+            const url = match[0].replace(/^.*?(https?:)/, '$1'); // Strip leading context words
+            if (url.length < 10 || url.length > 200) { continue; }
+            // Skip Ollama default, localhost dev servers, github/docs links
+            if (/localhost:11434/.test(url)) { continue; }
+            if (/github\.com|stackoverflow\.com|docs\.|npmjs\.com|pypi\.org/.test(url)) { continue; }
+            if (existingContext.includes(url.toLowerCase())) { continue; }
+            const start = Math.max(0, match.index - 30);
+            const surrounding = text.slice(start, match.index + match[0].length + 10);
+            if (hasNegative(surrounding)) { continue; }
+            saves.push({ tier: 0, content: `URL: ${url}`, tags: ['url', 'infrastructure'] });
+        }
+
+        // ── Extract ports with context ────────────────────────────────────
+        Agent.PORT_WITH_CONTEXT.lastIndex = 0;
+        while ((match = Agent.PORT_WITH_CONTEXT.exec(text)) !== null) {
+            const port = match[1];
+            if (!port || existingContext.includes(`port ${port}`) || existingContext.includes(`:${port}`)) { continue; }
+            const start = Math.max(0, match.index - 30);
+            const surrounding = text.slice(start, match.index + match[0].length + 10);
+            if (hasNegative(surrounding)) { continue; }
+            saves.push({ tier: 0, content: `Port: ${port}`, tags: ['port', 'infrastructure'] });
+        }
+
+        // ── Extract technologies ONLY if user states intent ───────────────
+        if (hasIntent) {
+            const wordsInMsg = text.toLowerCase().split(/[\s,;:()\[\]{}"'`]+/);
+            for (const word of wordsInMsg) {
+                if (!Agent.KNOWN_TECHNOLOGIES.has(word)) { continue; }
+                if (existingContext.includes(word)) { continue; }
+                // Find the word's position and check surrounding context
+                const wordIdx = text.toLowerCase().indexOf(word);
+                if (wordIdx === -1) { continue; }
+                const surroundStart = Math.max(0, wordIdx - 40);
+                const surrounding = text.slice(surroundStart, wordIdx + word.length + 20);
+                if (hasNegative(surrounding)) { continue; }
+                if (!saves.some(s => s.content.toLowerCase().includes(word))) {
+                    saves.push({ tier: 1, content: `Technology: ${word}`, tags: ['technology'] });
                 }
             }
         }
 
-        // Cap at 5 auto-saves per response to avoid flooding
-        const toSave = saves.slice(0, 5);
+        // Cap at MAX_MEMORY_WRITES_PER_RESPONSE and filter through garbage patterns + semantic dedup
+        const toSave = saves
+            .filter(s => !GARBAGE_PATTERNS.some(p => p.test(s.content)))
+            .slice(0, Agent.MAX_MEMORY_WRITES_PER_RESPONSE);
         for (const entry of toSave) {
             try {
+                // Semantic dedup check before saving
+                const isDupe = await this.memory.isSemanticDuplicate(entry.content, 0.80);
+                if (isDupe) {
+                    logInfo(`[auto-memory] Semantic-deduped: ${entry.content.slice(0, 80)}`);
+                    continue;
+                }
                 await this.memory.addEntry(entry.tier, entry.content, entry.tags);
                 logInfo(`[auto-memory] Saved to Tier ${entry.tier}: ${entry.content.slice(0, 80)}`);
             } catch (err) {
