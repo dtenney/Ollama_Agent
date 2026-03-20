@@ -1,0 +1,18 @@
+# Normalize all text files to LF on checkout
+* text=auto eol=lf
+
+# Ensure these are always treated as text
+*.ts text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binary files
+*.png binary
+*.gif binary
+*.ico binary
+*.vsix binary

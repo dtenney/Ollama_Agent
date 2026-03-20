@@ -24,14 +24,14 @@ describe('E2E: Workspace Module', () => {
         assert.strictEqual(detectProjectType(tmpDir), 'Python');
     });
 
-    it('should detect Python environment with ruff and pytest', () => {
+    it('should detect Python environment with ruff and pytest', async () => {
         const { detectPythonEnvironment } = require('../../workspace');
         fs.writeFileSync(path.join(tmpDir, 'requirements.txt'), 'flask\n');
         fs.writeFileSync(path.join(tmpDir, 'pyproject.toml'), '[tool.ruff]\nline-length = 88\n[tool.pytest]\n');
         fs.mkdirSync(path.join(tmpDir, 'venv'));
         fs.writeFileSync(path.join(tmpDir, 'venv', 'pyvenv.cfg'), 'home = /usr/bin\n');
 
-        const env = detectPythonEnvironment(tmpDir);
+        const env = await detectPythonEnvironment(tmpDir);
         assert.ok(env);
         assert.strictEqual(env.linter, 'ruff');
         assert.strictEqual(env.testFramework, 'pytest');
@@ -39,28 +39,28 @@ describe('E2E: Workspace Module', () => {
         assert.strictEqual(env.packageManager, 'pip');
     });
 
-    it('should detect poetry package manager', () => {
+    it('should detect poetry package manager', async () => {
         const { detectPythonEnvironment } = require('../../workspace');
         fs.writeFileSync(path.join(tmpDir, 'pyproject.toml'), '[tool.poetry]\nname = "test"\n');
         fs.writeFileSync(path.join(tmpDir, 'poetry.lock'), '');
-        const env = detectPythonEnvironment(tmpDir);
+        const env = await detectPythonEnvironment(tmpDir);
         assert.ok(env);
         assert.strictEqual(env.packageManager, 'poetry');
     });
 
-    it('should detect mypy type checker', () => {
+    it('should detect mypy type checker', async () => {
         const { detectPythonEnvironment } = require('../../workspace');
         fs.writeFileSync(path.join(tmpDir, 'requirements.txt'), 'mypy\n');
         fs.writeFileSync(path.join(tmpDir, 'mypy.ini'), '[mypy]\n');
-        const env = detectPythonEnvironment(tmpDir);
+        const env = await detectPythonEnvironment(tmpDir);
         assert.ok(env);
         assert.strictEqual(env.typeChecker, 'mypy');
     });
 
-    it('should return null for non-Python projects', () => {
+    it('should return null for non-Python projects', async () => {
         const { detectPythonEnvironment } = require('../../workspace');
         fs.writeFileSync(path.join(tmpDir, 'package.json'), '{}');
-        const env = detectPythonEnvironment(tmpDir);
+        const env = await detectPythonEnvironment(tmpDir);
         assert.strictEqual(env, null);
     });
 
@@ -105,12 +105,12 @@ describe('E2E: Workspace Module', () => {
         assert.ok(tree.includes('index.js'));
     });
 
-    it('should build workspace summary with Python environment', () => {
+    it('should build workspace summary with Python environment', async () => {
         const { buildWorkspaceSummary } = require('../../workspace');
         fs.writeFileSync(path.join(tmpDir, 'requirements.txt'), 'flask\n');
         fs.writeFileSync(path.join(tmpDir, 'pyproject.toml'), '[tool.ruff]\n[tool.pytest]\n');
 
-        const summary = buildWorkspaceSummary(tmpDir);
+        const summary = await buildWorkspaceSummary(tmpDir);
         assert.ok(summary.includes('Python'));
         assert.ok(summary.includes('Python environment'));
         assert.ok(summary.includes('ruff'));
