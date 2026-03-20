@@ -71,7 +71,7 @@ export function getConfig(): OllamaConfig {
         autoIncludeSelection: c.get<boolean>('autoIncludeSelection', true),
         maxContextFiles:      c.get<number> ('maxContextFiles',      5),
         injectGitDiff:        c.get<boolean>('injectGitDiff',        false),
-        autoSaveMemory:       c.get<boolean>('memory.autoSave',      true),
+        autoSaveMemory:       c.get<boolean>('memory.autoSave',      false),
         autoCompactContext:   c.get<boolean>('autoCompactContext',   true),
     };
 }

@@ -1,19 +1,41 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { Agent, PostFn } from './agent';
-import { fetchModels, rawGet, streamChatRequest } from './ollamaClient';
+import { fetchModels, rawGet, streamChatRequest, generateChatTitle } from './ollamaClient';
 import { getConfig } from './config';
 import { getActiveContext, buildContextString } from './context';
-import { logInfo, logError, channel } from './logger';
+import { logInfo, logError, channel, toErrorMessage } from './logger';
 import { ChatStorage, ChatSession, StoredMessage, deriveTitle, relativeTime } from './chatStorage';
 import { indexWorkspaceFiles, fuzzySearchFiles, buildMentionContext } from './mentions';
 import { buildGitDiffContext } from './gitContext';
-import { ProjectMemory } from './projectMemory';
 import { TieredMemoryManager } from './memoryCore';
 import { TemplateManager } from './promptTemplates';
 import { SmartContextManager } from './smartContext';
 import { SymbolProvider } from './symbolProvider';
 import { DiffViewManager } from './diffView';
+import { MultiWorkspaceManager } from './multiWorkspace';
+
+/** Strip <tool>{...}</tool> blocks using brace-counting for nested JSON. */
+function stripToolBlocksFromText(text: string): string {
+    let result = text;
+    let pos = 0;
+    while (pos < result.length) {
+        const idx = result.toLowerCase().indexOf('<tool>', pos);
+        if (idx === -1) break;
+        let depth = 0, jsonEnd = -1;
+        for (let i = idx + 6; i < result.length; i++) {
+            if (result[i] === '{') depth++;
+            else if (result[i] === '}') { depth--; if (depth === 0) { jsonEnd = i + 1; break; } }
+        }
+        if (jsonEnd === -1) { result = result.slice(0, idx); break; }
+        let endPos = jsonEnd;
+        const afterJson = result.slice(jsonEnd).match(/^\s*<\/tool>/i);
+        if (afterJson) endPos = jsonEnd + afterJson[0].length;
+        result = result.slice(0, idx) + result.slice(endPos);
+        pos = idx;
+    }
+    return result.replace(/<\/tool>/gi, '');
+}
 
 // ── Message shapes (webview → extension) ─────────────────────────────────────
 
@@ -44,6 +66,7 @@ type WebviewMsg =
     | { command: 'compactContext' }
     | { command: 'undoLastTool' }
     | { command: 'confirmResponse'; id: string; accepted: boolean }
+    | { command: 'confirmResponseAll'; id: string; toolName: string }
     | { command: 'applyCodeBlock'; code: string; lang: string }
     | { command: 'webviewError'; text: string };
 
@@ -75,34 +98,42 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
     private _agent?: Agent;
     private _editorListener?: vscode.Disposable;
+    private _selectionListener?: vscode.Disposable;
     private _workspaceListener?: vscode.Disposable;
     private _currentWorkspaceRoot?: string;
     /** Mutex to prevent concurrent workspace changes */
     private _workspaceChanging: boolean = false;
+    /** Guard to prevent concurrent sendMessage calls */
+    private _running: boolean = false;
+    /** Shared DiffViewManager for applyCodeBlock (reused, not created per call) */
+    private _diffViewManager: DiffViewManager = new DiffViewManager();
 
     private readonly storage: ChatStorage;
-    private readonly memory: ProjectMemory | TieredMemoryManager;
+    private readonly memory: TieredMemoryManager | null;
     private readonly templateManager: TemplateManager;
     private readonly smartContext: SmartContextManager;
     private readonly symbolProvider: SymbolProvider;
     private currentSession: ChatSession;
     /** Cached workspace file index for @mention autocomplete. Rebuilt on new workspace. */
-    private _fileIndex: ReturnType<typeof indexWorkspaceFiles> = [];
+    private _fileIndex: Awaited<ReturnType<typeof indexWorkspaceFiles>> = [];
     /** Current active preset name (persisted in workspace state). */
     private _activePreset: string = 'balanced';
     /** Smart context enabled state (persisted in workspace state). */
     private _smartContextEnabled: boolean = false;
     /** Pinned files (always-in-context, persisted in workspace state). */
     private _pinnedFiles: string[] = [];
+    /** Listener for file saves to invalidate smart context import cache. */
+    private _saveListener?: vscode.Disposable;
+    /** Listener for webview messages — disposed on re-resolve to prevent accumulation. */
+    private _messageListener?: vscode.Disposable;
 
     constructor(
         private readonly context: vscode.ExtensionContext,
         memoryManager?: TieredMemoryManager | null,
-        private readonly workspaceManager?: any
+        private readonly workspaceManager?: MultiWorkspaceManager
     ) {
         this.storage = new ChatStorage(context);
-        // Use tiered memory if provided, otherwise fall back to legacy ProjectMemory
-        this.memory = memoryManager ?? new ProjectMemory(context);
+        this.memory = memoryManager ?? null;
         this.templateManager = new TemplateManager(context);
         this.symbolProvider = new SymbolProvider();
         this.smartContext = new SmartContextManager();
@@ -141,7 +172,10 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     logInfo(`[provider] Workspace changed: ${this._currentWorkspaceRoot} → ${newRoot}`);
                     this._currentWorkspaceRoot = newRoot;
                     
-                    // Dispose old agent to prevent memory leak
+                    // Stop running agent before disposing to prevent mid-run corruption
+                    this._agent?.stop();
+                    this._agent?.dispose();
+                    this._running = false;
                     this._agent = undefined;
                     
                     // Recreate agent with new workspace root
@@ -167,13 +201,11 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         // Build file index for @mention autocomplete (async, non-blocking)
         if (workspaceRoot) {
             // Start indexing immediately but don't block
-            Promise.resolve().then(() => {
-                try { 
-                    this._fileIndex = indexWorkspaceFiles(workspaceRoot);
-                    logInfo(`[provider] File index built: ${this._fileIndex.length} files`);
-                } catch (err) {
-                    logError(`[provider] File indexing failed: ${(err as Error).message}`);
-                }
+            indexWorkspaceFiles(workspaceRoot).then(index => {
+                this._fileIndex = index;
+                logInfo(`[provider] File index built: ${this._fileIndex.length} files`);
+            }).catch(err => {
+                logError(`[provider] File indexing failed: ${toErrorMessage(err)}`);
             });
         }
 
@@ -186,7 +218,8 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
         const post = (m: object) => webviewView.webview.postMessage(m);
 
-        webviewView.webview.onDidReceiveMessage(async (raw: WebviewMsg) => {
+        this._messageListener?.dispose();
+        this._messageListener = webviewView.webview.onDidReceiveMessage(async (raw: WebviewMsg) => {
             logInfo(`[webview→ext] ${raw.command}`);
 
             switch (raw.command) {
@@ -200,45 +233,16 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
                 // ── Send a message ────────────────────────────────────────
                 case 'sendMessage': {
+                    if (this._running) {
+                        post({ type: 'error', text: 'Please wait for the current response to finish.' });
+                        break;
+                    }
                     const text  = raw.text?.trim() ?? '';
                     const model = raw.model ?? getConfig().model;
                     if (!text) { break; }
+                    this._running = true;
 
                     logInfo(`[user] ${text.slice(0, 120)}${text.length > 120 ? '…' : ''}`);
-                    
-                    // Check if workspace has changed since agent was created
-                    // Skip if workspace change is already being handled by the listener
-                    const currentRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-                    if (currentRoot !== this._currentWorkspaceRoot && !this._workspaceChanging) {
-                        this._workspaceChanging = true;
-                        try {
-                            logInfo(`[provider] Workspace changed detected: ${this._currentWorkspaceRoot} → ${currentRoot}`);
-                            this._currentWorkspaceRoot = currentRoot;
-                            
-                            // Dispose old agent to prevent memory leak
-                            this._agent = undefined;
-                            
-                            // Create new agent with fresh memory context for new workspace
-                            this._agent = new Agent(currentRoot, this.memory);
-                            
-                            // Clear file index
-                            this._fileIndex = [];
-                            
-                            // Start a completely new session for the new workspace
-                            this.startNewSession({ model });
-                            
-                            // Clear the chat UI
-                            post({ type: 'clearChat' });
-                            
-                            // Notify user
-                            const workspaceName = vscode.workspace.name || 'Unknown';
-                            post({ type: 'info', text: `Switched to workspace: ${workspaceName}` });
-                            
-                            logInfo(`[provider] New session started for workspace: ${workspaceName}`);
-                        } finally {
-                            this._workspaceChanging = false;
-                        }
-                    }
 
                     // Record user message (display text only, no injected context)
                     this.appendToSession({ role: 'user', content: text, timestamp: Date.now() });
@@ -278,42 +282,44 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     // Get config for smart context and git diff
                     const cfg = getConfig();
 
-                    // Smart context: auto-include related files
-                    let smartCtx = '';
+                    // ── Parallel context assembly ─────────────────────────
+                    // Smart context, git diff, and symbol resolution are all
+                    // independent I/O — run them concurrently.
                     const smartContextFiles: string[] = [];
-                    if (this._smartContextEnabled && vscode.window.activeTextEditor) {
-                        const relatedFiles = await this.smartContext.getRelatedFiles(
-                            vscode.window.activeTextEditor.document,
-                            cfg.maxContextFiles
-                        );
-                        if (relatedFiles.length > 0) {
+
+                    const [smartCtxResult, gitCtx] = await Promise.all([
+                        // Smart context: auto-include related files
+                        (async (): Promise<string> => {
+                            if (!this._smartContextEnabled || !vscode.window.activeTextEditor) { return ''; }
+                            const relatedFiles = await this.smartContext.getRelatedFiles(
+                                vscode.window.activeTextEditor.document,
+                                cfg.maxContextFiles
+                            );
+                            if (relatedFiles.length === 0) { return ''; }
                             const alreadyIncluded = new Set([autoAttachedFile, ...(raw.mentionedFiles || [])]);
                             const filesToInclude = relatedFiles.filter(f => !alreadyIncluded.has(f.relativePath));
-                            
-                            if (filesToInclude.length > 0) {
-                                smartCtx = '\n\n<smart-context>\n';
-                                smartCtx += `Auto-included ${filesToInclude.length} related file(s):\n\n`;
-                                for (const file of filesToInclude) {
-                                    smartContextFiles.push(file.relativePath);
-                                    try {
-                                        const content = await vscode.workspace.fs.readFile(vscode.Uri.file(file.path));
-                                        const text = Buffer.from(content).toString('utf8');
-                                        smartCtx += `File: ${file.relativePath} (${file.reason})\n\`\`\`\n${text.slice(0, 10000)}\n\`\`\`\n\n`;
-                                    } catch { /* skip unreadable files */ }
-                                }
-                                smartCtx += '</smart-context>';
-                                
-                                // Send related files to webview for display
-                                post({ type: 'smartContextFiles', files: filesToInclude.map(f => f.relativePath) });
-                            }
-                        }
-                    }
+                            if (filesToInclude.length === 0) { return ''; }
+                            let sc = '\n\n<smart-context>\n';
+                            sc += `Auto-included ${filesToInclude.length} related file(s):\n\n`;
+                            await Promise.all(filesToInclude.map(async (file) => {
+                                smartContextFiles.push(file.relativePath);
+                                try {
+                                    const content = await vscode.workspace.fs.readFile(vscode.Uri.file(file.path));
+                                    const txt = Buffer.from(content).toString('utf8');
+                                    sc += `File: ${file.relativePath} (${file.reason})\n\`\`\`\n${txt.slice(0, 10000)}\n\`\`\`\n\n`;
+                                } catch { /* skip unreadable files */ }
+                            }));
+                            sc += '</smart-context>';
+                            post({ type: 'smartContextFiles', files: filesToInclude.map(f => f.relativePath) });
+                            return sc;
+                        })(),
 
-                    // Optionally inject git diff context
-                    // Optionally inject git diff context
-                    const gitCtx = cfg.injectGitDiff && this._currentWorkspaceRoot
-                        ? await buildGitDiffContext(this._currentWorkspaceRoot, text)
-                        : '';
+                        // Git diff context
+                        cfg.injectGitDiff && this._currentWorkspaceRoot
+                            ? buildGitDiffContext(this._currentWorkspaceRoot, text)
+                            : Promise.resolve(''),
+                    ]);
+                    const smartCtx = smartCtxResult;
 
                     const fullMessage = ctx || mentionCtx || symbolCtx || smartCtx || gitCtx
                         ? `${text}${ctx}${mentionCtx}${symbolCtx}${smartCtx}${gitCtx}`
@@ -339,6 +345,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
                     // Wrap post() to capture streamed tokens → save assistant message
                     let assistantBuf = '';
+                    const isFirstExchange = this.currentSession.messages.filter(m => m.role === 'assistant').length === 0;
                     const trackedPost: PostFn = (m: object) => {
                         post(m);
                         const pm = m as { type: string; text?: string };
@@ -346,14 +353,26 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                             assistantBuf += pm.text ?? '';
                         } else if (pm.type === 'streamEnd') {
                             if (assistantBuf.trim()) {
-                                const clean = assistantBuf
-                                    .replace(/<tool>[\s\S]*?<\/tool>\s*/g, '')
+                                const clean = stripToolBlocksFromText(assistantBuf)
                                     .replace(/<mention[\s\S]*?<\/mention>\s*/g, '')
                                     .replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '')
+                                    .replace(/\[wait for result[^\]]*\]/gi, '')
                                     .replace(/\n{3,}/g, '\n\n')
                                     .trim();
                                 this.appendToSession({ role: 'assistant', content: clean, timestamp: Date.now() });
                                 logInfo(`[assistant] ${clean.slice(0, 120)}${clean.length > 120 ? '…' : ''}`);
+
+                                // Auto-generate a title after the first assistant response
+                                if (isFirstExchange && this.currentSession.title === 'New Chat') {
+                                    generateChatTitle(model, text, clean).then((title) => {
+                                        if (title && this.currentSession.title === 'New Chat') {
+                                            this.currentSession.title = title;
+                                            this.persistSession();
+                                            post({ type: 'sessionSaved', session: { id: this.currentSession.id, title } });
+                                            logInfo(`[provider] Auto-title: "${title}"`);
+                                        }
+                                    }).catch(() => { /* fallback to deriveTitle stays in persistSession */ });
+                                }
                             }
                             assistantBuf = '';
                             this.persistSession();
@@ -364,10 +383,15 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         }
                     };
 
-                    await this._agent!.run(fullMessageWithPins, model, trackedPost);
-                    // Sync agent history into session after run completes
-                    this.currentSession.agentHistory = this._agent!.conversationHistory;
-                    this.persistSession();
+                    try {
+                        await this._agent!.run(fullMessageWithPins, model, trackedPost);
+                        // Sync agent history into session after run completes
+                        this.currentSession.agentHistory = this._agent!.conversationHistory;
+                        this.persistSession();
+                    } finally {
+                        this._running = false;
+                        post({ type: 'agentDone' });
+                    }
                     break;
                 }
 
@@ -382,16 +406,23 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                 // ── Stop generation ───────────────────────────────────────
                 case 'stopGeneration': {
                     this._agent!.stop();
+                    this._running = false;
                     post({ type: 'streamEnd' });
+                    post({ type: 'agentDone' });
                     logInfo('[provider] Generation stopped');
                     break;
                 }
 
                 // ── Retry last ────────────────────────────────────────────
                 case 'retryLast': {
+                    if (this._running) {
+                        post({ type: 'error', text: 'Please wait for the current response to finish.' });
+                        break;
+                    }
+                    this._running = true;
                     const model   = raw.model ?? getConfig().model;
                     const lastMsg = this._agent!.retryLast();
-                    if (!lastMsg) { break; }
+                    if (!lastMsg) { this._running = false; break; }
                     // Remove the last assistant + error messages from session
                     this.trimSessionToLastUser();
                     post({ type: 'removeLastAssistant' });
@@ -404,16 +435,21 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         if (pm.type === 'token') { assistantBuf2 += pm.text ?? ''; }
                         else if (pm.type === 'streamEnd') {
                             if (assistantBuf2.trim()) {
-                                this.appendToSession({ role: 'assistant', content: assistantBuf2.replace(/<tool>[\s\S]*?<\/tool>\s*/g, '').replace(/<mention[\s\S]*?<\/mention>\s*/g, '').replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '').replace(/\n{3,}/g, '\n\n').trim(), timestamp: Date.now() });
+                                this.appendToSession({ role: 'assistant', content: stripToolBlocksFromText(assistantBuf2).replace(/<mention[\s\S]*?<\/mention>\s*/g, '').replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '').replace(/\[wait for result[^\]]*\]/gi, '').replace(/\n{3,}/g, '\n\n').trim(), timestamp: Date.now() });
                             }
                             assistantBuf2 = '';
                             this.persistSession();
                         }
                     };
 
-                    await this._agent!.run(lastMsg, model, retryPost);
-                    this.currentSession.agentHistory = this._agent!.conversationHistory;
-                    this.persistSession();
+                    try {
+                        await this._agent!.run(lastMsg, model, retryPost);
+                        this.currentSession.agentHistory = this._agent!.conversationHistory;
+                        this.persistSession();
+                    } finally {
+                        this._running = false;
+                        post({ type: 'agentDone' });
+                    }
                     break;
                 }
 
@@ -436,16 +472,20 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         post({ type: 'error', text: `Session not found: ${raw.id}` });
                         break;
                     }
+                    // Stop any in-flight generation before switching sessions
+                    if (this._running) {
+                        this._agent?.stop();
+                        this._running = false;
+                    }
                     this.currentSession = session;
                     // Dispose old agent and rebuild with the saved history
                     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-                    this._agent = undefined;
+                    this._agent?.dispose();
                     this._agent = new Agent(root, this.memory);
                     if (session.agentHistory.length) {
                         this._agent.restoreHistory(session.agentHistory);
                     }
-                    // Log memory state so we can verify it's available on restore
-                    if (this.memory instanceof TieredMemoryManager) {
+                    if (this.memory) {
                         const stats = this.memory.getStats();
                         const total = stats.reduce((sum, s) => sum + s.count, 0);
                         logInfo(`[provider] Session loaded with ${total} memory entries available`);
@@ -554,6 +594,10 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
                 // ── Manual context compaction ─────────────────────────────
                 case 'compactContext': {
+                    if (this._running) {
+                        post({ type: 'error', text: 'Cannot compact while a response is in progress.' });
+                        break;
+                    }
                     const result = await this._agent!.compactContext(50);
                     post({
                         type: 'contextCompacted',
@@ -592,6 +636,13 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     break;
                 }
 
+                // ── Batch-approve: accept this AND all future calls to same tool ──
+                case 'confirmResponseAll': {
+                    const caMsg = raw as unknown as { command: 'confirmResponseAll'; id: string; toolName: string };
+                    this._agent?.resolveConfirmationAll(caMsg.toolName);
+                    break;
+                }
+
                 // ── Webview JS error reporting ────────────────────────────────
                 case 'webviewError': {
                     const errMsg = raw as { command: 'webviewError'; text: string };
@@ -608,13 +659,18 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                 post({ type: 'contextUpdate', ...getActiveContext() });
             }
         });
-        this.context.subscriptions.push(
-            vscode.window.onDidChangeTextEditorSelection(() => {
-                if (webviewView.visible) {
-                    post({ type: 'contextUpdate', ...getActiveContext() });
-                }
-            })
-        );
+        // Track selection listener as a class field to prevent accumulation on re-resolve
+        this._selectionListener?.dispose();
+        this._selectionListener = vscode.window.onDidChangeTextEditorSelection(() => {
+            if (webviewView.visible) {
+                post({ type: 'contextUpdate', ...getActiveContext() });
+            }
+        });
+        // Invalidate smart context import cache when files are saved
+        this._saveListener?.dispose();
+        this._saveListener = vscode.workspace.onDidSaveTextDocument((doc) => {
+            this.smartContext.clearCache(doc.uri.fsPath);
+        });
 
         try {
             webviewView.webview.html = await this.buildHtml();
@@ -639,7 +695,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                 post({ type: 'pinnedFilesRestored', files: this._pinnedFiles.map(f => ({ rel: f })) });
             }, 400);
         } catch (err) {
-            logError(`[provider] Failed to build webview: ${(err as Error).message}`);
+            logError(`[provider] Failed to build webview: ${toErrorMessage(err)}`);
         }
     }
 
@@ -688,7 +744,12 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
     dispose(): void {
         this._editorListener?.dispose();
+        this._selectionListener?.dispose();
         this._workspaceListener?.dispose();
+        this._saveListener?.dispose();
+        this._messageListener?.dispose();
+        this._agent?.dispose();
+        this._diffViewManager.dispose();
     }
 
     // ── Apply code block from chat ─────────────────────────────────────────
@@ -717,10 +778,9 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
             newContent = code;
         }
 
-        // Show diff preview
-        const diffManager = new DiffViewManager();
+        // Show diff preview using shared DiffViewManager
         try {
-            await diffManager.showDiffPreview(filePath, original, newContent);
+            await this._diffViewManager.showDiffPreview(filePath, original, newContent);
             const choice = await vscode.window.showInformationMessage(
                 `Apply changes to ${path.basename(filePath)}?`,
                 'Accept', 'Reject'
@@ -730,9 +790,9 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                 await editor.edit(eb => eb.replace(fullRange, newContent));
                 logInfo(`[provider] Applied code block to ${vscode.workspace.asRelativePath(doc.uri)}`);
             }
-            await diffManager.closeDiffPreview();
-        } finally {
-            diffManager.dispose();
+            await this._diffViewManager.closeDiffPreview();
+        } catch (err) {
+            logError(`[provider] Apply code block failed: ${toErrorMessage(err)}`);
         }
     }
 
@@ -743,14 +803,13 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         this.currentSession = this.storage.createNew(model);
         const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
         
-        // IMPORTANT: Dispose old agent and create new one with current workspace root
-        // Memory is workspace-scoped, so agent needs fresh memory context
-        this._agent = undefined;
+        // Dispose old agent and create new one with current workspace root
+        this._agent?.dispose();
         this._agent = new Agent(root, this.memory);
         
         // Re-index files for the new session (workspace may have changed)
         if (root && !this._fileIndex.length) {
-            try { this._fileIndex = indexWorkspaceFiles(root); } catch { /* best-effort */ }
+            indexWorkspaceFiles(root).then(idx => { this._fileIndex = idx; }).catch(() => {});
         }
         logInfo(`[provider] New session: ${this.currentSession.id}`);
         logInfo(`[provider] Workspace root: ${root || '(none)'}`);
@@ -825,7 +884,7 @@ export async function runDiagnostics(): Promise<void> {
         const { status, body } = await rawGet('/', 3000);
         logInfo(`Ollama root → HTTP ${status}: ${body.trim()}`);
     } catch (e) {
-        logError(`Ollama unreachable: ${(e as Error).message}`);
+        logError(`Ollama unreachable: ${toErrorMessage(e)}`);
     }
 
     const models = await fetchModels();
@@ -843,7 +902,7 @@ export async function runDiagnostics(): Promise<void> {
             );
             logInfo(`Stream test OK — ${toks} tokens from ${models[0]}`);
         } catch (e) {
-            logError(`Stream test failed: ${(e as Error).message}`);
+            logError(`Stream test failed: ${toErrorMessage(e)}`);
         }
     }
 

@@ -1,7 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { SKIP_DIRS } from './workspace';
-import { logInfo, logWarn } from './logger';
+import { logInfo, logWarn, toErrorMessage } from './logger';
+
+const fsp = fs.promises;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -34,18 +36,20 @@ const BINARY_EXTS = new Set([
 
 /**
  * Walk the workspace and build a flat list of all (non-binary-ish) file paths.
- * Respects SKIP_DIRS and ignores dot-files.
+ * Respects SKIP_DIRS and ignores dot-files. Async to avoid blocking the extension host.
  */
-export function indexWorkspaceFiles(root: string): FileMention[] {
+export async function indexWorkspaceFiles(root: string): Promise<FileMention[]> {
     const results: FileMention[] = [];
 
-    function walk(dir: string): void {
+    async function walk(dir: string): Promise<void> {
         if (results.length >= MAX_INDEX) { return; }
         try {
-            for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+            const entries = await fsp.readdir(dir, { withFileTypes: true });
+            for (const e of entries) {
+                if (results.length >= MAX_INDEX) { return; }
                 if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) { continue; }
                 const full = path.join(dir, e.name);
-                if (e.isDirectory()) { walk(full); continue; }
+                if (e.isDirectory()) { await walk(full); continue; }
                 const ext = path.extname(e.name).slice(1).toLowerCase();
                 if (BINARY_EXTS.has(ext)) { continue; }
                 results.push({
@@ -57,7 +61,7 @@ export function indexWorkspaceFiles(root: string): FileMention[] {
         } catch { /* skip inaccessible dirs */ }
     }
 
-    walk(root);
+    await walk(root);
     logInfo(`[mentions] Indexed ${results.length} files`);
     return results;
 }
@@ -187,7 +191,7 @@ export function buildMentionContext(
                 `\n</mention>`
             );
         } catch (err) {
-            blocks.push(`<mention path="${rel}" error="${(err as Error).message}" />`);
+            blocks.push(`<mention path="${rel}" error="${toErrorMessage(err)}" />`);
         }
     }
 

@@ -325,15 +325,19 @@
     /* ── Tool cards ──────────────────────────────────────────────────────── */
     .tool-card {
       display: flex;
-      align-items: flex-start;
-      gap: 8px;
+      flex-direction: column;
       margin: 3px 14px;
-      padding: 6px 10px;
       background: var(--vscode-editor-background, rgba(0,0,0,0.18));
       border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25));
       border-radius: 5px;
       font-size: 11px;
       border-left: 3px solid #e5c07b;
+    }
+    .tool-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
     }
     .tool-card.success { border-left-color: #4ec94e; }
     .tool-card.error   { border-left-color: #f44747; }
@@ -360,6 +364,41 @@
       max-width: 240px;
       font-family: var(--vscode-editor-font-family, monospace);
     }
+    .tool-summary {
+      font-size: 10px;
+      opacity: 0.55;
+      white-space: nowrap;
+      margin-left: auto;
+      flex-shrink: 0;
+    }
+    .tool-body {
+      overflow: hidden;
+      transition: max-height 0.2s ease;
+    }
+    .tool-body.collapsed {
+      max-height: 0;
+    }
+    .tool-card.expanded .tool-header {
+      border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.15));
+    }
+    .tool-output {
+      margin-top: 4px;
+      padding: 5px 8px;
+      font-family: var(--vscode-editor-font-family, 'Cascadia Code', 'Courier New', monospace);
+      font-size: 11px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 180px;
+      overflow-y: auto;
+      line-height: 1.4;
+      background: var(--vscode-terminal-background, rgba(0,0,0,0.15));
+      color: var(--vscode-terminal-foreground, #ccc);
+      border-radius: 3px;
+      opacity: 0.85;
+      scrollbar-width: thin;
+    }
+    .tool-output::-webkit-scrollbar { width: 4px; }
+    .tool-output::-webkit-scrollbar-thumb { background: rgba(128,128,128,0.4); border-radius: 2px; }
 
     /* ── Loading dots ────────────────────────────────────────────────────── */
     .dots {
@@ -686,6 +725,10 @@
         background: rgba(80,200,120,0.2); color: #50c878; border: 1px solid rgba(80,200,120,0.4);
     }
     .confirm-btn.accept:hover { background: rgba(80,200,120,0.35); }
+    .confirm-btn.accept-all {
+        background: rgba(79,193,255,0.15); color: var(--vscode-textLink-foreground, #4fc1ff); border: 1px solid rgba(79,193,255,0.35);
+    }
+    .confirm-btn.accept-all:hover { background: rgba(79,193,255,0.3); }
     .confirm-btn.reject {
         background: rgba(244,71,71,0.15); color: #f44747; border: 1px solid rgba(244,71,71,0.35);
     }
@@ -945,6 +988,95 @@
     .context-toast .compact-btn:hover {
       background: rgba(255,255,255,0.08);
     }
+
+    /* ── Context progress bar ────────────────────────────────────────────── */
+    #ctx-progress-wrap {
+      height: 3px;
+      background: transparent;
+      flex-shrink: 0;
+      cursor: default;
+    }
+    #ctx-progress-bar {
+      height: 100%;
+      width: 0%;
+      background: var(--vscode-textLink-foreground, #4fc1ff);
+      transition: width 0.4s ease, background-color 0.4s ease;
+    }
+    #ctx-progress-bar.warn     { background: #e5c07b; }
+    #ctx-progress-bar.critical { background: #f48771; }
+    #ctx-progress-bar.over     { background: #f44747; }
+
+    /* ── Commands button ─────────────────────────────────────────────────── */
+    #commands-btn {
+      flex-shrink: 0;
+      background: none;
+      border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.3));
+      color: var(--vscode-descriptionForeground, #888);
+      border-radius: 4px;
+      width: 24px;
+      height: 24px;
+      font-size: 13px;
+      line-height: 1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      transition: color 0.15s, border-color 0.15s, background 0.15s;
+      align-self: flex-end;
+      margin-bottom: 3px;
+    }
+    #commands-btn:hover, #commands-btn.active {
+      color: var(--vscode-sideBar-foreground, #ccc);
+      border-color: var(--vscode-focusBorder, #0078d4);
+      background: rgba(0,120,212,0.1);
+    }
+
+    /* ── Commands panel ──────────────────────────────────────────────────── */
+    #commands-panel {
+      background: var(--vscode-editorSuggestWidget-background, #252526);
+      border: 1px solid var(--vscode-editorSuggestWidget-border, #454545);
+      border-radius: 5px;
+      margin-bottom: 4px;
+      overflow: hidden;
+      box-shadow: 0 -4px 12px rgba(0,0,0,0.35);
+    }
+    #commands-panel-header {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--vscode-descriptionForeground, #888);
+      padding: 6px 10px 4px;
+      border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
+    }
+    .cmd-item {
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      padding: 6px 10px;
+      cursor: pointer;
+      border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.08));
+      transition: background 0.1s;
+    }
+    .cmd-item:last-child { border-bottom: none; }
+    .cmd-item:hover, .cmd-item.selected {
+      background: var(--vscode-list-hoverBackground, rgba(255,255,255,0.06));
+    }
+    .cmd-item-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--vscode-textLink-foreground, #4fc1ff);
+      white-space: nowrap;
+      min-width: 80px;
+    }
+    .cmd-item-desc {
+      font-size: 11px;
+      color: var(--vscode-descriptionForeground, #888);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
   </style>
 </head>
 <body>
@@ -1005,6 +1137,11 @@
     <button id="scroll-btn" title="Scroll to bottom">↓</button>
   </div>
 
+  <!-- Context progress bar (slim strip at top of input area) -->
+  <div id="ctx-progress-wrap" title="">
+    <div id="ctx-progress-bar"></div>
+  </div>
+
   <!-- Input -->
   <div id="input-container">
     <div id="context-bar"></div>
@@ -1023,8 +1160,11 @@
     </div>
     <!-- @mention autocomplete dropdown -->
     <div id="mention-dropdown" style="display:none"></div>
+    <!-- Commands panel (toggled by / button) -->
+    <div id="commands-panel" style="display:none"></div>
     <div id="input-box" style="margin-top: 5px;">
-      <textarea id="prompt" rows="1" placeholder="Ask anything… (@ to mention a file, Enter ↵ to send)"></textarea>
+      <button id="commands-btn" title="Show commands (/)">／</button>
+      <textarea id="prompt" rows="1" placeholder="Ask anything… (@ to mention a file, / for commands)"></textarea>
       <button id="send-btn" disabled>Send</button>
     </div>
     <div id="input-footer">

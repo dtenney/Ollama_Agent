@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { logInfo, logError } from './logger';
+import { logInfo, logError, toErrorMessage } from './logger';
 
 export interface FileChange {
     path: string;
@@ -19,6 +19,8 @@ export interface RefactoringPlan {
 
 export class MultiFileRefactoringManager {
     private currentPlan?: RefactoringPlan;
+    /** Track temp files for cleanup on dispose */
+    private _tempFiles = new Set<string>();
 
     /**
      * Show a preview of multi-file changes and get user approval
@@ -94,7 +96,7 @@ export class MultiFileRefactoringManager {
                 logInfo(`[refactor] Applied changes to ${change.path}`);
                 success++;
             } catch (error) {
-                const msg = error instanceof Error ? error.message : String(error);
+                const msg = toErrorMessage(error);
                 logError(`[refactor] Failed to apply changes to ${change.path}: ${msg}`);
                 failed++;
             }
@@ -116,6 +118,7 @@ export class MultiFileRefactoringManager {
                 `ollama-refactor-${Date.now()}-${path.basename(change.path)}`
             );
             fs.writeFileSync(tmpPath, change.newContent, 'utf8');
+            this._tempFiles.add(tmpPath);
             const modifiedUri = vscode.Uri.file(tmpPath);
 
             await vscode.commands.executeCommand(
@@ -124,15 +127,18 @@ export class MultiFileRefactoringManager {
                 modifiedUri,
                 `${path.basename(change.path)} (Proposed Changes)`
             );
-
-            // Clean up temp file after a delay
-            setTimeout(() => {
-                try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-            }, 60000); // 1 minute
         } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
+            const msg = toErrorMessage(error);
             logError(`[refactor] Failed to show diff: ${msg}`);
         }
+    }
+
+    /** Clean up all tracked temp files. */
+    dispose(): void {
+        for (const tmpPath of this._tempFiles) {
+            try { fs.unlinkSync(tmpPath); } catch { /* already gone */ }
+        }
+        this._tempFiles.clear();
     }
 
     /**

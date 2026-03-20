@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { logInfo, logError } from './logger';
+import { logInfo, logError, toErrorMessage } from './logger';
 
 export interface ChatMessage {
     role: 'user' | 'assistant' | 'system';
@@ -47,7 +47,7 @@ export class ChatExporter {
                 await vscode.window.showTextDocument(doc);
             }
         } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
+            const msg = toErrorMessage(error);
             logError(`[export] Failed to export chat: ${msg}`);
             vscode.window.showErrorMessage(`Failed to export chat: ${msg}`);
         }
@@ -143,7 +143,7 @@ export class ChatExporter {
             logInfo(`[export] Chat exported to ${uri.fsPath}`);
             vscode.window.showInformationMessage('Chat exported successfully');
         } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
+            const msg = toErrorMessage(error);
             logError(`[export] Failed to export chat: ${msg}`);
             vscode.window.showErrorMessage(`Failed to export chat: ${msg}`);
         }

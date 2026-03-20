@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { streamGenerateRequest } from './ollamaClient';
 import { getConfig } from './config';
-import { logInfo, logError } from './logger';
+import { logInfo, logError, toErrorMessage } from './logger';
 
 export class OllamaInlineCompletionProvider implements vscode.InlineCompletionItemProvider {
     private lastTriggerTime = 0;
@@ -67,7 +67,7 @@ export class OllamaInlineCompletionProvider implements vscode.InlineCompletionIt
 
             return [new vscode.InlineCompletionItem(completion, new vscode.Range(position, position))];
         } catch (err) {
-            logError(`[FIM] ${err instanceof Error ? err.message : String(err)}`);
+            logError(`[FIM] ${toErrorMessage(err)}`);
             return null;
         }
     }

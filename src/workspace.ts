@@ -1,12 +1,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync } from 'child_process';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 // Directories to ignore during all workspace scans
 export const SKIP_DIRS = new Set([
     '.git', 'node_modules', '.vscode', 'dist', 'build', 'out', '.next',
     '__pycache__', 'coverage', '.nyc_output', '.cache', 'tmp', 'temp',
-    '.turbo', '.parcel-cache', 'vendor',
+    '.turbo', '.parcel-cache', 'vendor', '.venv', 'venv', '.ollamapilot',
 ]);
 
 // ── File tree ─────────────────────────────────────────────────────────────────
@@ -166,16 +169,26 @@ export interface PythonEnvironment {
     formatter?: string;
 }
 
-export function detectPythonEnvironment(root: string): PythonEnvironment | null {
+/** Cached Python environment detection result (version doesn't change mid-session) */
+let _cachedPyEnv: { root: string; result: PythonEnvironment | null } | null = null;
+
+export async function detectPythonEnvironment(root: string): Promise<PythonEnvironment | null> {
+    // Return cached result if same workspace root
+    if (_cachedPyEnv && _cachedPyEnv.root === root) { return _cachedPyEnv.result; }
+
     const type = detectProjectType(root);
-    if (!type.startsWith('Python')) { return null; }
+    if (!type.startsWith('Python')) {
+        _cachedPyEnv = { root, result: null };
+        return null;
+    }
 
     const env: PythonEnvironment = { packageManager: 'pip' };
 
-    // Python version
+    // Python version (async, non-blocking)
     for (const cmd of ['python --version', 'python3 --version']) {
         try {
-            env.pythonVersion = execSync(cmd, { cwd: root, timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }).toString().trim();
+            const { stdout } = await execAsync(cmd, { cwd: root, timeout: 3000 });
+            env.pythonVersion = stdout.trim();
             break;
         } catch { /* not found */ }
     }
@@ -219,6 +232,7 @@ export function detectPythonEnvironment(root: string): PythonEnvironment | null 
     if (pyproject.includes('[tool.black]')) { env.formatter = 'black'; }
     else if (env.linter === 'ruff') { env.formatter = 'ruff format'; }
 
+    _cachedPyEnv = { root, result: env };
     return env;
 }
 
@@ -236,7 +250,21 @@ export function formatPythonEnvironment(env: PythonEnvironment): string {
 
 // ── Full workspace summary (used as a tool result) ────────────────────────────
 
-export function buildWorkspaceSummary(root: string): string {
+/** Cached workspace summary with TTL */
+let _cachedSummary: { root: string; text: string; timestamp: number } | null = null;
+const SUMMARY_TTL_MS = 30_000; // 30 seconds
+
+/** Invalidate the workspace summary cache (call after file operations). */
+export function clearWorkspaceSummaryCache(): void {
+    _cachedSummary = null;
+}
+
+export async function buildWorkspaceSummary(root: string): Promise<string> {
+    // Return cached summary if still fresh and for the same root
+    if (_cachedSummary && _cachedSummary.root === root && (Date.now() - _cachedSummary.timestamp) < SUMMARY_TTL_MS) {
+        return _cachedSummary.text;
+    }
+
     const type = detectProjectType(root);
     const tree = buildFileTree(root, 3);
     const keyFiles = getKeyFilesSummary(root);
@@ -248,7 +276,7 @@ export function buildWorkspaceSummary(root: string): string {
     ];
 
     // Include Python environment details for Python projects
-    const pyEnv = detectPythonEnvironment(root);
+    const pyEnv = await detectPythonEnvironment(root);
     if (pyEnv) {
         sections.push('', '── Python environment ──', formatPythonEnvironment(pyEnv));
     }
@@ -265,5 +293,7 @@ export function buildWorkspaceSummary(root: string): string {
         recent.map((f) => `  ${f}`).join('\n') || '  (none)',
     );
 
-    return sections.join('\n');
+    const text = sections.join('\n');
+    _cachedSummary = { root, text, timestamp: Date.now() };
+    return text;
 }

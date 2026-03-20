@@ -1,7 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { execSync } from 'child_process';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 // ── Smart Context Manager ─────────────────────────────────────────────────────
 
@@ -209,13 +212,13 @@ export class SmartContextManager {
      */
     private async getRecentlyModifiedFiles(workspaceRoot: string): Promise<string[]> {
         try {
-            const output = execSync('git diff --name-only HEAD~5..HEAD', {
+            const { stdout } = await execAsync('git diff --name-only HEAD~5..HEAD', {
                 cwd: workspaceRoot,
                 encoding: 'utf8',
                 timeout: 2000
             });
 
-            return output
+            return stdout
                 .split('\n')
                 .filter((line: string) => line.trim())
                 .map((file: string) => path.join(workspaceRoot, file))

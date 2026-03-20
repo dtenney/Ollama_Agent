@@ -7,3 +7,9 @@ const ts = () => new Date().toISOString();
 export const logInfo  = (m: string): void => channel.appendLine(`[INFO]  ${ts()}  ${m}`);
 export const logWarn  = (m: string): void => channel.appendLine(`[WARN]  ${ts()}  ${m}`);
 export const logError = (m: string): void => channel.appendLine(`[ERROR] ${ts()}  ${m}`);
+
+/** Extract a human-readable message from any caught value. */
+export function toErrorMessage(err: unknown): string {
+    if (err instanceof Error) { return err.message; }
+    return String(err);
+}

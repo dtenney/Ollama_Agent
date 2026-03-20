@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { toErrorMessage } from './logger';
 
 // ── Template definition ───────────────────────────────────────────────────────
 
@@ -250,6 +251,6 @@ async function importTemplates(manager: TemplateManager): Promise<void> {
         const count = await manager.importTemplates(json);
         vscode.window.showInformationMessage(`Imported ${count} template(s)`);
     } catch (err) {
-        vscode.window.showErrorMessage(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+        vscode.window.showErrorMessage(`Import failed: ${toErrorMessage(err)}`);
     }
 }

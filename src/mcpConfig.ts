@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { logInfo, logError } from './logger';
+import { logInfo, logError, toErrorMessage } from './logger';
 
 export interface MCPServerConfig {
     name: string;
@@ -64,7 +64,7 @@ export function loadMCPConfig(): MCPServerConfig[] {
                     return validFromFile;
                 }
             } catch (err) {
-                logError(`Failed to load MCP config from ${configPath}: ${(err as Error).message}`);
+                logError(`Failed to load MCP config from ${configPath}: ${toErrorMessage(err)}`);
             }
         }
     }

@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import { OllamaAgentProvider, runDiagnostics } from './provider';
-import { fetchModels, streamChatRequest } from './ollamaClient';
+import { fetchModels, streamChatRequest, keepAliveModel } from './ollamaClient';
 import { getConfig } from './config';
-import { channel, logInfo, logError } from './logger';
+import { channel, logInfo, logError, toErrorMessage } from './logger';
 import { startMCPServer, stopAllMCPServers } from './mcpClient';
 import { loadMCPConfig, createExampleMCPConfig } from './mcpConfig';
 import { TieredMemoryManager } from './memoryCore';
@@ -17,7 +17,6 @@ import { ChatExporter } from './chatExporter';
 import { MultiWorkspaceManager } from './multiWorkspace';
 import { buildReviewRequest, buildCommitReviewRequest } from './codeReview';
 import { showManageTemplatesUI } from './promptTemplates';
-import { ingestMarkdownFiles } from './markdownIngest';
 import { scanProjectDocs } from './docScanner';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -35,7 +34,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const serverPromises = mcpConfigs.map(cfg => 
             startMCPServer(cfg.name, cfg.command, cfg.args, cfg.env || {})
                 .catch(err => {
-                    logError(`MCP server ${cfg.name} failed to start: ${err.message}`);
+                    logError(`MCP server ${cfg.name} failed to start: ${toErrorMessage(err)}`);
                     return null;
                 })
         );
@@ -47,7 +46,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 logInfo(`MCP servers started: ${successful}/${mcpConfigs.length}`);
             })
             .catch(err => {
-                logError(`Unexpected error starting MCP servers: ${err.message}`);
+                logError(`Unexpected error starting MCP servers: ${toErrorMessage(err)}`);
             });
     } else {
         logInfo('No MCP servers configured');
@@ -84,8 +83,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 logInfo(`[memory] Embedding model: ${memoryConfig.embeddingModel} (${vectorSize}d)`);
             } catch (error) {
                 if (memoryConfig.fallbackToLocal) {
-                    const errorMsg = error instanceof Error ? error.message : String(error);
-                    logError(`[memory] Qdrant unavailable, using local storage only: ${errorMsg}`);
+                    logError(`[memory] Qdrant unavailable, using local storage only: ${toErrorMessage(error)}`);
                     qdrantClient = undefined;
                     embeddingService = undefined;
                 } else {
@@ -123,19 +121,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             context.subscriptions.push({
                 dispose: () => clearInterval(maintenanceInterval)
             });
+
+            // Register TieredMemoryManager disposal
+            context.subscriptions.push({
+                dispose: () => memoryManager?.dispose()
+            });
             
             // Run initial maintenance on startup
             setTimeout(async () => {
-                if (memoryManager) {
-                    logInfo('[memory] Running initial maintenance...');
-                    await memoryManager.demoteStaleEntries();
-                    await memoryManager.promoteFrequentEntries();
-                    await memoryManager.archiveOldEntries();
+                try {
+                    if (memoryManager) {
+                        logInfo('[memory] Running initial maintenance...');
+                        await memoryManager.demoteStaleEntries();
+                        await memoryManager.promoteFrequentEntries();
+                        await memoryManager.archiveOldEntries();
+                    }
+                } catch (err) {
+                    logError(`[memory] Initial maintenance failed: ${toErrorMessage(err)}`);
                 }
             }, 5000); // 5 seconds after startup
         } catch (error) {
-            const errorMsg = error instanceof Error ? error.message : String(error);
-            logError(`[memory] Failed to initialize: ${errorMsg}`);
+            logError(`[memory] Failed to initialize: ${toErrorMessage(error)}`);
             memoryManager = null;
         }
     } else {
@@ -252,7 +258,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 );
                 await editor.edit((b) => b.replace(selection, full));
             } catch (err) {
-                vscode.window.showErrorMessage(`Ollama error: ${(err as Error).message}`);
+                vscode.window.showErrorMessage(`Ollama error: ${toErrorMessage(err)}`);
             }
         })
     );
@@ -394,14 +400,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 'Clear All', 'Cancel'
             );
             if (confirm === 'Clear All') {
-                await context.workspaceState.update('ollamaAgent.memoryCore', undefined);
-                // Also delete .ollamapilot/memory.json to prevent re-import on reload
-                const memRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                if (memRoot) {
-                    const memFile = path.join(memRoot, '.ollamapilot', 'memory.json');
-                    if (fs.existsSync(memFile)) {
-                        fs.unlinkSync(memFile);
-                        logInfo('[memory] Deleted .ollamapilot/memory.json');
+                if (memoryManager) {
+                    await memoryManager.clearAll();
+                } else {
+                    await context.workspaceState.update('ollamaAgent.memoryCore', undefined);
+                    const memRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                    if (memRoot) {
+                        const memFile = path.join(memRoot, '.ollamapilot', 'memory.json');
+                        if (fs.existsSync(memFile)) {
+                            fs.unlinkSync(memFile);
+                        }
                     }
                 }
                 memoryViewProvider?.refresh();
@@ -437,7 +445,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     vscode.window.showWarningMessage('Failed to promote entry');
                 }
             } catch (err) {
-                vscode.window.showErrorMessage(`Failed to promote: ${err instanceof Error ? err.message : String(err)}`);
+                vscode.window.showErrorMessage(`Failed to promote: ${toErrorMessage(err)}`);
             }
         })
     );
@@ -461,7 +469,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     vscode.window.showWarningMessage('Failed to demote entry');
                 }
             } catch (err) {
-                vscode.window.showErrorMessage(`Failed to demote: ${err instanceof Error ? err.message : String(err)}`);
+                vscode.window.showErrorMessage(`Failed to demote: ${toErrorMessage(err)}`);
             }
         })
     );
@@ -479,7 +487,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     memoryViewProvider?.refresh();
                     vscode.window.showInformationMessage('Memory entry deleted');
                 } catch (err) {
-                    vscode.window.showErrorMessage(`Failed to delete: ${err instanceof Error ? err.message : String(err)}`);
+                    vscode.window.showErrorMessage(`Failed to delete: ${toErrorMessage(err)}`);
                 }
             }
         })
@@ -536,7 +544,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     vscode.window.showInformationMessage(`Exported ${allEntries.length} entries`);
                 }
             } catch (err) {
-                vscode.window.showErrorMessage(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+                vscode.window.showErrorMessage(`Export failed: ${toErrorMessage(err)}`);
             }
         })
     );
@@ -562,7 +570,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 memoryViewProvider?.refresh();
                 vscode.window.showInformationMessage(`Imported ${imported} entries`);
             } catch (err) {
-                vscode.window.showErrorMessage(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+                vscode.window.showErrorMessage(`Import failed: ${toErrorMessage(err)}`);
             }
         })
     );
@@ -581,7 +589,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 { enableScripts: true }
             );
             
-            context.subscriptions.push(panel);
+            // Don't push to context.subscriptions — panel auto-disposes on close
             
             const htmlPath = path.join(context.extensionPath, 'webview', 'memoryPanel.html');
             const html = await fs.promises.readFile(htmlPath, 'utf8');
@@ -625,15 +633,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                             'Clear All', 'Cancel'
                         );
                         if (confirmClear !== 'Clear All') { break; }
-                        await context.workspaceState.update('ollamaAgent.memoryCore', undefined);
-                        // Also delete .ollamapilot/memory.json to prevent re-import on reload
-                        const memRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-                        if (memRoot) {
-                            const memFile = path.join(memRoot, '.ollamapilot', 'memory.json');
-                            if (fs.existsSync(memFile)) {
-                                fs.unlinkSync(memFile);
-                                logInfo('[memory] Deleted .ollamapilot/memory.json');
-                            }
+                        if (memoryManager) {
+                            await memoryManager.clearAll();
                         }
                         memoryViewProvider?.refresh();
                         await sendFullData();
@@ -657,7 +658,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                             vscode.window.showInformationMessage(`Imported ${imported} entries`);
                             await sendFullData();
                         } catch (err) {
-                            vscode.window.showErrorMessage(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+                            vscode.window.showErrorMessage(`Import failed: ${toErrorMessage(err)}`);
                         }
                         break;
                     }
@@ -761,16 +762,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         })
     );
 
+    // Listen for config changes to clear context limit cache
     context.subscriptions.push(
-        vscode.commands.registerCommand('ollamaAgent.ingestMarkdown', async () => {
-            if (!memoryManager) {
-                vscode.window.showWarningMessage('Memory system not initialized.');
-                return;
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('ollamaAgent')) {
+                const { clearContextLimitCache } = require('./contextCalculator');
+                clearContextLimitCache();
+                logInfo('[config] Configuration changed, context limit cache cleared');
             }
-            await ingestMarkdownFiles(memoryManager);
-            memoryViewProvider?.refresh();
         })
     );
+
+    // ── Pre-warm model ───────────────────────────────────────────────────────
+    // After a short delay, load the configured model into GPU memory so the
+    // first real chat request responds without a cold-start penalty.
+    setTimeout(() => {
+        const cfg = getConfig();
+        if (cfg.model) {
+            logInfo(`[keep-alive] Pre-warming model: ${cfg.model}`);
+            keepAliveModel(cfg.model);
+        }
+    }, 8_000); // 8s delay — let VS Code finish loading first
 
     logInfo('Activated — view: ollamaAgent.chatView');
 }

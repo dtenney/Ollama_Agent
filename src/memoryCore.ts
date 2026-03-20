@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { logInfo, logError, logWarn } from './logger';
+import { logInfo, logError, logWarn, toErrorMessage } from './logger';
 import { MemoryConfig } from './memoryConfig';
 import { QdrantClient, QdrantPoint } from './qdrantClient';
 import { EmbeddingService } from './embeddingService';
@@ -60,16 +60,64 @@ export class TieredMemoryManager {
     private fileSyncTimer: ReturnType<typeof setTimeout> | null = null;
     private static readonly FILE_SYNC_DELAY_MS = 2_000;
     private operationLock = Promise.resolve();
+    /** In-memory cache of the core to prevent stale reads between async writes */
+    private _cachedCore: MemoryCore | null = null;
+    private _disposed = false;
     
     constructor(
         private readonly context: vscode.ExtensionContext,
-        private readonly config: MemoryConfig,
+        readonly config: MemoryConfig,
         private readonly qdrantClient?: QdrantClient,
         private readonly embeddingService?: EmbeddingService
     ) {
         // On construction, load from .ollamapilot/memory.json if it exists
         // and workspaceState is empty (first open of a cloned/shared project)
         this.loadFromFileIfNeeded();
+        // Populate in-memory cache
+        this._cachedCore = this.readCoreFromStorage();
+    }
+
+    /** Dispose resources: clear pending timers and flush to storage. */
+    dispose(): void {
+        if (this._disposed) { return; }
+        this._disposed = true;
+        if (this.fileSyncTimer) {
+            clearTimeout(this.fileSyncTimer);
+            this.fileSyncTimer = null;
+            // Flush synchronously on dispose
+            this.syncToFile();
+        }
+        this._cachedCore = null;
+        logInfo('[memory] TieredMemoryManager disposed');
+    }
+
+    /**
+     * Clear ALL memory: workspaceState, Qdrant collection, memory.json, and in-memory cache.
+     */
+    async clearAll(): Promise<void> {
+        return this.withLock(async () => {
+            // Clear workspaceState
+            await this.context.workspaceState.update(TieredMemoryManager.STORAGE_KEY, undefined);
+            // Clear in-memory cache
+            this._cachedCore = this.emptyCore();
+            // Clear Qdrant collection
+            if (this.qdrantClient) {
+                try {
+                    await this.qdrantClient.deleteCollection();
+                    await this.qdrantClient.initialize();
+                    logInfo('[memory] Qdrant collection cleared and recreated');
+                } catch (err) {
+                    logError(`[memory] Failed to clear Qdrant: ${toErrorMessage(err)}`);
+                }
+            }
+            // Delete memory.json
+            const filePath = this.getMemoryFilePath();
+            if (filePath && fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
+                logInfo('[memory] Deleted .ollamapilot/memory.json');
+            }
+            logInfo('[memory] All memory cleared');
+        });
     }
 
     // ── File-based persistence (.ollamapilot/memory.json) ─────────────────────
@@ -116,8 +164,7 @@ export class TieredMemoryManager {
                 logInfo(`[memory] Imported ${total} entries from ${TieredMemoryManager.MEMORY_FILENAME}`);
             }
         } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            logError(`[memory] Failed to load ${TieredMemoryManager.MEMORY_FILENAME}: ${msg}`);
+            logError(`[memory] Failed to load ${TieredMemoryManager.MEMORY_FILENAME}: ${toErrorMessage(err)}`);
         }
     }
 
@@ -157,8 +204,7 @@ export class TieredMemoryManager {
             fs.writeFileSync(filePath, JSON.stringify(fileData, null, 2), 'utf8');
             logInfo(`[memory] Synced to ${TieredMemoryManager.MEMORY_FILENAME}`);
         } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            logError(`[memory] Failed to sync to file: ${msg}`);
+            logError(`[memory] Failed to sync to file: ${toErrorMessage(err)}`);
         }
     }
 
@@ -170,7 +216,7 @@ export class TieredMemoryManager {
             logError(`[memory] Invalid tier: ${tier}`);
             return [];
         }
-        const core = this.getCore();
+        const core = this.getCoreReadonly();
         const tierKey = `tier_${tier}_${this.getTierName(tier)}` as keyof MemoryCore;
         return [...(core[tierKey] || [])]; // Return copy to prevent external mutations
     }
@@ -204,7 +250,11 @@ export class TieredMemoryManager {
             const core = this.getCore();
             const tierKey = `tier_${tier}_${this.getTierName(tier)}` as keyof MemoryCore;
             
-            // Store in Qdrant for Tiers 4-5 (if available)
+            // Always store in local storage (all tiers)
+            core[tierKey] = [entry, ...core[tierKey]];
+            await this.saveCore(core);
+
+            // Additionally store in Qdrant for Tiers 4-5 (if available)
             if ((tier === 4 || tier === 5) && this.qdrantClient && this.embeddingService) {
                 try {
                     const embedding = await this.embeddingService.generateEmbedding(trimmed);
@@ -226,24 +276,14 @@ export class TieredMemoryManager {
                     };
                     
                     await this.qdrantClient.upsertPoint(point);
-                    logInfo(`[memory] Added to Tier ${tier} (Qdrant): "${trimmed.slice(0, 60)}..."`);
-                    return entry; // Return after successful Qdrant storage
+                    logInfo(`[memory] Added to Tier ${tier} (local + Qdrant): "${trimmed.slice(0, 60)}..."`);
                 } catch (error) {
-                    const errorMsg = error instanceof Error ? error.message : String(error);
-                    logError(`[memory] Failed to store in Qdrant: ${errorMsg}`);
-                    // Fall back to local storage
-                    core[tierKey] = [entry, ...core[tierKey]];
-                    await this.saveCore(core);
-                    logInfo(`[memory] Fell back to local storage for Tier ${tier}`);
-                    return entry;
+                    logError(`[memory] Failed to store in Qdrant (local saved): ${toErrorMessage(error)}`);
                 }
             } else {
-                // Store locally for Tiers 0-3
-                core[tierKey] = [entry, ...core[tierKey]];
-                await this.saveCore(core);
                 logInfo(`[memory] Added to Tier ${tier}: "${trimmed.slice(0, 60)}..."`);
-                return entry;
             }
+            return entry;
         });
     }
 
@@ -278,8 +318,7 @@ export class TieredMemoryManager {
                                 }
                             });
                         } catch (error) {
-                            const errorMsg = error instanceof Error ? error.message : String(error);
-                            logError(`[memory] Failed to update in Qdrant: ${errorMsg}`);
+                            logError(`[memory] Failed to update in Qdrant: ${toErrorMessage(error)}`);
                         }
                     }
                     
@@ -307,8 +346,7 @@ export class TieredMemoryManager {
                         try {
                             await this.qdrantClient.deletePoint(id);
                         } catch (error) {
-                            const errorMsg = error instanceof Error ? error.message : String(error);
-                            logError(`[memory] Failed to delete from Qdrant: ${errorMsg}`);
+                            logError(`[memory] Failed to delete from Qdrant: ${toErrorMessage(error)}`);
                         }
                     }
                     
@@ -339,8 +377,7 @@ export class TieredMemoryManager {
                 }
             }
         }).catch((error) => {
-            const errorMsg = error instanceof Error ? error.message : String(error);
-            logError(`[memory] Failed to record access for ${entryId}: ${errorMsg}`);
+            logError(`[memory] Failed to record access for ${entryId}: ${toErrorMessage(error)}`);
         });
     }
 
@@ -578,8 +615,7 @@ export class TieredMemoryManager {
             logInfo(`[memory] Semantic search for "${query}" returned ${entries.length} results`);
             return entries;
         } catch (error) {
-            const errorMsg = error instanceof Error ? error.message : String(error);
-            logError(`[memory] Semantic search failed: ${errorMsg}`);
+            logError(`[memory] Semantic search failed: ${toErrorMessage(error)}`);
             return [];
         }
     }
@@ -595,7 +631,7 @@ export class TieredMemoryManager {
         }
         
         const tokenLimit = Math.max(100, maxTokens ?? this.config.maxContextTokens);
-        const core = this.getCore();
+        const core = this.getCoreReadonly();
         let context = '';
         let estimatedTokens = 0;
         
@@ -652,7 +688,7 @@ export class TieredMemoryManager {
      */
     async buildRelevantContext(userMessage: string, maxTokens?: number): Promise<string> {
         const tokenLimit = Math.max(100, maxTokens ?? this.config.maxContextTokens);
-        const core = this.getCore();
+        const core = this.getCoreReadonly();
         let context = '';
         let estimatedTokens = 0;
 
@@ -696,7 +732,7 @@ export class TieredMemoryManager {
             return '(no tiers specified)';
         }
         
-        const core = this.getCore();
+        const core = this.getCoreReadonly();
         let output = '';
         
         // Filter and sort valid tiers
@@ -722,21 +758,43 @@ export class TieredMemoryManager {
 
     // ── Storage ───────────────────────────────────────────────────────────────
 
-    private getCore(): MemoryCore {
+    private emptyCore(): MemoryCore {
+        return {
+            tier_0_critical: [],
+            tier_1_essential: [],
+            tier_2_operational: [],
+            tier_3_collaboration: [],
+            tier_4_references: [],
+            tier_5_archive: []
+        };
+    }
+
+    /** Read directly from workspaceState (only used for init and cache miss). */
+    private readCoreFromStorage(): MemoryCore {
         return this.context.workspaceState.get<MemoryCore>(
             TieredMemoryManager.STORAGE_KEY,
-            {
-                tier_0_critical: [],
-                tier_1_essential: [],
-                tier_2_operational: [],
-                tier_3_collaboration: [],
-                tier_4_references: [],
-                tier_5_archive: []
-            }
+            this.emptyCore()
         );
     }
 
+    /** Get a deep copy of the core for write operations (safe to mutate). */
+    private getCore(): MemoryCore {
+        if (!this._cachedCore) {
+            this._cachedCore = this.readCoreFromStorage();
+        }
+        return JSON.parse(JSON.stringify(this._cachedCore));
+    }
+
+    /** Get a readonly reference to the cached core (no copy — callers must NOT mutate). */
+    private getCoreReadonly(): MemoryCore {
+        if (!this._cachedCore) {
+            this._cachedCore = this.readCoreFromStorage();
+        }
+        return this._cachedCore;
+    }
+
     private async saveCore(core: MemoryCore): Promise<void> {
+        this._cachedCore = JSON.parse(JSON.stringify(core));
         await this.context.workspaceState.update(TieredMemoryManager.STORAGE_KEY, core);
         this.scheduleSyncToFile();
     }
@@ -856,8 +914,7 @@ export class TieredMemoryManager {
                 });
             }
         } catch (error) {
-            const errorMsg = error instanceof Error ? error.message : String(error);
-            logError(`[memory] Failed to handle tier transition: ${errorMsg}`);
+            logError(`[memory] Failed to handle tier transition: ${toErrorMessage(error)}`);
         }
     }
 
@@ -877,8 +934,7 @@ export class TieredMemoryManager {
             const results = await this.qdrantClient.search(embedding, 1, undefined, threshold);
             return results.length > 0;
         } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            logWarn(`[memory] Semantic dedup check failed (skipping): ${msg}`);
+            logWarn(`[memory] Semantic dedup check failed (skipping): ${toErrorMessage(error)}`);
             return false;
         }
     }
@@ -908,8 +964,7 @@ export class TieredMemoryManager {
                 }
             });
         } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            logWarn(`[memory] Failed to index for search: ${msg}`);
+            logWarn(`[memory] Failed to index for search: ${toErrorMessage(error)}`);
         }
     }
 
@@ -917,7 +972,7 @@ export class TieredMemoryManager {
 
     /** Get memory statistics for all tiers */
     getStats(): { tier: number; name: string; count: number; tokens: number; totalAccesses: number }[] {
-        const core = this.getCore();
+        const core = this.getCoreReadonly();
         const stats = [];
         
         for (let tier = 0; tier <= 5; tier++) {

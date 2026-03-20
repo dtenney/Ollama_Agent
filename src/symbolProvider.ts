@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { logInfo, logError } from './logger';
+import { logInfo, logError, toErrorMessage } from './logger';
 
 export interface SymbolInfo {
     name: string;
@@ -58,7 +58,7 @@ export class SymbolProvider {
             
             return flatSymbols;
         } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
+            const msg = toErrorMessage(error);
             logError(`[symbols] Failed to get symbols for ${uri.fsPath}: ${msg}`);
             return [];
         }
@@ -88,7 +88,7 @@ export class SymbolProvider {
             const range = symbol.location.range;
             return document.getText(range);
         } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
+            const msg = toErrorMessage(error);
             logError(`[symbols] Failed to get symbol content: ${msg}`);
             return '';
         }

@@ -341,6 +341,26 @@ function escHtml(s) {
 
 /** @param {string} text */
 function renderMarkdown(text) {
+    // 0. Collapse double-newlines between short lines (list items, file names, etc.)
+    //    Keeps \n\n between prose paragraphs (lines > 80 chars) intact.
+    const parts = text.split('\n\n');
+    if (parts.length > 1) {
+        let collapsed = parts[0];
+        for (let i = 1; i < parts.length; i++) {
+            const prev = (i === 1 ? parts[0] : parts[i - 1]);
+            const prevLastLine = prev.split('\n').pop() || '';
+            const nextFirstLine = parts[i].split('\n')[0] || '';
+            // If both surrounding lines are short, collapse to single newline
+            if (prevLastLine.length < 80 && nextFirstLine.length < 80
+                && prevLastLine.trim() && nextFirstLine.trim()) {
+                collapsed += '\n' + parts[i];
+            } else {
+                collapsed += '\n\n' + parts[i];
+            }
+        }
+        text = collapsed;
+    }
+
     // 1. Extract fenced code blocks → placeholders
     /** @type {{lang:string, code:string}[]} */
     const codeBlocks = [];
@@ -485,8 +505,11 @@ messagesEl.addEventListener('click', (e) => {
 
 // ── Scroll helpers ────────────────────────────────────────────────────────────
 
+/** Whether the agent loop is actively running (broader than streaming — covers tool execution gaps) */
+let agentActive = false;
+
 function scrollBottom(force = false) {
-    if (force || (!userScrolledUp && streaming)) {
+    if (force || (!userScrolledUp && (streaming || agentActive))) {
         messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 }
@@ -494,7 +517,7 @@ function scrollBottom(force = false) {
 messagesEl.addEventListener('scroll', () => {
     const distFromBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
     userScrolledUp = distFromBottom > 60;
-    scrollBtn.classList.toggle('visible', userScrolledUp && streaming);
+    scrollBtn.classList.toggle('visible', userScrolledUp && (streaming || agentActive));
 });
 
 scrollBtn.addEventListener('click', () => {
@@ -531,6 +554,24 @@ const TOOL_ICONS = {
 function getTimeStr() {
     return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
+
+/** Format a timestamp as relative time ("just now", "2m ago", "1h ago", "yesterday"). */
+function relativeTimeStr(ts) {
+    if (!ts) return '';
+    const diff = Date.now() - ts;
+    if (diff < 60_000) return 'just now';
+    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+    if (diff < 172_800_000) return 'yesterday';
+    return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+// Update relative timestamps every 60s
+setInterval(() => {
+    document.querySelectorAll('time.msg-time[data-ts]').forEach(el => {
+        el.textContent = relativeTimeStr(Number(el.dataset.ts));
+    });
+}, 60_000);
 
 // ── Chat helpers ──────────────────────────────────────────────────────────────
 
@@ -603,10 +644,11 @@ function startAssistantMessage() {
     hideWelcome();
     const div = document.createElement('div');
     div.className = 'message assistant';
+    const now = Date.now();
     div.innerHTML =
         `<div class="msg-header">` +
             `<span class="msg-role">Agent <span class="dots"><span></span><span></span><span></span></span></span>` +
-            `<time class="msg-time">${getTimeStr()}</time>` +
+            `<time class="msg-time" data-ts="${now}" title="${new Date(now).toLocaleString()}">${relativeTimeStr(now)}</time>` +
         `</div>` +
         `<div class="msg-content"></div>`;
     messagesEl.insertBefore(div, scrollBtn);
@@ -624,10 +666,55 @@ function appendToken(token) {
     currentRaw += token;
     const content = currentMsgEl.querySelector('.msg-content');
     if (content) {
-        // During streaming show raw text — low-cost, avoids mid-stream markdown flicker
-        content.textContent = currentRaw;
+        // During streaming, hide <tool> blocks and stray JSON/closing tags
+        let display = currentRaw
+            .replace(/<\/?tool>[\s\S]*/i, '')   // strip from <tool> or </tool> onwards
+            .replace(/\}\s*$/, '')               // strip trailing } (partial tool JSON)
+            .trim();
+        content.textContent = display;
         scrollBottom();
     }
+}
+
+/** Strip <tool>...</tool> blocks and raw JSON tool calls from text (client-side).
+ *  Uses brace-counting to handle nested JSON (e.g. {"arguments":{}}).
+ */
+function stripToolBlocksClient(text) {
+    let result = text;
+
+    // Remove <tool>{...}</tool> using brace counting for nested JSON
+    let pos = 0;
+    while (pos < result.length) {
+        const idx = result.toLowerCase().indexOf('<tool>', pos);
+        if (idx === -1) break;
+        // Find the balanced closing brace
+        let depth = 0, jsonStart = -1, jsonEnd = -1;
+        for (let i = idx + 6; i < result.length; i++) {
+            if (result[i] === '{') { if (depth === 0) jsonStart = i; depth++; }
+            else if (result[i] === '}') { depth--; if (depth === 0) { jsonEnd = i + 1; break; } }
+        }
+        if (jsonEnd === -1) { // unclosed — strip from <tool> to end
+            result = result.slice(0, idx);
+            break;
+        }
+        // Find optional </tool> after the JSON
+        let endPos = jsonEnd;
+        const afterJson = result.slice(jsonEnd).match(/^\s*<\/tool>/i);
+        if (afterJson) endPos = jsonEnd + afterJson[0].length;
+        result = result.slice(0, idx) + result.slice(endPos);
+        pos = idx; // re-scan from same position
+    }
+
+    // Remove orphaned </tool> tags
+    result = result.replace(/<\/tool>/gi, '');
+    // Remove markdown code blocks containing tool calls
+    result = result.replace(/```(?:json)?\s*\n?\s*\{[\s\S]*?"name"[\s\S]*?\}\s*\n?```/gi, '');
+    // Remove [TOOL RESULT: ...] blocks injected as context
+    result = result.replace(/\[TOOL RESULT:.*?\][\s\S]*?\[END TOOL RESULT\]/g, '');
+    // Remove [wait for result] hints
+    result = result.replace(/\[wait for result[^\]]*\]/gi, '');
+    // Collapse excessive newlines — double newlines become single
+    return result.replace(/\n{2,}/g, '\n').trim();
 }
 
 function finalizeMessage() {
@@ -637,9 +724,12 @@ function finalizeMessage() {
     const roleEl = currentMsgEl.querySelector('.msg-role');
     if (roleEl) { roleEl.innerHTML = 'Agent'; }
 
+    // Strip tool blocks before rendering (text-mode tool calls leak into streamed content)
+    const cleanRaw = stripToolBlocksClient(currentRaw);
+
     // Render full markdown
     const content = currentMsgEl.querySelector('.msg-content');
-    if (content) { content.innerHTML = renderMarkdown(currentRaw); }
+    if (content) { content.innerHTML = renderMarkdown(cleanRaw); }
 
     // Add retry button to completed assistant messages
     const header = currentMsgEl.querySelector('.msg-header');
@@ -687,12 +777,14 @@ function addToolCard(id, name, args) {
     div.className = 'tool-card';
     div.id = `tool-${id}`;
     div.innerHTML =
-        `<div class="tool-icon">${icon}</div>` +
-        `<div class="tool-info">` +
-            `<div class="tool-name">${escHtml(name)}</div>` +
-            `<div class="tool-args">${escHtml(argsStr)}</div>` +
-        `</div>` +
-        `<div class="dots"><span></span><span></span><span></span></div>`;
+        `<div class="tool-header" title="Click to expand/collapse">` +
+            `<div class="tool-icon">${icon}</div>` +
+            `<div class="tool-info">` +
+                `<div class="tool-name">${escHtml(name)}</div>` +
+                `<div class="tool-args">${escHtml(argsStr)}</div>` +
+            `</div>` +
+            `<div class="dots"><span></span><span></span><span></span></div>` +
+        `</div>`;
     messagesEl.insertBefore(div, scrollBtn);
     scrollBottom();
 }
@@ -702,23 +794,78 @@ function addToolCard(id, name, args) {
  * @param {boolean} success
  * @param {string} preview
  */
-function updateToolCard(id, success, preview) {
+function updateToolCard(id, success, preview, fullResult) {
     const card = document.getElementById(`tool-${id}`);
     if (!card) { return; }
     card.classList.add(success ? 'success' : 'error');
     const dots = card.querySelector('.dots');
     if (dots) { dots.remove(); }
-    const info = card.querySelector('.tool-info');
-    if (info) {
-        const p = document.createElement('div');
-        p.className = 'tool-preview';
-        p.textContent = preview;
-        info.appendChild(p);
+
+    // Build summary line for collapsed view
+    const toolName = card.querySelector('.tool-name')?.textContent || '';
+    const output = fullResult || preview;
+    let summary = success ? '✓' : '✗';
+    if (output) {
+        const lines = output.split('\n').filter(l => l.trim());
+        if (toolName === 'read_file') {
+            summary += ` ${lines.length} lines`;
+        } else if (toolName === 'search_files') {
+            const m = output.match(/(\d+)\)/);
+            summary += m ? ` ${m[1]} matches` : ` ${lines.length} lines`;
+        } else if (toolName === 'list_files') {
+            summary += ` ${lines.length} entries`;
+        } else {
+            summary += ` ${lines.length} lines`;
+        }
+    }
+
+    // Add summary badge
+    const header = card.querySelector('.tool-header');
+    if (header) {
+        const badge = document.createElement('span');
+        badge.className = 'tool-summary';
+        badge.textContent = summary;
+        header.appendChild(badge);
+    }
+
+    // Add collapsible output body (collapsed by default)
+    if (output) {
+        const body = document.createElement('div');
+        body.className = 'tool-body collapsed';
+        const outputDiv = document.createElement('div');
+        outputDiv.className = 'tool-output';
+        outputDiv.textContent = output;
+        body.appendChild(outputDiv);
+        card.appendChild(body);
+
+        // Toggle collapse on header click
+        if (header) {
+            header.style.cursor = 'pointer';
+            header.addEventListener('click', () => {
+                body.classList.toggle('collapsed');
+                card.classList.toggle('expanded');
+            });
+        }
     }
     scrollBottom();
 }
 
 /** @param {string} text */
+/** Map raw error strings to user-friendly messages with actions. */
+function friendlyErrorMsg(raw) {
+    if (/ECONNREFUSED|connect ECONNREFUSED/i.test(raw))
+        return '🔌 Ollama isn\'t running. Start it with: <code class="inline">ollama serve</code>';
+    if (/timed out/i.test(raw))
+        return '⏱ Request timed out. The model may still be loading — try again in a moment.';
+    if (/model.*not found|404/i.test(raw))
+        return '📦 Model not found. Install it with: <code class="inline">ollama pull &lt;model-name&gt;</code>';
+    if (/context length|too long/i.test(raw))
+        return '📏 Message exceeds the model\'s context window. Try compacting the conversation or starting a new chat.';
+    if (/does not support tools/i.test(raw))
+        return '⚙️ This model doesn\'t support native tool calling — text-mode will be used automatically.';
+    return `⚠ ${escHtml(raw)}`;
+}
+
 function addErrorMessage(text) {
     finalizeMessage();
     const div = document.createElement('div');
@@ -728,7 +875,7 @@ function addErrorMessage(text) {
             `<span class="msg-role" style="color:var(--vscode-errorForeground,#f48771);opacity:0.9">Error</span>` +
             `<time class="msg-time">${getTimeStr()}</time>` +
         `</div>` +
-        `<div class="msg-content" style="color:var(--vscode-errorForeground,#f48771)">⚠ ${escHtml(text)}</div>`;
+        `<div class="msg-content" style="color:var(--vscode-errorForeground,#f48771)">${friendlyErrorMsg(text)}</div>`;
     messagesEl.insertBefore(div, scrollBtn);
     scrollBottom(true);
 }
@@ -998,8 +1145,8 @@ function addFileToastSimple(icon, text) {
  * @param {string} action  Action type: 'run', 'write', 'rename', 'delete'
  * @param {string} detail  Human-readable description
  */
-function addConfirmCard(id, action, detail) {
-    const icons = { run: '⚡', write: '💾', rename: '🔄', delete: '🗑️' };
+function addConfirmCard(id, action, detail, toolName) {
+    const icons = { run: '⚡', write: '💾', rename: '🔄', delete: '🗑️', edit: '✏️' };
     const icon = icons[action] || '❓';
     const div = document.createElement('div');
     div.className = 'confirm-card';
@@ -1011,14 +1158,21 @@ function addConfirmCard(id, action, detail) {
         `</div>` +
         `<div class="confirm-actions">` +
             `<button class="confirm-btn accept">Accept</button>` +
+            `<button class="confirm-btn accept-all" title="Accept this and all future ${escHtml(toolName || action)} calls">Accept All</button>` +
             `<button class="confirm-btn reject">Reject</button>` +
         `</div>`;
     const acceptBtn = div.querySelector('.confirm-btn.accept');
+    const acceptAllBtn = div.querySelector('.confirm-btn.accept-all');
     const rejectBtn = div.querySelector('.confirm-btn.reject');
     acceptBtn.addEventListener('click', () => {
         vscode.postMessage({ command: 'confirmResponse', id, accepted: true });
         div.classList.add('accepted');
         div.querySelector('.confirm-actions').innerHTML = '<span class="confirm-resolved">✅ Accepted</span>';
+    });
+    acceptAllBtn.addEventListener('click', () => {
+        vscode.postMessage({ command: 'confirmResponseAll', id, toolName: toolName || action });
+        div.classList.add('accepted');
+        div.querySelector('.confirm-actions').innerHTML = '<span class="confirm-resolved">✅ Accepted All ' + escHtml(toolName || action) + '</span>';
     });
     rejectBtn.addEventListener('click', () => {
         vscode.postMessage({ command: 'confirmResponse', id, accepted: false });
@@ -1055,12 +1209,34 @@ function addContextToast(kind, text, showCompactBtn) {
     scrollBottom();
 }
 
+/** @type {HTMLDivElement | null} */
+const ctxProgressBar = /** @type {HTMLDivElement | null} */ (document.getElementById('ctx-progress-bar'));
+const ctxProgressWrap = /** @type {HTMLDivElement | null} */ (document.getElementById('ctx-progress-wrap'));
+
 /**
- * Update the running context usage indicator in the footer.
+ * Update the running context usage indicator in the footer and progress bar.
  * @param {number} percentage
+ * @param {number} [usedTokens]
+ * @param {number} [totalTokens]
  */
-function updateContextUsage(percentage) {
+function updateContextUsage(percentage, usedTokens, totalTokens) {
     if (!contextUsageEl) return;
+
+    // Update slim progress bar
+    if (ctxProgressBar) {
+        const clamped = Math.min(100, Math.max(0, percentage));
+        ctxProgressBar.style.width = `${clamped}%`;
+        ctxProgressBar.className = percentage >= 99 ? 'over'
+            : percentage >= 85 ? 'critical'
+            : percentage >= 60 ? 'warn'
+            : '';
+    }
+    if (ctxProgressWrap) {
+        ctxProgressWrap.title = totalTokens
+            ? `Context: ${Math.round(percentage)}% used (~${(usedTokens || 0).toLocaleString()} / ${totalTokens.toLocaleString()} tokens)`
+            : `Context: ${Math.round(percentage)}% used`;
+    }
+
     if (percentage <= 0) {
         contextUsageEl.textContent = '';
         contextUsageEl.className = '';
@@ -1118,10 +1294,11 @@ function addModeNotice(model) {
 /** @param {boolean} on */
 function setStreaming(on) {
     streaming = on;
+    if (on) { agentActive = true; }
     sendBtn.disabled = on || modelSelect.value === '';
-    stopBtn.classList.toggle('visible', on);
-    scrollBtn.classList.toggle('visible', on && userScrolledUp);
-    if (!on) {
+    stopBtn.classList.toggle('visible', on || agentActive);
+    scrollBtn.classList.toggle('visible', (on || agentActive) && userScrolledUp);
+    if (!on && !agentActive) {
         promptEl.focus();
         scrollBtn.classList.remove('visible');
     }
@@ -1137,6 +1314,8 @@ function sendMessage() {
     autoResize();
     hideMentionDropdown();
     setStreaming(true);
+    // Show a waiting bubble immediately so there's no silent gap before streamStart
+    startAssistantMessage();
 
     const filesToSend = mentionedFiles.map((f) => f.rel);
     const symbolsToSend = mentionedSymbols.map((s) => ({ name: s.name, filePath: s.filePath }));
@@ -1175,6 +1354,32 @@ promptEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
+    }
+});
+
+// ── Global keyboard shortcuts ─────────────────────────────────────────────────
+
+document.addEventListener('keydown', (e) => {
+    // Ctrl+/ — focus the input textarea from anywhere in the panel
+    if ((e.ctrlKey || e.metaKey) && e.key === '/') {
+        e.preventDefault();
+        promptEl.focus();
+        promptEl.select();
+        return;
+    }
+    // Escape — stop generation when streaming
+    if (e.key === 'Escape' && (streaming || agentActive) && document.activeElement !== promptEl) {
+        e.preventDefault();
+        vscode.postMessage({ command: 'stopGeneration' });
+        setStreaming(false);
+        return;
+    }
+    // Ctrl+K — clear chat (only when not streaming)
+    if ((e.ctrlKey || e.metaKey) && e.key === 'k' && !streaming && !agentActive) {
+        e.preventDefault();
+        vscode.postMessage({ command: 'newChat' });
+        clearChat();
+        return;
     }
 });
 
@@ -1285,6 +1490,85 @@ function selectSlashItem(idx) {
     // Move cursor to end
     promptEl.selectionStart = promptEl.selectionEnd = promptEl.value.length;
 }
+
+// ── Commands panel (/  button) ────────────────────────────────────────────────
+
+const commandsBtn  = /** @type {HTMLButtonElement} */ (document.getElementById('commands-btn'));
+const commandsPanel = /** @type {HTMLDivElement}   */ (document.getElementById('commands-panel'));
+
+/** Build and show the commands panel. */
+function openCommandsPanel() {
+    commandsPanel.innerHTML = '';
+    const header = document.createElement('div');
+    header.id = 'commands-panel-header';
+    header.textContent = 'Commands';
+    commandsPanel.appendChild(header);
+
+    Object.values(SLASH_COMMANDS).forEach((cmd, i) => {
+        const item = document.createElement('div');
+        item.className = 'cmd-item';
+        item.innerHTML =
+            `<span class="cmd-item-label">${escHtml(cmd.label)}</span>` +
+            `<span class="cmd-item-desc">${escHtml(cmd.desc)}</span>`;
+        item.addEventListener('click', () => {
+            promptEl.value = cmd.prompt;
+            autoResize();
+            updateTokenIndicator();
+            closeCommandsPanel();
+            promptEl.focus();
+            promptEl.selectionStart = promptEl.selectionEnd = promptEl.value.length;
+        });
+        commandsPanel.appendChild(item);
+    });
+
+    commandsPanel.style.display = 'block';
+    commandsBtn.classList.add('active');
+}
+
+function closeCommandsPanel() {
+    commandsPanel.style.display = 'none';
+    commandsBtn.classList.remove('active');
+}
+
+function toggleCommandsPanel() {
+    if (commandsPanel.style.display === 'none') {
+        openCommandsPanel();
+    } else {
+        closeCommandsPanel();
+    }
+}
+
+commandsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleCommandsPanel();
+});
+
+// Close panel when clicking outside it
+document.addEventListener('click', (e) => {
+    if (commandsPanel.style.display !== 'none' &&
+        !commandsPanel.contains(/** @type {Node} */ (e.target)) &&
+        e.target !== commandsBtn) {
+        closeCommandsPanel();
+    }
+});
+
+// Typing '/' at the start of an empty input also opens the panel
+promptEl.addEventListener('keydown', (e) => {
+    if (e.key === '/' && promptEl.value === '' && !e.ctrlKey && !e.metaKey) {
+        // Let the character land, then open panel and clear the '/'
+        setTimeout(() => {
+            if (promptEl.value === '/') {
+                promptEl.value = '';
+                autoResize();
+                openCommandsPanel();
+            }
+        }, 0);
+    } else if (e.key === 'Escape' && commandsPanel.style.display !== 'none') {
+        e.stopPropagation();
+        closeCommandsPanel();
+        promptEl.focus();
+    }
+});
 
 // ── @mention autocomplete ─────────────────────────────────────────────────────
 
@@ -1718,7 +2002,8 @@ window.addEventListener('message', (event) => {
             break;
 
         case 'streamStart':
-            startAssistantMessage();
+            // Only create a new bubble if sendMessage() hasn't already created one
+            if (!currentMsgEl) { startAssistantMessage(); }
             break;
 
         case 'token':
@@ -1730,16 +2015,26 @@ window.addEventListener('message', (event) => {
             setStreaming(false);
             break;
 
+        case 'agentDone':
+            agentActive = false;
+            stopBtn.classList.remove('visible');
+            scrollBtn.classList.remove('visible');
+            promptEl.focus();
+            break;
+
         case 'toolCall':
+            // If a waiting bubble exists with no content yet, remove it — tool cards replace it
+            if (currentMsgEl && !currentRaw) { currentMsgEl.remove(); currentMsgEl = null; }
             addToolCard(msg.id, msg.name, msg.args);
             break;
 
         case 'toolResult':
-            updateToolCard(msg.id, msg.success, msg.preview ?? '');
+            updateToolCard(msg.id, msg.success, msg.preview ?? '', msg.fullResult ?? '');
             break;
 
         case 'error':
             addErrorMessage(msg.text);
+            agentActive = false;
             setStreaming(false);
             break;
 
@@ -1780,8 +2075,12 @@ window.addEventListener('message', (event) => {
             break;
 
         case 'sessionSaved':
-            // Silently update active session id
+            // Update active session id and refresh title in history panel if open
             activeSessionId = msg.session.id;
+            if (msg.session.title && historyPanel.classList.contains('open')) {
+                const titleEl = historyList.querySelector(`.session-item[data-id="${CSS.escape(msg.session.id)}"] .session-title`);
+                if (titleEl) { titleEl.textContent = msg.session.title; }
+            }
             break;
 
         case 'contextUpdate':
@@ -1884,8 +2183,16 @@ window.addEventListener('message', (event) => {
             break;
 
         case 'confirmAction':
-            addConfirmCard(msg.id, msg.action, msg.detail);
+            addConfirmCard(msg.id, msg.action, msg.detail, msg.toolName);
             break;
+
+        case 'autoApproved': {
+            // Show a small toast for batch-approved actions (no buttons needed)
+            const autoIcons = { run: '⚡', write: '💾', rename: '🔄', delete: '🗑️', edit: '✏️' };
+            const autoIcon = autoIcons[msg.action] || '✅';
+            addFileToastSimple(autoIcon, `Auto-approved: ${msg.detail}`);
+            break;
+        }
     }
 });
 
@@ -2022,16 +2329,17 @@ function addStoredAssistantMessage(content, timestamp) {
     hideWelcome();
     const div = document.createElement('div');
     div.className = 'message assistant';
-    const timeStr = timestamp
-        ? new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        : getTimeStr();
+    const ts = timestamp || Date.now();
+    const absTime = new Date(ts).toLocaleString();
+    const timeStr = relativeTimeStr(ts);
+    const cleanContent = stripToolBlocksClient(content);
     div.innerHTML =
         `<div class="msg-header">` +
             `<span class="msg-role">Agent</span>` +
-            `<time class="msg-time">${timeStr}</time>` +
+            `<time class="msg-time" data-ts="${ts}" title="${absTime}">${timeStr}</time>` +
             `<div class="msg-actions"><button class="msg-action-btn retry-btn" title="Retry">↺ Retry</button></div>` +
         `</div>` +
-        `<div class="msg-content">${renderMarkdown(content)}</div>`;
+        `<div class="msg-content">${renderMarkdown(cleanContent)}</div>`;
     messagesEl.insertBefore(div, scrollBtn);
     assignMsgId(div);
     div.querySelector('.msg-header').appendChild(createPinBtn(div));
@@ -2043,13 +2351,12 @@ function addUserMessage(text, timestamp) {
     hideWelcome();
     const div = document.createElement('div');
     div.className = 'message user';
-    const timeStr = timestamp
-        ? new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        : getTimeStr();
+    const ts = timestamp || Date.now();
+    const absTime = new Date(ts).toLocaleString();
     div.innerHTML =
         `<div class="msg-header">` +
             `<span class="msg-role">You</span>` +
-            `<time class="msg-time">${timeStr}</time>` +
+            `<time class="msg-time" data-ts="${ts}" title="${absTime}">${relativeTimeStr(ts)}</time>` +
         `</div>` +
         `<div class="msg-content">${escHtml(text).replace(/\n/g, '<br>')}</div>`;
     messagesEl.insertBefore(div, scrollBtn);

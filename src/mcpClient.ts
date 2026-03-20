@@ -1,7 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { spawn } from 'child_process';
-import { logInfo, logError } from './logger';
+import { logInfo, logError, toErrorMessage } from './logger';
 
 export interface MCPTool {
     name: string;
@@ -60,7 +60,7 @@ export async function startMCPServer(
         activeServers.set(name, server);
         return server;
     } catch (err) {
-        logError(`Failed to start MCP server ${name}: ${(err as Error).message}`);
+        logError(`Failed to start MCP server ${name}: ${toErrorMessage(err)}`);
         throw err;
     }
 }
@@ -95,7 +95,7 @@ export async function callMCPTool(
         logInfo(`MCP tool ${serverName}.${toolName} returned ${content.length} chars`);
         return content;
     } catch (err) {
-        const msg = (err as Error).message;
+        const msg = toErrorMessage(err);
         logError(`MCP tool ${serverName}.${toolName} failed: ${msg}`);
         throw new Error(`MCP tool error: ${msg}`);
     }
@@ -124,7 +124,7 @@ export function mcpToolsToOllamaFormat(): unknown[] {
         ollamaTools.push({
             type: 'function',
             function: {
-                name: `mcp_${server}_${tool.name}`,
+                name: `mcp__${server}__${tool.name}`,
                 description: `[MCP ${server} - PREFERRED] ${tool.description || tool.name}`,
                 parameters: tool.inputSchema,
             },
@@ -138,7 +138,7 @@ export function mcpToolsToOllamaFormat(): unknown[] {
  * Parse MCP tool name from Ollama format (mcp_servername_toolname)
  */
 export function parseMCPToolName(name: string): { server: string; tool: string } | null {
-    const match = name.match(/^mcp_([^_]+)_(.+)$/);
+    const match = name.match(/^mcp__(.+?)__(.+)$/);
     if (!match) return null;
     return { server: match[1], tool: match[2] };
 }
@@ -152,7 +152,7 @@ export async function stopAllMCPServers(): Promise<void> {
             await server.client.close();
             logInfo(`Stopped MCP server: ${name}`);
         } catch (err) {
-            logError(`Error stopping MCP server ${name}: ${(err as Error).message}`);
+            logError(`Error stopping MCP server ${name}: ${toErrorMessage(err)}`);
         }
     }
     activeServers.clear();
@@ -162,5 +162,5 @@ export async function stopAllMCPServers(): Promise<void> {
  * Check if a tool name is an MCP tool
  */
 export function isMCPTool(toolName: string): boolean {
-    return toolName.startsWith('mcp_');
+    return toolName.startsWith('mcp__');
 }

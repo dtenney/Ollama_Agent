@@ -4,7 +4,7 @@ import * as path from 'path';
 import { TieredMemoryManager } from './memoryCore';
 import { getConfig } from './config';
 import { streamChatRequest } from './ollamaClient';
-import { logInfo, logError, logWarn } from './logger';
+import { logInfo, logError, logWarn, toErrorMessage } from './logger';
 
 /** Files to scan in priority order. First match wins per category. */
 const DOC_SOURCES: Array<{ glob: string; category: string; maxSize: number }> = [
@@ -574,7 +574,7 @@ export async function scanProjectDocs(memoryManager: TieredMemoryManager): Promi
                     const content = fs.readFileSync(fullPath, 'utf8');
                     foundDocs.push({ path: source.glob, category: source.category, content });
                 } catch (err) {
-                    logWarn(`[doc-scan] Error reading ${source.glob}: ${(err as Error).message}`);
+                    logWarn(`[doc-scan] Error reading ${source.glob}: ${toErrorMessage(err)}`);
                 }
             }
 
@@ -615,7 +615,7 @@ export async function scanProjectDocs(memoryManager: TieredMemoryManager): Promi
                     const content = fs.readFileSync(fullPath, 'utf8');
                     foundDocs.push({ path: relPath, category: 'linked', content });
                 } catch (err) {
-                    logWarn(`[doc-scan] Error reading linked ${relPath}: ${(err as Error).message}`);
+                    logWarn(`[doc-scan] Error reading linked ${relPath}: ${toErrorMessage(err)}`);
                 }
             }
 
@@ -727,7 +727,7 @@ export async function scanProjectDocs(memoryManager: TieredMemoryManager): Promi
                         totalIngested++;
                     }
                 } catch (err) {
-                    logError(`[doc-scan] Failed to extract from ${doc.path}: ${(err as Error).message}`);
+                    logError(`[doc-scan] Failed to extract from ${doc.path}: ${toErrorMessage(err)}`);
                 }
             }
 

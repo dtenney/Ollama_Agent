@@ -2,7 +2,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
-import { logInfo, logWarn } from './logger';
+import { logInfo, logWarn, toErrorMessage } from './logger';
 
 const execAsync = promisify(exec);
 
@@ -104,7 +104,36 @@ export async function getGitDiff(root: string): Promise<GitDiffResult | null> {
         return { summary, diff, truncated, clean: false };
 
     } catch (err) {
-        logWarn(`[gitContext] Failed: ${(err as Error).message}`);
+        logWarn(`[gitContext] Failed: ${toErrorMessage(err)}`);
+        return null;
+    }
+}
+
+/**
+ * Get a diff for a specific commit range (e.g. "HEAD~1", "main..feature").
+ * Returns null if git is unavailable or the range produces no diff.
+ */
+export async function getGitDiffForRange(root: string, commitRange: string): Promise<GitDiffResult | null> {
+    if (!isGitRepo(root)) { return null; }
+    const opts = { cwd: root, timeout: GIT_TIMEOUT_MS * 2 };
+
+    try {
+        const { stdout: diff } = await execAsync(`git diff ${commitRange}`, opts);
+        if (!diff.trim()) { return { summary: 'No changes', diff: '', truncated: false, clean: true }; }
+
+        let summary = '';
+        try {
+            const { stdout: stat } = await execAsync(`git diff --stat ${commitRange}`, opts);
+            const statLines = stat.trim().split('\n');
+            summary = statLines[statLines.length - 1]?.trim() ?? '';
+        } catch { /* fallback */ }
+        if (!summary) { summary = 'changes found'; }
+
+        const truncated = diff.length > MAX_DIFF_CHARS;
+        const clipped = truncated ? diff.slice(0, MAX_DIFF_CHARS) + '\n\n… (diff truncated)' : diff;
+
+        return { summary, diff: clipped, truncated, clean: false };
+    } catch {
         return null;
     }
 }

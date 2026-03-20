@@ -20,6 +20,9 @@ export class DiffViewManager {
         oldContent: string,
         newContent: string
     ): Promise<void> {
+        // Clean up any previous temp file to prevent leaks
+        this.cleanup();
+
         const fileName = path.basename(filePath);
         const ext = path.extname(filePath);
 

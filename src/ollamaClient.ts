@@ -1,7 +1,7 @@
 import * as http from 'http';
 import * as https from 'https';
 import { getConfig, parseBaseUrl } from './config';
-import { logInfo, logError } from './logger';
+import { logInfo, logError, toErrorMessage } from './logger';
 
 // ── Shared types ──────────────────────────────────────────────────────────────
 
@@ -73,7 +73,7 @@ export function streamChatRequest(
     messages: OllamaMessage[],
     tools: unknown[],
     onToken: (t: string) => void,
-    stopRef: { stop: boolean }
+    stopRef: { stop: boolean; destroy?: () => void }
 ): Promise<StreamResult> {
     return new Promise((resolve, reject) => {
         const { hostname, port } = getEndpoint();
@@ -96,6 +96,7 @@ export function streamChatRequest(
         const req = makeRequest(
             {
                 hostname, port, path: '/api/chat', method: 'POST',
+                timeout: 120_000,
                 headers: {
                     'Content-Type': 'application/json',
                     'Content-Length': Buffer.byteLength(body),
@@ -151,7 +152,12 @@ export function streamChatRequest(
                 res.on('error', reject);
             }
         );
+        // Expose immediate destroy so callers can abort without waiting for next chunk
+        stopRef.destroy = () => req.destroy();
+        req.on('timeout', () => { req.destroy(); reject(new Error('Chat request timed out (120s)')); });
         req.on('error', (err) => {
+            // Ignore ECONNRESET caused by our own destroy() on stop
+            if ((err as NodeJS.ErrnoException).code === 'ECONNRESET' && stopRef.stop) { return; }
             logError(`streamChatRequest: ${err.message}`);
             reject(err);
         });
@@ -240,13 +246,94 @@ export function streamGenerateRequest(
     });
 }
 
+/**
+ * Generate a short chat title from the first exchange.
+ * Fires a non-streaming /api/generate call with a tight token budget.
+ * Returns null on any error so callers can fall back to deriveTitle().
+ */
+export async function generateChatTitle(
+    model: string,
+    userMessage: string,
+    assistantSnippet: string
+): Promise<string | null> {
+    return new Promise((resolve) => {
+        const { hostname, port } = getEndpoint();
+        const prompt =
+            `Summarize this conversation in 5 words or fewer as a chat title. ` +
+            `Reply with only the title, no punctuation.\n\nUser: ${userMessage.slice(0, 300)}\nAssistant: ${assistantSnippet.slice(0, 300)}`;
+        const payload = JSON.stringify({
+            model,
+            prompt,
+            stream: false,
+            options: { temperature: 0.3, num_predict: 16 },
+        });
+
+        const req = makeRequest(
+            {
+                hostname, port, path: '/api/generate', method: 'POST',
+                timeout: 10_000,
+                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+            },
+            (res) => {
+                let raw = '';
+                res.on('data', (c: Buffer) => (raw += c.toString()));
+                res.on('end', () => {
+                    try {
+                        const parsed = JSON.parse(raw);
+                        const title = (parsed.response as string | undefined)?.trim().replace(/[.!?]+$/, '');
+                        resolve(title && title.length > 0 && title.length < 80 ? title : null);
+                    } catch { resolve(null); }
+                });
+            }
+        );
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.on('error', () => resolve(null));
+        req.write(payload);
+        req.end();
+    });
+}
+
+/**
+ * Send a keep-alive (empty generate) to Ollama to pre-load the model into GPU memory.
+ * Fires-and-forgets — any error is silently ignored.
+ */
+export function keepAliveModel(model: string): void {
+    const { hostname, port } = getEndpoint();
+    const body = JSON.stringify({ model, keep_alive: '10m', prompt: '', stream: false });
+    try {
+        const req = makeRequest(
+            {
+                hostname, port, path: '/api/generate', method: 'POST',
+                timeout: 30_000,
+                headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+            },
+            (res) => {
+                res.resume(); // discard response body
+                logInfo(`[keep-alive] model=${model} status=${res.statusCode}`);
+            }
+        );
+        req.on('error', () => { /* ignore — Ollama may not be running yet */ });
+        req.write(body);
+        req.end();
+    } catch { /* ignore */ }
+}
+
+/** Cached model list with TTL */
+let _cachedModels: { names: string[]; timestamp: number } | null = null;
+const MODELS_TTL_MS = 60_000; // 60 seconds
+
 export async function fetchModels(): Promise<string[]> {
+    // Return cached list if still fresh
+    if (_cachedModels && (Date.now() - _cachedModels.timestamp) < MODELS_TTL_MS) {
+        return _cachedModels.names;
+    }
     try {
         const { status, body } = await rawGet('/api/tags');
         if (status !== 200) { logError(`/api/tags HTTP ${status}`); return []; }
         const parsed = JSON.parse(body) as { models?: { name: string }[] };
         const names = parsed.models?.map((m) => m.name) ?? [];
         logInfo(`Models: ${names.join(', ') || '(none)'}`);
+        _cachedModels = { names, timestamp: Date.now() };
         return names;
     } catch (err) {
         const e = err as NodeJS.ErrnoException;
@@ -333,7 +420,7 @@ export function fetchModelInfo(model: string): Promise<OllamaModelInfo | null> {
                         logInfo(`[model-info] ${model}: ctx=${info.contextLength ?? 'unknown'}, params=${info.parameterSize ?? '?'}, quant=${info.quantization ?? '?'}`);
                         resolve(info);
                     } catch (err) {
-                        logError(`[model-info] Failed to parse /api/show response: ${(err as Error).message}`);
+                        logError(`[model-info] Failed to parse /api/show response: ${toErrorMessage(err)}`);
                         resolve(null);
                     }
                 });

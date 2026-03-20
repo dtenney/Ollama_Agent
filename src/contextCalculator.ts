@@ -4,7 +4,7 @@
  */
 
 import { OllamaMessage, fetchModelInfo } from './ollamaClient';
-import { logInfo, logWarn, logError } from './logger';
+import { logInfo, logWarn, logError, toErrorMessage } from './logger';
 
 /** Message overhead tokens for role and structure */
 const MESSAGE_OVERHEAD_TOKENS = 10;
@@ -129,7 +129,7 @@ export async function resolveModelContextLimit(model: string): Promise<number> {
                 return info.contextLength;
             }
         } catch (err) {
-            logWarn(`[context] Failed to resolve context limit for ${model}: ${(err as Error).message}`);
+            logWarn(`[context] Failed to resolve context limit for ${model}: ${toErrorMessage(err)}`);
         }
 
         // Fall back to hardcoded table
@@ -154,11 +154,16 @@ export function clearContextLimitCache(): void {
 }
 
 /**
- * Estimate token count from text using the 4 chars ≈ 1 token heuristic.
- * This is approximate but good enough for monitoring.
+ * Estimate token count from text.
+ * Uses char/3.5 for code-heavy content (lots of short tokens like braces/operators)
+ * and char/4 for prose. Detects code by checking for common code characters.
  */
 export function estimateTokens(text: string): number {
-    return Math.ceil(text.length / 4);
+    if (!text) return 0;
+    // Heuristic: if >5% of chars are code-specific punctuation, use tighter ratio
+    const codeChars = (text.match(/[{}()\[\];=<>!&|+\-*/^~@#$%]/g) || []).length;
+    const ratio = (codeChars / text.length) > 0.05 ? 3.5 : 4;
+    return Math.ceil(text.length / ratio);
 }
 
 /**
@@ -205,8 +210,8 @@ export type ContextLevel = 'safe' | 'warning' | 'critical' | 'overflow';
  */
 export function getContextLevel(percentage: number): ContextLevel {
     if (percentage >= 99) return 'overflow';
-    if (percentage >= 70) return 'critical';
-    if (percentage >= 50) return 'warning';
+    if (percentage >= 95) return 'critical';
+    if (percentage >= 75) return 'warning';
     return 'safe';
 }
 

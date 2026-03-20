@@ -2,13 +2,8 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { TieredMemoryManager } from './memoryCore';
-import { logInfo, logError } from './logger';
-
-/** Directories to skip when scanning for .md files */
-const SKIP_DIRS = new Set([
-    'node_modules', '.git', 'dist', 'build', 'out', '.next',
-    '__pycache__', '.venv', 'venv', 'vendor', 'coverage', '.ollamapilot'
-]);
+import { SKIP_DIRS } from './workspace';
+import { logInfo, logError, toErrorMessage } from './logger';
 
 /** Max file size to read (256 KB) */
 const MAX_FILE_SIZE = 256 * 1024;
@@ -25,19 +20,19 @@ interface MdSection {
 /**
  * Recursively find all .md files in a directory.
  */
-function findMarkdownFiles(dir: string, depth = 0): string[] {
+async function findMarkdownFiles(dir: string, depth = 0): Promise<string[]> {
     if (depth > MAX_DEPTH) { return []; }
     const results: string[] = [];
     let entries: fs.Dirent[];
     try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
     } catch {
         return results;
     }
     for (const entry of entries) {
         if (entry.isDirectory()) {
             if (!SKIP_DIRS.has(entry.name)) {
-                results.push(...findMarkdownFiles(path.join(dir, entry.name), depth + 1));
+                results.push(...await findMarkdownFiles(path.join(dir, entry.name), depth + 1));
             }
         } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
             results.push(path.join(dir, entry.name));
@@ -94,7 +89,7 @@ export async function ingestMarkdownFiles(memoryManager: TieredMemoryManager): P
         async (progress, token) => {
             // 1. Find .md files
             progress.report({ message: 'Scanning for .md files…' });
-            const files = findMarkdownFiles(root);
+            const files = await findMarkdownFiles(root);
             if (files.length === 0) {
                 vscode.window.showInformationMessage('No .md files found in workspace.');
                 return;
@@ -148,7 +143,7 @@ export async function ingestMarkdownFiles(memoryManager: TieredMemoryManager): P
                         ingested++;
                     }
                 } catch (err) {
-                    const msg = err instanceof Error ? err.message : String(err);
+                    const msg = toErrorMessage(err);
                     logError(`[md-ingest] Error reading ${relPath}: ${msg}`);
                 }
             }
