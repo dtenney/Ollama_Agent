@@ -18,6 +18,7 @@ import { MultiWorkspaceManager } from './multiWorkspace';
 import { buildReviewRequest, buildCommitReviewRequest } from './codeReview';
 import { showManageTemplatesUI } from './promptTemplates';
 import { scanProjectDocs } from './docScanner';
+import { CodeIndexer } from './codeIndex';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -148,6 +149,42 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         logInfo('[memory] Multi-tiered memory disabled in settings');
     }
 
+    // ── Code Index (semantic file search via Qdrant) ─────────────────────────
+    // Builds a per-file vector index so the agent can find relevant files by
+    // semantic similarity rather than keyword matching.  Runs in the background
+    // so it never blocks activation.
+    let codeIndexer: CodeIndexer | null = null;
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    logInfo(`[code-index] Setup: memory.enabled=${memoryConfig.enabled}, workspaceRoot=${workspaceRoot ?? '(none)'}`);
+
+    if (memoryConfig.enabled && workspaceRoot) {
+        try {
+            const embSvc = new EmbeddingService(memoryConfig);
+            const vectorSize = embSvc.getEmbeddingDimension();
+            const workspaceName = vscode.workspace.name || path.basename(workspaceRoot);
+            codeIndexer = new CodeIndexer(memoryConfig, workspaceName, workspaceRoot, embSvc, vectorSize);
+            // Non-blocking — indexing happens in the background
+            codeIndexer.initialize().catch(err =>
+                logError(`[code-index] Init error: ${toErrorMessage(err)}`)
+            );
+            logInfo('[code-index] CodeIndexer created');
+
+            // Re-index any file the user saves
+            context.subscriptions.push(
+                vscode.workspace.onDidSaveTextDocument(doc => {
+                    if (codeIndexer && doc.uri.scheme === 'file') {
+                        codeIndexer.indexFile(doc.uri.fsPath).catch(() => {/* silent */});
+                    }
+                })
+            );
+        } catch (err) {
+            logError(`[code-index] Failed to create CodeIndexer: ${toErrorMessage(err)}`);
+        }
+    }
+
+    // Make codeIndexer available to the provider
+    (global as any).__ollamapilotCodeIndexer = codeIndexer;
+
     // ── Multi-Workspace Manager ──────────────────────────────────────────────
     const workspaceManager = new MultiWorkspaceManager(context, memoryManager);
     await workspaceManager.initialize();
@@ -168,7 +205,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     );
 
     // ── Sidebar provider ─────────────────────────────────────────────────────
-    const provider = new OllamaAgentProvider(context, memoryManager, workspaceManager);
+    const provider = new OllamaAgentProvider(context, memoryManager, workspaceManager, codeIndexer);
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider('ollamaAgent.chatView', provider, {
             webviewOptions: { retainContextWhenHidden: true },

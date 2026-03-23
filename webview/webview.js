@@ -666,12 +666,15 @@ function appendToken(token) {
     currentRaw += token;
     const content = currentMsgEl.querySelector('.msg-content');
     if (content) {
-        // During streaming, hide <tool> blocks and stray JSON/closing tags
-        let display = currentRaw
-            .replace(/<\/?tool>[\s\S]*/i, '')   // strip from <tool> or </tool> onwards
-            .replace(/\}\s*$/, '')               // strip trailing } (partial tool JSON)
-            .trim();
-        content.textContent = display;
+        // During streaming: strip complete <tool>...</tool> blocks, then hide any
+        // in-progress (unclosed) tool block at the tail so partial JSON doesn't show.
+        let display = stripToolBlocksClient(currentRaw);
+        // If an unclosed <tool> is still open at the end, hide everything from it onward
+        const openIdx = display.toLowerCase().lastIndexOf('<tool>');
+        if (openIdx !== -1) {
+            display = display.slice(0, openIdx);
+        }
+        content.textContent = display.trim();
         scrollBottom();
     }
 }
@@ -2019,6 +2022,7 @@ window.addEventListener('message', (event) => {
             agentActive = false;
             stopBtn.classList.remove('visible');
             scrollBtn.classList.remove('visible');
+            sendBtn.disabled = modelSelect.value === '';
             promptEl.focus();
             break;
 
@@ -2160,12 +2164,20 @@ window.addEventListener('message', (event) => {
             updateContextUsage(msg.percentage);
             break;
 
-        case 'contextCompacted':
+        case 'contextCompacted': {
             addContextToast('compacted',
-                `Context auto-compacted: removed ${msg.messagesRemoved} old message${msg.messagesRemoved !== 1 ? 's' : ''}`,
+                `Context compacted: removed ${msg.messagesRemoved} old message${msg.messagesRemoved !== 1 ? 's' : ''}`,
                 false);
             updateContextUsage(msg.newPercentage);
+            if (msg.summary) {
+                const summaryEl = document.createElement('div');
+                summaryEl.className = 'msg system-msg compaction-summary';
+                summaryEl.innerHTML = `<span class="system-label">📦 Context compacted — summary of earlier conversation:</span><div class="summary-body">${escapeHtml(msg.summary)}</div>`;
+                messagesEl.appendChild(summaryEl);
+                scrollBottom();
+            }
             break;
+        }
 
         case 'contextOverflow':
             addContextToast('overflow',
@@ -2191,6 +2203,17 @@ window.addEventListener('message', (event) => {
             const autoIcons = { run: '⚡', write: '💾', rename: '🔄', delete: '🗑️', edit: '✏️' };
             const autoIcon = autoIcons[msg.action] || '✅';
             addFileToastSimple(autoIcon, `Auto-approved: ${msg.detail}`);
+            break;
+        }
+
+        case 'dismissConfirmation': {
+            // Agent was stopped or a new turn started — dismiss any open confirmation cards
+            const openCards = messagesEl.querySelectorAll('.confirm-card:not(.accepted):not(.rejected)');
+            openCards.forEach(card => {
+                card.classList.add('rejected');
+                const actions = card.querySelector('.confirm-actions');
+                if (actions) { actions.innerHTML = '<span class="confirm-resolved">⏹ Dismissed</span>'; }
+            });
             break;
         }
     }

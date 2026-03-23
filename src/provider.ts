@@ -9,6 +9,7 @@ import { ChatStorage, ChatSession, StoredMessage, deriveTitle, relativeTime } fr
 import { indexWorkspaceFiles, fuzzySearchFiles, buildMentionContext } from './mentions';
 import { buildGitDiffContext } from './gitContext';
 import { TieredMemoryManager } from './memoryCore';
+import { CodeIndexer } from './codeIndex';
 import { TemplateManager } from './promptTemplates';
 import { SmartContextManager } from './smartContext';
 import { SymbolProvider } from './symbolProvider';
@@ -127,13 +128,17 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
     /** Listener for webview messages — disposed on re-resolve to prevent accumulation. */
     private _messageListener?: vscode.Disposable;
 
+    private readonly codeIndexer: CodeIndexer | null;
+
     constructor(
         private readonly context: vscode.ExtensionContext,
         memoryManager?: TieredMemoryManager | null,
-        private readonly workspaceManager?: MultiWorkspaceManager
+        private readonly workspaceManager?: MultiWorkspaceManager,
+        codeIndexer?: CodeIndexer | null
     ) {
         this.storage = new ChatStorage(context);
         this.memory = memoryManager ?? null;
+        this.codeIndexer = codeIndexer ?? null;
         this.templateManager = new TemplateManager(context);
         this.symbolProvider = new SymbolProvider();
         this.smartContext = new SmartContextManager();
@@ -154,7 +159,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
         this._currentWorkspaceRoot = workspaceRoot;
-        this._agent = new Agent(workspaceRoot, this.memory);
+        this._agent = new Agent(workspaceRoot, this.memory, this.codeIndexer);
 
         // Listen for workspace folder changes
         this._workspaceListener?.dispose();
@@ -179,7 +184,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     this._agent = undefined;
                     
                     // Recreate agent with new workspace root
-                    this._agent = new Agent(newRoot, this.memory);
+                    this._agent = new Agent(newRoot, this.memory, this.codeIndexer);
                     
                     // Clear file index - will be rebuilt on next use
                     this._fileIndex = [];
@@ -481,7 +486,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     // Dispose old agent and rebuild with the saved history
                     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
                     this._agent?.dispose();
-                    this._agent = new Agent(root, this.memory);
+                    this._agent = new Agent(root, this.memory, this.codeIndexer);
                     if (session.agentHistory.length) {
                         this._agent.restoreHistory(session.agentHistory);
                     }
@@ -602,7 +607,8 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     post({
                         type: 'contextCompacted',
                         messagesRemoved: result.removed,
-                        newPercentage: result.newPercentage
+                        newPercentage: result.newPercentage,
+                        summary: result.summary,
                     });
                     this.currentSession.agentHistory = this._agent!.conversationHistory;
                     this.persistSession();
@@ -805,7 +811,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         
         // Dispose old agent and create new one with current workspace root
         this._agent?.dispose();
-        this._agent = new Agent(root, this.memory);
+        this._agent = new Agent(root, this.memory, this.codeIndexer);
         
         // Re-index files for the new session (workspace may have changed)
         if (root && !this._fileIndex.length) {

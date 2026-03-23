@@ -12,7 +12,10 @@ import { TieredMemoryManager } from './memoryCore';
 import { isMCPTool, parseMCPToolName, callMCPTool, mcpToolsToOllamaFormat } from './mcpClient';
 import { calculateContextStats, compactHistory, ContextLevel, resolveModelContextLimit } from './contextCalculator';
 import { DiffViewManager } from './diffView';
+import { CodeIndexer } from './codeIndex';
 import { MultiFileRefactoringManager, RefactoringPlan } from './multiFileRefactor';
+import { analyzeFile, executeSplit } from './fileSplitter';
+import { findSimilarInDirectory, findFilesLike, formatSimilarityReport } from './similarityAnalyzer';
 import { GARBAGE_PATTERNS } from './docScanner';
 import type { ChildProcess } from 'child_process';
 
@@ -38,6 +41,21 @@ export interface ShellEnvironment {
 }
 
 let _cachedShellEnv: ShellEnvironment | null = null;
+
+/**
+ * Strip PowerShell Select-String -Context output prefixes so the model
+ * sees exact file content suitable for use in edit_file old_string.
+ * - Match lines are prefixed with "> " → strip 2 chars
+ * - Context lines get 2 extra spaces prepended by Select-String → strip 2 chars
+ * - Blank lines have no prefix → leave as-is
+ */
+function stripSelectStringPrefixes(text: string): string {
+    return text.split('\n').map(line => {
+        if (line.startsWith('> ')) { return line.slice(2); }   // match line
+        if (line.length >= 2 && line[0] === ' ' && line[1] === ' ') { return line.slice(2); } // context line
+        return line; // blank or separator line
+    }).join('\n');
+}
 
 export function detectShellEnvironment(): ShellEnvironment {
     if (_cachedShellEnv) { return _cachedShellEnv; }
@@ -96,74 +114,77 @@ export function detectShellEnvironment(): ShellEnvironment {
 }
 
 /** Build shell-first examples tailored to the detected OS/shell */
-function buildShellExamples(env: ShellEnvironment): string {
+function buildShellExamples(env: ShellEnvironment, workspaceRoot?: string): string {
+    const ws = workspaceRoot ? workspaceRoot.replace(/\\/g, '/') : '.';
     if (env.os === 'windows') {
-        return `Your PRIMARY tools are shell_read and run_command. The host is **${env.label}**. Use Windows-native commands:
-- Finding files: shell_read with "dir /s /b *transaction*" or "where /r . *transaction*"
-- Searching code: shell_read with "findstr /S /N /I \"fetch_user\" *.py"
-- Listing directories: shell_read with "tree /F app" or "dir /s /b app\\*.py"
-- Moving files: run_command with "mkdir app\\routes\\admin && move app\\routes\\admin.py app\\routes\\admin\\"
-- Creating directories: run_command with "mkdir app\\routes\\admin && mkdir app\\routes\\cashier"
-- Viewing files: shell_read with "type src\\main.ts"
+        return `Your PRIMARY tools are shell_read and run_command. The host is **${env.label}**. Workspace: ${ws}
+Use Windows-native PowerShell commands — NOT Unix commands (find, grep, cat, mv, mkdir -p are NOT available):
+- Finding files: shell_read with "Get-ChildItem -Path '${ws}' -Recurse -Filter '*transaction*' | Select-Object FullName"
+- Searching code: shell_read with "Get-ChildItem -Path '${ws}' -Recurse -Include *.py | Select-String 'def fetch_user'"
+- Listing directories: shell_read with "Get-ChildItem '${ws}/app' -Recurse | Select-Object Name,DirectoryName"
+- Viewing files: shell_read with "Get-Content 'C:/full/path/to/file.py'"
 - Git operations: shell_read with "git status", "git log --oneline -20", "git diff"
-IMPORTANT: Do NOT use Unix commands (find, grep, cat, mv, mkdir -p, head, tail, wc) — they are not available. Use dir, findstr, type, move, tree instead.`;
+ALWAYS use full paths from search results — never guess relative paths.`;
     } else {
-        return `Your PRIMARY tools are shell_read and run_command. The host is **${env.label}**. Use shell commands like a developer:
-- Finding files: shell_read with "find . -name '*transaction*' -not -path '*__pycache__*'"
-- Searching code: shell_read with "grep -rn 'def fetch_user' --include='*.py' ."
-- Listing directories: shell_read with "find app -type f -name '*.py' | head -50"
-- Moving files: run_command with "mkdir -p app/routes/admin && mv app/routes/admin.py app/routes/admin/"
-- Creating directories: run_command with "mkdir -p app/routes/admin app/routes/cashier"
-- Git operations: shell_read with "git status", "git log --oneline -20", "git diff"`;
+        return `Your PRIMARY tools are shell_read and run_command. The host is **${env.label}**. Workspace: ${ws}
+Use shell commands like a developer:
+- Finding files: shell_read with "find '${ws}' -name '*transaction*' -not -path '*__pycache__*'"
+- Searching code: shell_read with "grep -rn 'def fetch_user' --include='*.py' '${ws}'"
+- Listing directories: shell_read with "find '${ws}/app' -type f -name '*.py' | head -50"
+- Viewing files: shell_read with "cat '/full/path/to/file.py'"
+- Git operations: shell_read with "git status", "git log --oneline -20", "git diff"
+ALWAYS use full paths from search results — never guess relative paths.`;
     }
 }
 
 /** Build shell-first examples for text-mode instructions */
-function buildTextModeShellExamples(env: ShellEnvironment): string {
+function buildTextModeShellExamples(env: ShellEnvironment, workspaceRoot?: string): string {
+    const ws = workspaceRoot ? workspaceRoot.replace(/\\/g, '/') : '.';
     if (env.os === 'windows') {
         return `CRITICAL — Shell-First Approach:
-The host is **${env.label}**. Use Windows-native commands. Do NOT use Unix commands (find, grep, cat, mv, mkdir -p).
-Prefer shell commands over specialized tools when they are more natural or powerful:
+The host is **${env.label}**. Workspace root: ${ws}
+Use PowerShell commands for ALL file operations. Do NOT use Unix commands (find, grep, cat, mv, mkdir -p).
 
-EXAMPLE - User says "find the transaction page code":
-CORRECT: <tool>{"name": "shell_read", "arguments": {"command": "dir /s /b *transaction*"}}</tool>
-ALSO OK: <tool>{"name": "find_files", "arguments": {"pattern": "*transaction*", "path": "app"}}</tool>
+EXAMPLE - User says "find the payment service code":
+<tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem -Path '${ws}' -Recurse -Filter '*payment*' | Select-Object FullName"}}</tool>
 
-EXAMPLE - User says "search for where fetch_user is defined":
-CORRECT: <tool>{"name": "shell_read", "arguments": {"command": "findstr /S /N /I \"def fetch_user\" *.py"}}</tool>
+EXAMPLE - User says "search for where process_payment is defined":
+<tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem -Path '${ws}' -Recurse -Include *.py | Select-String 'def process_payment'"}}</tool>
 
-EXAMPLE - User says "show me the project structure under app/":
-CORRECT: <tool>{"name": "shell_read", "arguments": {"command": "tree /F app"}}</tool>
+EXAMPLE - User says "read the checkout service":
+Step 1 — find the file:
+<tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem -Path '${ws}' -Recurse -Filter '*checkout_service*' | Select-Object FullName"}}</tool>
+Step 2 — read it (use the EXACT path from step 1 result):
+<tool>{"name": "shell_read", "arguments": {"command": "Get-Content 'C:\\path\\to\\checkout_service.py'"}}</tool>
 
-EXAMPLE - User says "create the admin and cashier directories and move the files":
-Step 1: <tool>{"name": "list_files", "arguments": {"path": "app\\routes"}}</tool>
-[wait for result — now you know the REAL filenames]
-Step 2: <tool>{"name": "run_command", "arguments": {"command": "mkdir app\\routes\\admin && mkdir app\\routes\\cashier"}}</tool>
-[wait for result]
-Step 3 (BATCH ALL moves in ONE command — do NOT call list_files between moves): <tool>{"name": "run_command", "arguments": {"command": "move app\\routes\\admin.py app\\routes\\admin\\ && move app\\routes\\audit.py app\\routes\\admin\\ && move app\\routes\\cashier.py app\\routes\\cashier\\"}}</tool>
-IMPORTANT: Do NOT call list_files after each move. Batch as many moves as possible into each run_command call.`;
+EXAMPLE - User says "show me the files under app/routes":
+<tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem '${ws}/app/routes' -Recurse | Select-Object Name,DirectoryName"}}</tool>
+
+EXAMPLE - User says "create the admin directory and move admin.py into it":
+<tool>{"name": "run_command", "arguments": {"command": "New-Item -ItemType Directory -Path '${ws}/app/routes/admin' -Force; Move-Item '${ws}/app/routes/admin.py' '${ws}/app/routes/admin/'"}}</tool>
+
+CRITICAL: When file search returns a path, READ the full path in the next call. Do NOT guess paths.`;
     } else {
         return `CRITICAL — Shell-First Approach:
-The host is **${env.label}**. Use shell commands like a developer.
-Prefer shell commands over specialized tools when they are more natural or powerful:
+The host is **${env.label}**. Workspace root: ${ws}
+Use shell commands for ALL file operations.
 
-EXAMPLE - User says "find the transaction page code":
-CORRECT: <tool>{"name": "shell_read", "arguments": {"command": "find app -type f -name '*transaction*' -not -path '*__pycache__*'"}}</tool>
-ALSO OK: <tool>{"name": "find_files", "arguments": {"pattern": "*transaction*", "path": "app"}}</tool>
+EXAMPLE - User says "find the payment service code":
+<tool>{"name": "shell_read", "arguments": {"command": "find '${ws}' -type f -name '*payment*' -not -path '*__pycache__*'"}}</tool>
 
-EXAMPLE - User says "search for where fetch_user is defined":
-CORRECT: <tool>{"name": "shell_read", "arguments": {"command": "grep -rn 'def fetch_user' --include='*.py' ."}}</tool>
+EXAMPLE - User says "search for where process_payment is defined":
+<tool>{"name": "shell_read", "arguments": {"command": "grep -rn 'def process_payment' --include='*.py' '${ws}'"}}</tool>
 
-EXAMPLE - User says "show me the project structure under app/":
-CORRECT: <tool>{"name": "shell_read", "arguments": {"command": "find app -type f -name '*.py' | head -50"}}</tool>
+EXAMPLE - User says "read the checkout service":
+Step 1 — find the file:
+<tool>{"name": "shell_read", "arguments": {"command": "find '${ws}' -name '*checkout_service*' -not -path '*__pycache__*'"}}</tool>
+Step 2 — read it (use the EXACT path from step 1 result):
+<tool>{"name": "shell_read", "arguments": {"command": "cat '/exact/path/from/step1/checkout_service.py'"}}</tool>
 
-EXAMPLE - User says "create the admin and cashier directories and move the files":
-Step 1: <tool>{"name": "list_files", "arguments": {"path": "app/routes"}}</tool>
-[wait for result — now you know the REAL filenames]
-Step 2: <tool>{"name": "run_command", "arguments": {"command": "mkdir -p app/routes/admin app/routes/cashier"}}</tool>
-[wait for result]
-Step 3 (BATCH ALL moves in ONE command — do NOT call list_files between moves): <tool>{"name": "run_command", "arguments": {"command": "mv app/routes/admin.py app/routes/admin/ && mv app/routes/audit.py app/routes/admin/ && mv app/routes/cashier.py app/routes/cashier/"}}</tool>
-IMPORTANT: Do NOT call list_files after each move. Batch as many moves as possible into each run_command call.`;
+EXAMPLE - User says "show me the files under app/routes":
+<tool>{"name": "shell_read", "arguments": {"command": "find '${ws}/app/routes' -type f -name '*.py' | sort"}}</tool>
+
+CRITICAL: When file search returns a path, READ the full path in the next call. Do NOT guess paths.`;
     }
 }
 
@@ -181,66 +202,8 @@ export const TOOL_DEFINITIONS = [
     {
         type: 'function',
         function: {
-            name: 'read_file',
-            description: 'Read the full contents of a file in the workspace.',
-            parameters: {
-                type: 'object',
-                properties: {
-                    path: { type: 'string', description: 'Path relative to workspace root' },
-                },
-                required: ['path'],
-            },
-        },
-    },
-    {
-        type: 'function',
-        function: {
-            name: 'list_files',
-            description: 'List files and directories at a given path in the workspace.',
-            parameters: {
-                type: 'object',
-                properties: {
-                    path: { type: 'string', description: 'Relative directory path (default ".")' },
-                },
-                required: [],
-            },
-        },
-    },
-    {
-        type: 'function',
-        function: {
-            name: 'search_files',
-            description: 'Search for TEXT CONTENT (not filenames) across all files in the workspace. Use this to find where specific code, strings, or text appears in files. To list files by name, use list_files instead.',
-            parameters: {
-                type: 'object',
-                properties: {
-                    query: { type: 'string', description: 'Text string to search for in file contents (e.g., "function main", "import React", "TODO"). Do NOT use wildcards like *.md - this searches file contents, not names.' },
-                    path:  { type: 'string', description: 'Directory to search (default ".")' },
-                },
-                required: ['query'],
-            },
-        },
-    },
-    {
-        type: 'function',
-        function: {
-            name: 'create_file',
-            description: 'Create a new file with given content. Fails if the file already exists.',
-            parameters: {
-                type: 'object',
-                properties: {
-                    path:    { type: 'string', description: 'Path relative to workspace root' },
-                    content: { type: 'string', description: 'Initial file content' },
-                },
-                required: ['path', 'content'],
-            },
-        },
-    },
-    {
-        type: 'function',
-        function: {
             name: 'edit_file',
-            description: 'Make a targeted edit to an existing file by replacing old_string with new_string. Always read_file first to get the exact current content. The old_string must match exactly (including whitespace/indentation). Opens a diff view for review before applying.',
+            description: 'Make a targeted edit to an existing file by replacing old_string with new_string. Use shell_read with grep/cat to get the exact current content first. The old_string must match exactly (including whitespace/indentation).',
             parameters: {
                 type: 'object',
                 properties: {
@@ -255,74 +218,17 @@ export const TOOL_DEFINITIONS = [
     {
         type: 'function',
         function: {
-            name: 'write_file',
-            description: 'Overwrite an existing file with completely new content. Prefer edit_file for targeted changes. Requires user confirmation.',
+            name: 'edit_file_at_line',
+            description: 'Edit a file by line numbers. Use when file content with line numbers has been provided. Replaces lines start_line through end_line (inclusive, 1-based) with new_content. To insert without replacing, set end_line = start_line - 1. Never reproduce old content — just specify the line range.',
             parameters: {
                 type: 'object',
                 properties: {
-                    path:    { type: 'string', description: 'Path relative to workspace root' },
-                    content: { type: 'string', description: 'Full file content to write' },
+                    path:        { type: 'string',  description: 'Path relative to workspace root' },
+                    start_line:  { type: 'number',  description: 'First line to replace (1-based)' },
+                    end_line:    { type: 'number',  description: 'Last line to replace (1-based, inclusive). Set to start_line - 1 to insert without replacing.' },
+                    new_content: { type: 'string',  description: 'Replacement text. Preserve indentation style of surrounding code.' },
                 },
-                required: ['path', 'content'],
-            },
-        },
-    },
-    {
-        type: 'function',
-        function: {
-            name: 'append_to_file',
-            description: 'Append text to the end of an existing file.',
-            parameters: {
-                type: 'object',
-                properties: {
-                    path:    { type: 'string', description: 'Path relative to workspace root' },
-                    content: { type: 'string', description: 'Text to append' },
-                },
-                required: ['path', 'content'],
-            },
-        },
-    },
-    {
-        type: 'function',
-        function: {
-            name: 'rename_file',
-            description: 'Rename or move a file within the workspace. Requires user confirmation.',
-            parameters: {
-                type: 'object',
-                properties: {
-                    old_path: { type: 'string', description: 'Current path relative to workspace root' },
-                    new_path: { type: 'string', description: 'New path relative to workspace root' },
-                },
-                required: ['old_path', 'new_path'],
-            },
-        },
-    },
-    {
-        type: 'function',
-        function: {
-            name: 'delete_file',
-            description: 'Delete a file from the workspace. Requires user confirmation. Use with care.',
-            parameters: {
-                type: 'object',
-                properties: {
-                    path: { type: 'string', description: 'Path relative to workspace root' },
-                },
-                required: ['path'],
-            },
-        },
-    },
-    {
-        type: 'function',
-        function: {
-            name: 'find_files',
-            description: 'Find files by name, partial name, or glob pattern in the workspace. Supports substring matching — e.g., "single_transaction" will find "single_transaction_dashboard.html". Use this to locate files. For searching TEXT CONTENT inside files, use search_files instead.',
-            parameters: {
-                type: 'object',
-                properties: {
-                    pattern: { type: 'string', description: 'Filename, partial name, or glob pattern (e.g., "*.ts", "README*", "single_transaction*", "Dockerfile"). Partial names are matched as substrings.' },
-                    path: { type: 'string', description: 'Directory to search in (default ".")' },
-                },
-                required: ['pattern'],
+                required: ['path', 'start_line', 'end_line', 'new_content'],
             },
         },
     },
@@ -620,24 +526,22 @@ Rules:
 `
         : '';
 
+    const workspaceInfo = workspaceRoot ? `Workspace: ${workspaceRoot}` : '';
     return `You are an expert AI coding assistant integrated into VS Code.
-Current date: ${dateStr}, ${timeStr}.${activeLanguage ? ` Active file: ${activeFile} (${activeLanguage}).` : ''}
-${autoSaveBlock}
-You have access to the user's workspace through the following tools:
+Current date: ${dateStr}, ${timeStr}.${activeLanguage ? ` Active file: ${activeFile} (${activeLanguage}).` : ''}${workspaceInfo ? `\n${workspaceInfo}` : ''}
 
-  workspace_summary  — understand the project structure (call this first)
-  read_file          — read any file
-  list_files         — list a directory
-  find_files         — find files by name, partial name, or glob pattern (e.g., "*.ts", "single_transaction*", "Dockerfile")
-  search_files       — search for TEXT CONTENT across files (NOT filenames - use find_files for that)
-  create_file        — create a new file
-  edit_file          — make targeted edits (old_string → new_string). Preferred for code changes.
-  write_file         — overwrite a file entirely (use only when necessary)
-  append_to_file     — append text to a file
-  rename_file        — rename or move a file
-  delete_file        — delete a file (destructive, use carefully)
-  shell_read         — run read-only shell commands WITHOUT confirmation (git log, git status, git diff, ls, cat, head, wc, find, grep, env, which, etc.)
-  run_command        — run shell commands that MODIFY state WITH confirmation (tests, installs, builds, scripts)
+CRITICAL — You are operating INSIDE A REAL PROJECT. When the user asks ANY question about code, features, or how something works, you MUST search the actual project files to answer — do NOT answer from general knowledge or training data.
+- "show me how X works" → shell_read with grep to find X in the project, then cat the file
+- "where is X configured" → shell_read with grep/find to locate it in the project
+- "explain how X works" → shell_read with grep to find X, cat the relevant file, explain THAT code
+- NEVER answer with generic NFC / payment / hardware explanations — find the ACTUAL code
+${autoSaveBlock}
+You have access to the following tools:
+
+  workspace_summary  — understand the project structure (call this first on a new project)
+  edit_file          — targeted code edit: replace old_string with new_string (use shell_read/grep to get exact strings first)
+  shell_read         — ANY read-only shell command, NO confirmation: cat, grep, find, ls, git log/status/diff, head, tail, wc, etc.
+  run_command        — shell commands that MODIFY state, requires confirmation: mv, cp, rm, mkdir, npm/pip install, tests, builds
   memory_list        — recall saved facts/decisions about this project
   memory_write       — persist important facts, decisions, or context across sessions
   memory_delete      — remove a stale memory note
@@ -646,40 +550,84 @@ You have access to the user's workspace through the following tools:
   memory_tier_list   — list memories from specific tiers
   memory_stats       — get memory statistics (entry count and tokens per tier)
   read_terminal      — read recent output from VS Code integrated terminals
-  get_diagnostics    — get VS Code errors/warnings for a file or workspace. ALWAYS use this when user asks about errors/warnings — do NOT use external linters instead.
+  get_diagnostics    — get VS Code errors/warnings for a file or workspace
 
-## Shell-First Approach
-${buildShellExamples(detectShellEnvironment())}
-The specialized tools (list_files, search_files, find_files) are convenience wrappers — use shell commands when they would be more natural or powerful.
+## Shell-First — Use These Patterns
+
+${buildShellExamples(detectShellEnvironment(), workspaceRoot)}
 
 Guidelines:
-- ALWAYS CALL TOOLS DIRECTLY - never explain what tool to call, just call it immediately
-- Always call workspace_summary or read_file before proposing code changes.
-- Prefer edit_file over write_file for targeted modifications.
-- CRITICAL: When user asks about errors, warnings, or diagnostics in their code, ALWAYS call get_diagnostics FIRST — do NOT run external linters (ruff, eslint, tsc, etc.) unless the user specifically asks for a linter.
-- After editing or creating files, call get_diagnostics to check for errors introduced by your changes. If errors exist, fix them.
-- Prefer shell_read for ANY read-only operation — it requires no user confirmation and is faster than run_command.
-- Use run_command for operations that modify state (mkdir, mv, cp, npm install, pip install, tests, builds, etc.).
+- ALWAYS CALL TOOLS DIRECTLY — never explain what tool to call, just call it immediately
+- Use shell_read for ALL reading: cat file.py, grep -n pattern file.py, find . -name '*.py', ls dir/, git diff
+- Use run_command for ALL writes/moves/deletes: mv, cp, rm, mkdir, touch, pip install, npm install, tests, builds
+- Use edit_file ONLY for precise string replacements in source files (grep for exact strings first)
+- CRITICAL: When user asks about errors or diagnostics, call get_diagnostics FIRST — do NOT run external linters unless asked
+- After editing files, call get_diagnostics to check for new errors
+- Prefer shell_read for ANY read-only operation — no confirmation required
 - Your persistent memory is automatically loaded (Tiers 0-2) and shown above.
 ${memoryGuidelines}
-- Use memory_search to find relevant past solutions without loading all memories.
-- CRITICAL: When user asks "what do you know about this project" or "what have you learned", ALWAYS call memory_list or memory_tier_list — do not answer from conversation history alone.
-- CRITICAL: When user asks "explain what this project does", "what is this project", or wants to UNDERSTAND the codebase, call workspace_summary FIRST (then read key files like package.json, README.md). Memory alone is NOT enough — the user wants to understand the actual code.
-- CRITICAL: Before calling memory_delete, ALWAYS call memory_list first to get the actual entry ID — never guess or fabricate IDs.
+- CRITICAL: When user asks "what do you know about this project", call memory_list — do not answer from conversation alone
+- CRITICAL: When user asks "explain what this project does", call workspace_summary FIRST — memory alone is not enough
+- CRITICAL: Before calling memory_delete, ALWAYS call memory_list first to get real IDs — never guess IDs
 - Be concise and accurate. Format all code with markdown fenced code blocks.
 
 CRITICAL — Action-Oriented Responses:
-- NEVER ask "Would you like me to proceed?", "Shall I continue?", or "Do you want me to do this?" — if the user asked you to DO something, DO IT immediately by calling tools. The built-in confirmation dialogs handle safety.
-- When asked to review, analyze, audit, fix, or improve code: ALWAYS use read_file/list_files to read the ACTUAL source files first, then propose REAL edits using edit_file on the actual code you read.
-- NEVER generate hypothetical examples, placeholder code, or generic "Example:" blocks. The user wants you to act on THEIR code, not see textbook examples.
-- If the user says "look at src/" or "check this file" — call list_files and read_file immediately. Do not describe what you would do.
-- When you find an issue, fix it with edit_file right away (or explain why you can't). Do not just list the issue with a generic code sample.
+- NEVER ask "Would you like me to proceed?" — if the user asked you to DO something, DO IT immediately. Confirmation dialogs handle safety.
+- When asked to review/fix/improve code: use shell_read to read the actual files first, then edit_file on the real code you found
+- NEVER generate hypothetical examples or placeholder code — act on the user's ACTUAL code
+- When you find an issue, fix it with edit_file immediately. Do not just describe the fix.
 
 CRITICAL — Discover Before Acting:
-- Before MOVING, RENAMING, REORGANIZING, or RESTRUCTURING files, ALWAYS list the current directory first to see what files actually exist. Do NOT assume filenames from a document — verify them.
-- If rename_file fails with "no such file", call list_files or shell_read to discover the actual filenames, then retry with the correct paths.
-- NEVER create placeholder/dummy files (e.g., "# Placeholder for admin routes") when the real files already exist elsewhere — find and move the real files instead.
+- Before moving/renaming/reorganizing files, use shell_read to list the directory first — verify real filenames
+- NEVER create placeholder files when moving fails — find the real files with shell_read instead
 ${projectGuidance ?? (workspaceRoot ? buildProjectTypeGuidance(workspaceRoot) : '')}`;
+}
+
+// ── Small-model tool set (read-then-act mode) ─────────────────────────────────
+
+/**
+ * Restricted tool set for small models (≤9B params).
+ * When file context is pre-injected, small models only need edit_file and run_command.
+ * Removing shell_read prevents them from looping on directory discovery.
+ */
+export const SMALL_MODEL_TOOL_DEFINITIONS = TOOL_DEFINITIONS.filter(t =>
+    ['edit_file', 'edit_file_at_line', 'run_command'].includes(t.function.name)
+);
+
+/**
+ * Minimal system prompt for small models.
+ * No shell-first examples — context is pre-injected by preProcessEditTask().
+ */
+function buildSmallModelSystemPrompt(workspaceRoot?: string): string {
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const activeEditor = vscode.window.activeTextEditor;
+    const activeFile = activeEditor ? vscode.workspace.asRelativePath(activeEditor.document.uri) : '';
+    const workspaceInfo = workspaceRoot ? `Workspace: ${workspaceRoot}` : '';
+    return `You are a precise code editing assistant inside VS Code.
+Current date: ${dateStr}.${activeFile ? ` Active file: ${activeFile}.` : ''}${workspaceInfo ? `\n${workspaceInfo}` : ''}
+
+You have three tools: edit_file_at_line, edit_file, and run_command.
+
+## Your task
+The file(s) you need to edit are in the [PRE-LOADED CONTEXT] section, shown with line numbers like:
+  "  42: code here"
+The number before the colon is the line number. Use it with edit_file_at_line.
+
+## How to use edit_file_at_line (preferred)
+1. Find the lines to change in [PRE-LOADED CONTEXT]
+2. Note their line numbers
+3. Call edit_file_at_line with:
+   - path: the file path shown
+   - start_line: first line to replace (the number shown)
+   - end_line: last line to replace (inclusive). Use end_line = start_line - 1 to insert without replacing.
+   - new_content: your replacement (match surrounding indentation)
+
+## Rules
+- PREFER edit_file_at_line over edit_file — it is more reliable
+- Do NOT call shell_read — the file content is already provided
+- Do NOT describe what you will do — call the tool immediately
+- If the change is already present, say so and stop`;
 }
 
 // ── Text-mode tool calling (fallback for models without native tool support) ──
@@ -688,7 +636,7 @@ ${projectGuidance ?? (workspaceRoot ? buildProjectTypeGuidance(workspaceRoot) : 
  * Build text-mode tool instructions with optional auto-save guidance.
  * Appended to the system prompt when the model doesn't support native tools.
  */
-function buildTextModeInstructions(autoSaveMemory: boolean): string {
+function buildTextModeInstructions(autoSaveMemory: boolean, workspaceRoot?: string): string {
     const autoSaveGuidance = autoSaveMemory
         ? `
 
@@ -732,8 +680,18 @@ You MUST call workspace tools by outputting a tool call block in EXACTLY this fo
 - ALWAYS ACT, NEVER ASK. If the user says "do X", call the tool immediately. NEVER say "Would you like me to proceed?" or "Shall I continue?"
 - Output ONE <tool> block per response. Do NOT plan ahead — after the tool runs, you will be called again to decide the next step.
 - Do NOT output numbered plans, step lists, or code blocks showing commands. Just output the <tool> block.
-- When user mentions a file path, call read_file on it. Do NOT call list_files on the directory.
+- When user mentions a file path, use shell_read with cat/Get-Content to read it. Do NOT call list_files or read_file.
 - When user says "yes", "go ahead", "do it", "sure", "proceed" — output a <tool> block for the next action IMMEDIATELY.
+
+CRITICAL — TOOL FORMAT:
+WRONG (backtick/code block — this does NOT call the tool):
+\`\`\`shell
+grep -rn "epson" .
+\`\`\`
+CORRECT (raw XML — this actually calls the tool):
+<tool>{"name": "shell_read", "arguments": {"command": "grep -rn 'epson' ."}}</tool>
+
+Backtick code blocks are NEVER executed. Only raw <tool>...</tool> XML blocks are executed.
 *** END MOST IMPORTANT RULES ***
 
 CRITICAL RULES:
@@ -752,7 +710,7 @@ CRITICAL RULES:
 - Do NOT chain extra tool calls after getting a successful result — the user wants to see the answer, not watch you call more tools
 - Only call another tool if the user's question CANNOT be answered with the result you already have
 - Do NOT call memory_tier_write or memory_write after answering a question — only save to memory when the USER explicitly asks you to remember something or when auto-save is enabled
-- When user mentions a specific file path (e.g., "look at docs/file.md"), call read_file with that exact path — do NOT call list_files on the directory instead${autoSaveGuidance}
+- When user mentions a specific file path (e.g., "look at docs/file.md"), use shell_read with cat to read it — do NOT list the directory${autoSaveGuidance}
 
 EXAMPLE - User says "Save to memory tier 0: test":
 WRONG: "Saved to memory tier 0: test"
@@ -774,9 +732,9 @@ CORRECT (call THREE times):
 <tool>{"name": "memory_tier_write", "tier": 1, "content": "Deployment script: deploy.sh", "tags": ["deployment"]}</tool>
 
 EXAMPLE - User asks "find README":
-WRONG: "You can call search_files with query README"
+WRONG: "You can call shell_read with command grep README"
 WRONG: Showing JSON in a code block
-CORRECT: <tool>{"name": "search_files", "arguments": {"query": "README"}}</tool>
+CORRECT: <tool>{"name": "shell_read", "arguments": {"command": "find . -name 'README*' -not -path '*/node_modules/*'"}}</tool>
 
 EXAMPLE - User says "what do you know about this project?":
 WRONG: Answering from conversation history without calling a tool
@@ -785,7 +743,7 @@ CORRECT: <tool>{"name": "memory_list", "arguments": {}}</tool>
 EXAMPLE - User says "explain what this project does" or "what is this project?":
 WRONG: <tool>{"name": "memory_list", "arguments": {}}</tool> (memory notes are NOT a project explanation)
 CORRECT: <tool>{"name": "workspace_summary", "arguments": {}}</tool>
-[then read_file on package.json, README.md, or main entry point to give a real answer]
+[then use shell_read with cat on package.json, README.md, or main entry point to give a real answer]
 
 EXAMPLE - User says "delete the memory about the old API endpoint":
 WRONG: <tool>{"name": "memory_delete", "arguments": {"id": "SOME_GUESSED_ID"}}</tool>
@@ -801,7 +759,7 @@ EXAMPLE - User says "check for lint errors":
 CORRECT: <tool>{"name": "run_command", "arguments": {"command": "ruff check ."}}</tool>
 
 EXAMPLE - User says "find all test files":
-CORRECT: <tool>{"name": "find_files", "arguments": {"pattern": "*.test.ts"}}</tool>
+CORRECT: <tool>{"name": "shell_read", "arguments": {"command": "find . -name '*.test.ts' -not -path '*/node_modules/*'"}}</tool>
 
 EXAMPLE - User says "what branch am I on":
 CORRECT: <tool>{"name": "shell_read", "arguments": {"command": "git branch --show-current"}}</tool>
@@ -811,19 +769,10 @@ CORRECT: <tool>{"name": "shell_read", "arguments": {"command": "git log --onelin
 
 Available tools and their argument schemas:
   workspace_summary   — {}
-  read_file           — {"path": "relative/path/to/file"}
-  list_files          — {"path": "relative/dir (optional)"}
-  search_files        — {"query": "text content to find (NOT filenames)", "path": "optional dir"}
-  create_file         — {"path": "path", "content": "full content"}
-  edit_file           — {"path": "path", "old_string": "exact text", "new_string": "replacement"}
-  write_file          — {"path": "path", "content": "full content"}
-  append_to_file      — {"path": "path", "content": "text to append"}
-  rename_file         — {"old_path": "current", "new_path": "new name"}
-  delete_file         — {"path": "path"}
-  find_files          — {"pattern": "name or glob (supports partial names)", "path": "optional dir"}
-  shell_read          — {"command": "read-only shell command (no confirmation)"}
-  run_command         — {"command": "shell command (requires confirmation)"}
-  memory_list         — {} — call when user asks "what do you know" or about project knowledge (NOT for "explain this project" — use workspace_summary for that)
+  edit_file           — {"path": "path", "old_string": "exact text to replace", "new_string": "replacement"}
+  shell_read          — {"command": "read-only shell command (no confirmation required)"}
+  run_command         — {"command": "shell command that modifies state (requires confirmation)"}
+  memory_list         — {} — call when user asks "what do you know" or about project knowledge
   memory_write        — {"content": "note text", "tag": "optional tag"}
   memory_delete       — {"id": "note id from memory_list"} — MUST call memory_list FIRST to get real IDs
   memory_search       — {"query": "search text", "tier": "optional", "limit": "optional"}
@@ -837,101 +786,87 @@ EXAMPLE - User says "are there any errors in my code?" or "check for errors":
 WRONG: <tool>{"name": "run_command", "arguments": {"command": "ruff check ."}}</tool>
 CORRECT: <tool>{"name": "get_diagnostics", "arguments": {}}</tool>
 
+EXAMPLE - User says "add a log statement to the ocr service when OCR fails":
+Step 1: <tool>{"name": "shell_read", "arguments": {"command": "find app -name '*ocr*' -type f"}}</tool>
+[get path, then:]
+Step 2: <tool>{"name": "shell_read", "arguments": {"command": "grep -n 'except\\|fail\\|error' app/services/drivers_license_ocr_service.py"}}</tool>
+[get the exact lines, then:]
+Step 3: <tool>{"name": "edit_file", "arguments": {"path": "app/services/drivers_license_ocr_service.py", "old_string": "    except Exception as e:\n        return None", "new_string": "    except Exception as e:\n        logger.error(f'OCR failed: {e}')\n        return None"}}</tool>
+
 EXAMPLE - User says "add a comment to the top of src/main.ts":
-Step 1: <tool>{"name": "read_file", "arguments": {"path": "src/main.ts"}}</tool>
-[wait for result]
+Step 1: <tool>{"name": "shell_read", "arguments": {"command": "head -5 src/main.ts"}}</tool>
+[get exact first line, then:]
 Step 2: <tool>{"name": "edit_file", "arguments": {"path": "src/main.ts", "old_string": "import * as vscode", "new_string": "// Main entry point\nimport * as vscode"}}</tool>
 
-EXAMPLE - User says "append these notes to MANUAL_TESTS.md":
-CORRECT: <tool>{"name": "append_to_file", "arguments": {"path": "MANUAL_TESTS.md", "content": "\n## New Section\n\n1. Test step one\n2. Test step two\n"}}</tool>
-WRONG: Showing the content in a markdown code block without calling a tool
+EXAMPLE - User says "create a new file called utils.py with a helper function":
+<tool>{"name": "run_command", "arguments": {"command": "cat > src/utils.py << 'EOF'\ndef helper():\n    return True\nEOF"}}</tool>
 
-EXAMPLE - User says "create a new file called utils.ts":
-CORRECT: <tool>{"name": "create_file", "arguments": {"path": "src/utils.ts", "content": "export function helper() {\n  return true;\n}\n"}}</tool>
+EXAMPLE - User says "move app/routes/admin.py to app/routes/admin/":
+<tool>{"name": "run_command", "arguments": {"command": "mkdir -p app/routes/admin && mv app/routes/admin.py app/routes/admin/"}}</tool>
 
-EXAMPLE - User says "rewrite generate-banner.py with the improvements" or "implement the changes":
-Step 1: <tool>{"name": "read_file", "arguments": {"path": "scripts/generate-banner.py"}}</tool>
-[wait for result]
-Step 2: <tool>{"name": "write_file", "arguments": {"path": "scripts/generate-banner.py", "content": "...full updated file content..."}}</tool>
-WRONG: Showing the updated file in a markdown code block without calling write_file
+EXAMPLE - User says "implement the folder organization" or "do the recommendations":
+Step 1: Read the recommendations document using shell_read
+Step 2: Discover actual filenames: <tool>{"name": "shell_read", "arguments": {"command": "ls app/routes/"}}</tool>
+Step 3: Create dirs and move all files in one command:
+<tool>{"name": "run_command", "arguments": {"command": "mkdir -p app/routes/admin app/routes/cashier && mv app/routes/admin_routes.py app/routes/admin/ && mv app/routes/cashier_routes.py app/routes/cashier/"}}</tool>
 
-${buildTextModeShellExamples(detectShellEnvironment())}
-
-CRITICAL — File Modifications:
-- When user asks to UPDATE, EDIT, ADD TO, APPEND, MODIFY, WRITE, IMPLEMENT, REWRITE, APPLY, or FIX a file, you MUST call edit_file, append_to_file, write_file, or create_file
-- Do NOT just show the content in a code block — ACTUALLY CALL THE TOOL to make the change
-- If you have a full rewritten version of a file, call write_file with the complete content
-- Always read_file FIRST before calling edit_file so you have the exact current content
-
-CRITICAL — Actions and Commands:
-- When user asks to MOVE, RENAME, REORGANIZE, RESTRUCTURE, MIGRATE, DELETE, or COPY files, you MUST call rename_file, delete_file, or run_command — do NOT just show shell commands in a code block
-- When user asks to IMPLEMENT folder organization, restructuring, or recommendations from a document, you MUST call run_command (for mkdir) and rename_file (for moving files) — do NOT list the commands as code blocks
-- When user asks to RUN, EXECUTE, DO, or PERFORM commands, you MUST call run_command or shell_read — do NOT just show the commands
-- When user says "do it", "go ahead", "yes", "sure", "proceed", "confirmed", "yep", "yeah", "ok", "do them", "run those", "execute that", "make it happen" — they want you to CALL THE TOOLS IMMEDIATELY, not repeat the plan as code blocks
-- NEVER ask "Would you like me to proceed?" or "Shall I continue?" — just call the tools. The built-in confirmation dialogs handle safety for destructive operations.
-- NEVER output a numbered plan with empty code blocks. Call ONE tool, wait for the result, then call the next tool.
-- To create directories, call run_command with "mkdir" — do NOT show the mkdir command in a code block
-- To move files into new directories, call rename_file for each file — do NOT show mv/move commands in a code block
-
-EXAMPLE - User says "move app/routes/admin.py to app/routes/admin/admin.py":
-Step 1: <tool>{"name": "run_command", "arguments": {"command": "mkdir app\\routes\\admin"}}</tool>
-[wait for result]
-Step 2: <tool>{"name": "rename_file", "arguments": {"old_path": "app/routes/admin.py", "new_path": "app/routes/admin/admin.py"}}</tool>
-
-EXAMPLE - User says "implement the folder organization changes" or "implement the recommendations":
-Step 1: Read the document to understand the changes needed
-Step 2: DISCOVER what files actually exist (MANDATORY before moving/renaming):
-<tool>{"name": "list_files", "arguments": {"path": "app/routes"}}</tool>
-[wait for result — now you know the REAL filenames]
-Step 3: <tool>{"name": "run_command", "arguments": {"command": "mkdir app\\routes\\admin && mkdir app\\routes\\cashier"}}</tool>
-[wait for result]
-Step 4: BATCH ALL moves into as few run_command calls as possible using the REAL filenames from Step 2:
-<tool>{"name": "run_command", "arguments": {"command": "move app\\routes\\admin_routes.py app\\routes\\admin\\ && move app\\routes\\audit.py app\\routes\\admin\\ && move app\\routes\\cashier_routes.py app\\routes\\cashier\\"}}</tool>
-[if more files remain, batch them in the next run_command call]
-WRONG: Calling list_files after every single move — you already know the filenames
-WRONG: Moving one file per run_command call — batch them
-WRONG: Skipping Step 2 and assuming filenames from the document
-WRONG: Creating placeholder files when rename_file fails with ENOENT
-WRONG: Listing the mkdir/move commands as code blocks for the user to run manually
+EXAMPLE - User says "update imports after reorganization":
+Step 1: <tool>{"name": "shell_read", "arguments": {"command": "grep -rn 'from app.routes.admin' --include='*.py' ."}}</tool>
+[find affected files, then for each:]
+Step 2: <tool>{"name": "shell_read", "arguments": {"command": "grep -n 'from app.routes.admin' app/main.py"}}</tool>
+Step 3: <tool>{"name": "edit_file", "arguments": {"path": "app/main.py", "old_string": "from app.routes.admin import", "new_string": "from app.routes.admin.admin import"}}</tool>
 
 EXAMPLE - User says "do it", "go ahead", "yes", "sure", or "proceed" after you showed a plan:
 WRONG: Repeating the plan as code blocks
-WRONG: Asking "Would you like me to proceed?"
-CORRECT: Start calling the tools immediately (run_command, rename_file, write_file, etc.)
+CORRECT: Call the first tool immediately
 
-EXAMPLE - User says "look at docs/RECOMMENDATIONS.md and do the recommendations":
-Step 1: <tool>{"name": "read_file", "arguments": {"path": "docs/RECOMMENDATIONS.md"}}</tool>
-[wait for result — understand the changes needed]
-Step 2: DISCOVER what files actually exist BEFORE moving anything:
-<tool>{"name": "list_files", "arguments": {"path": "app/routes"}}</tool>
-[wait for result — now you know the REAL filenames]
-Step 3: Create directories and move files using the REAL filenames you discovered:
-<tool>{"name": "run_command", "arguments": {"command": "mkdir app\\routes\\admin && mkdir app\\routes\\cashier"}}</tool>
-[wait for result]
-Step 4: BATCH ALL moves into as few run_command calls as possible:
-<tool>{"name": "run_command", "arguments": {"command": "move app\\routes\\admin_routes.py app\\routes\\admin\\ && move app\\routes\\audit.py app\\routes\\admin\\ && move app\\routes\\cashier_routes.py app\\routes\\cashier\\"}}</tool>
-WRONG: Calling list_files after every single move — you already know the filenames
-WRONG: Moving one file per run_command call — batch them
-WRONG: Assuming filenames from the document without checking — they may not match
-WRONG: Creating placeholder files when rename_file fails — discover the real files instead
-WRONG: Summarizing the document and asking for permission
+${buildTextModeShellExamples(detectShellEnvironment(), workspaceRoot)}
 
-EXAMPLE - User says "edit the code to point to the new file locations" or "update imports after reorganization":
-This means UPDATE IMPORT STATEMENTS in source code, NOT move files. The files are already moved.
-Step 1: Read the recommendations to understand old-to-new path mappings:
-<tool>{"name": "read_file", "arguments": {"path": "docs/ORGANIZATION_RECOMMENDATIONS.md"}}</tool>
-[wait for result - note which files moved where]
-Step 2: Search for old import paths in the codebase:
-<tool>{"name": "search_files", "arguments": {"query": "from app.routes.admin"}}</tool>
-[wait for result - find all files that import from the old path]
-Step 3: Read each affected file, then edit the import:
-<tool>{"name": "read_file", "arguments": {"path": "app/main.py"}}</tool>
-[wait for result]
-Step 4: <tool>{"name": "edit_file", "arguments": {"path": "app/main.py", "old_string": "from app.routes.admin import", "new_string": "from app.routes.admin.admin import"}}</tool>
-WRONG: Calling workspace_summary - you don't need the project structure, you need to find old imports
-WRONG: Calling list_files - you don't need directory listings, you need to search file CONTENTS
-WRONG: Calling run_command with mkdir or move - the files are ALREADY in their new locations
-WRONG: Calling memory_list or memory_tier_write - focus on the code changes
+CRITICAL — File Modifications:
+- To READ a file: shell_read with cat, head, grep, etc.
+- To EDIT a file: grep for the exact string first, then edit_file with that exact string
+- To CREATE a file: run_command with cat/heredoc or echo redirect, OR write inline with run_command
+- To MOVE/RENAME: run_command with mv/Move-Item
+- To DELETE: run_command with rm/Remove-Item
+- NEVER show shell commands in code blocks — CALL THE TOOL
+
+CRITICAL — Actions and Commands:
+- When user says "do it", "go ahead", "yes", "sure", "proceed" — CALL THE TOOLS IMMEDIATELY
+- NEVER ask "Would you like me to proceed?" — just call the tools
+- NEVER output a numbered plan. Call ONE tool, wait for result, call next tool.
+===================`;
+}
+
+/**
+ * Minimal text-mode instructions for small models in read-then-act mode.
+ * The file content is already injected — the model only needs to call edit_file.
+ */
+function buildSmallModelTextModeInstructions(): string {
+    return `
+
+=== HOW TO CALL TOOLS ===
+Output a tool call using EXACTLY this format (raw XML, NOT inside backticks):
+
+<tool>{"name": "TOOL_NAME", "arguments": {JSON_ARGS}}</tool>
+
+You have three tools:
+  edit_file_at_line — {"path": "relative/path", "start_line": N, "end_line": M, "new_content": "replacement text"}
+  edit_file         — {"path": "relative/path", "old_string": "exact text", "new_string": "replacement"}
+  run_command       — {"command": "shell command (requires user confirmation)"}
+
+RULES:
+- ALWAYS use edit_file_at_line when line numbers are shown in [PRE-LOADED CONTEXT]
+- The line numbers shown as "  42: code" mean start_line=42
+- To replace lines 45-47: start_line=45, end_line=47
+- To insert after line 42 without replacing: start_line=43, end_line=42
+- Do NOT call shell_read — file content is already provided
+- Call the tool immediately — do NOT explain first
+
+EXAMPLE — user says "add logging when OCR fails", context shows:
+  387:     except Exception as e:
+  388:         return None
+CORRECT:
+<tool>{"name": "edit_file_at_line", "arguments": {"path": "app/services/ocr_service.py", "start_line": 387, "end_line": 388, "new_content": "    except Exception as e:\n        self.logger.error(f'OCR failed: {e}')\n        return None"}}</tool>
 ===================`;
 }
 
@@ -951,9 +886,8 @@ function repairToolJson(raw: string): string | null {
     // Extract path if present
     const pathMatch = raw.match(/"path"\s*:\s*"([^"]+)"/);
 
-    // For tools with a "content" field, extract it as everything between markers
-    const contentTools = ['write_file', 'create_file', 'append_to_file', 'edit_file'];
-    if (!contentTools.includes(toolName)) return null;
+    // Only repair edit_file (has complex old_string/new_string fields)
+    if (toolName !== 'edit_file') return null;
 
     if (toolName === 'edit_file') {
         // edit_file has old_string and new_string — too complex to reliably repair
@@ -978,57 +912,6 @@ function repairToolJson(raw: string): string | null {
         const escOld = JSON.stringify(oldStr).slice(1, -1);
         const escNew = JSON.stringify(newStr).slice(1, -1);
         return `{"name":"edit_file","arguments":{"path":"${pathMatch[1]}","old_string":"${escOld}","new_string":"${escNew}"}}`;
-    }
-
-    // For write_file / create_file / append_to_file: extract the content field value
-    const contentField = '"content"';
-    const contentIdx = raw.indexOf(contentField);
-    if (contentIdx === -1 || !pathMatch) return null;
-
-    // Find the opening quote of the content value
-    const colonAfterContent = raw.indexOf(':', contentIdx + contentField.length);
-    if (colonAfterContent === -1) return null;
-
-    // Skip whitespace and find opening quote
-    let valStart = colonAfterContent + 1;
-    while (valStart < raw.length && /\s/.test(raw[valStart])) valStart++;
-
-    if (raw[valStart] === '"') {
-        valStart++; // skip opening quote
-        // Find the closing: look for "}} or "}  at the end
-        // Work backwards from the end of the raw string
-        let valEnd = raw.length - 1;
-        while (valEnd > valStart && /[\s}]/.test(raw[valEnd])) valEnd--;
-        if (raw[valEnd] === '"') valEnd--; // skip closing quote
-        // But also handle triple-quote: the model may use """ which means the real content
-        // starts after the triple-quote and ends before the closing triple-quote
-        const afterColon = raw.slice(colonAfterContent + 1).trimStart();
-        if (afterColon.startsWith('"""')) {
-            // Triple-quoted content
-            const tripleStart = raw.indexOf('"""', colonAfterContent) + 3;
-            const tripleEnd = raw.lastIndexOf('"""');
-            if (tripleEnd > tripleStart) {
-                const content = raw.slice(tripleStart, tripleEnd);
-                const escaped = JSON.stringify(content).slice(1, -1);
-                return `{"name":"${toolName}","arguments":{"path":"${pathMatch[1]}","content":"${escaped}"}}`;
-            }
-        }
-
-        const content = raw.slice(valStart, valEnd + 1);
-        const escaped = JSON.stringify(content).slice(1, -1);
-        return `{"name":"${toolName}","arguments":{"path":"${pathMatch[1]}","content":"${escaped}"}}`;
-    }
-
-    // Content might start with triple-quote without a regular quote
-    const afterColonTrimmed = raw.slice(colonAfterContent + 1).trimStart();
-    if (afterColonTrimmed.startsWith('"""')) {
-        const tripleStart = raw.indexOf('"""', colonAfterContent) + 3;
-        const tripleEnd = raw.lastIndexOf('"""');
-        if (tripleEnd > tripleStart) {
-            const content = raw.slice(tripleStart, tripleEnd);
-            const escaped = JSON.stringify(content).slice(1, -1);
-            return `{"name":"${toolName}","arguments":{"path":"${pathMatch[1]}","content":"${escaped}"}}`;
-        }
     }
 
     return null;
@@ -1117,18 +1000,27 @@ function parseTextToolCalls(text: string): OllamaToolCall[] {
                 const parsed = JSON.parse(jsonStr);
                 addCall(parsed, 'XML');
             } catch (e) {
-                // Model may emit unescaped content (e.g. Python triple-quotes, raw newlines).
-                // Try to repair by re-escaping string values between the outermost quotes.
-                const repaired = repairToolJson(jsonStr);
-                if (repaired) {
-                    try {
-                        const parsed = JSON.parse(repaired);
-                        addCall(parsed, 'XML (repaired)');
-                    } catch {
-                        logWarn(`[parseTextToolCalls] Failed to parse XML JSON (even after repair): ${jsonStr.slice(0, 100)}`);
+                // Model may emit unescaped content (e.g. Python triple-quotes, raw newlines, Windows backslashes).
+                // Try simple backslash-escape fix first (handles "dir /s /b services\*.py" type commands).
+                let parsed: { name?: string; arguments?: Record<string, unknown> } | null = null;
+                try {
+                    // Replace unescaped backslashes inside string values: \ not followed by valid JSON escape char
+                    const escaped = jsonStr.replace(/\\(?!["\\/bfnrtu])/g, '\\\\');
+                    parsed = JSON.parse(escaped);
+                    addCall(parsed!, 'XML (backslash-escaped)');
+                } catch {
+                    // Fall back to full repair for more complex cases
+                    const repaired = repairToolJson(jsonStr);
+                    if (repaired) {
+                        try {
+                            const reparsed = JSON.parse(repaired);
+                            addCall(reparsed, 'XML (repaired)');
+                        } catch {
+                            logWarn(`[parseTextToolCalls] Failed to parse XML JSON (even after repair): ${jsonStr.slice(0, 100)}`);
+                        }
+                    } else {
+                        logWarn(`[parseTextToolCalls] Failed to parse XML JSON: ${jsonStr.slice(0, 100)}`);
                     }
-                } else {
-                    logWarn(`[parseTextToolCalls] Failed to parse XML JSON: ${jsonStr.slice(0, 100)}`);
                 }
             }
             pos = jsonEnd;
@@ -1205,7 +1097,40 @@ function parseTextToolCalls(text: string): OllamaToolCall[] {
             logInfo(`[parseTextToolCalls] Recovered ${calls.length} tool call(s) from bare tool_name format`);
         }
     }
-    
+
+    // Last-last resort: detect "tool_name\n```[lang]\ncommand\n```" pattern.
+    // The model writes the tool name on one line, then a fenced block with a shell command.
+    // e.g.:  shell_read\n```shell\ndir /s /b *thermal*\n```
+    // e.g.:  find_files\n```\n*thermal*\n```
+    if (calls.length === 0) {
+        const KNOWN_TOOL_NAMES = new Set(TOOL_DEFINITIONS.map(t => (t as { function: { name: string } }).function.name));
+        // Match: optional_text TOOL_NAME optional_text newline ``` optional_lang newline CONTENT newline ```
+        const fencedCommandRegex = /\b(\w+)\b[^\n]*\n```[a-z]*\n([\s\S]*?)```/gi;
+        let fm: RegExpExecArray | null;
+        while ((fm = fencedCommandRegex.exec(text)) !== null) {
+            const toolName = fm[1].trim();
+            const commandContent = fm[2].trim();
+            if (!KNOWN_TOOL_NAMES.has(toolName) || !commandContent) { continue; }
+
+            // Map fenced content to the right argument based on tool name
+            let args: Record<string, unknown>;
+            if (toolName === 'shell_read' || toolName === 'run_command') {
+                args = { command: commandContent };
+            } else if (toolName === 'edit_file') {
+                // edit_file fenced block isn't reliably parseable — skip, it needs old_string/new_string
+                continue;
+            } else {
+                // Generic: try to parse as JSON, else use as first string arg
+                try { args = JSON.parse(commandContent); }
+                catch { args = { input: commandContent }; }
+            }
+            addCall({ name: toolName, arguments: args }, 'fenced-block tool call');
+        }
+        if (calls.length > 0) {
+            logInfo(`[parseTextToolCalls] Recovered ${calls.length} tool call(s) from fenced-block tool_name format`);
+        }
+    }
+
     return calls;
 }
 
@@ -1334,6 +1259,9 @@ export class Agent {
     /** Track repeated failing run_command invocations (same command failing even with other tools in between) */
     private _failedCommandSignatures = new Map<string, number>();
     private readonly MAX_SAME_COMMAND_FAILURES = 2;
+    /** Track repeated failing edit_file attempts on the same (path, old_string) — not reset by read_file */
+    private _failedEditSignatures = new Map<string, number>();
+    private readonly MAX_SAME_EDIT_FAILURES = 2;
     /** Track repeated identical tool calls to prevent infinite loops */
     private lastToolSignature = '';
     private consecutiveRepeats = 0;
@@ -1361,7 +1289,7 @@ export class Agent {
 
     /** Track auto-retries for permission-asking / plan-dumping to prevent infinite loops */
     private autoRetryCount = 0;
-    private readonly MAX_AUTO_RETRIES = 2;
+    private readonly MAX_AUTO_RETRIES = 3;
 
     private diffViewManager: DiffViewManager;
     private refactorManager: MultiFileRefactoringManager;
@@ -1377,10 +1305,21 @@ export class Agent {
     private static shellEnvSaved = false;
     /** Tool names auto-approved for the current run() — "Accept All" skips confirmation */
     private _autoApprovedTools = new Set<string>();
+    /** The original user task message for the current conversation turn — preserved across context compaction */
+    private _currentTaskMessage: string = '';
+    /** Whether a focused grep was already injected this turn (prevents double-injection within a turn) */
+    private _focusedGrepInjectedThisTurn = false;
+    /** File paths for which focused grep content was injected this run (prevents re-injection on loop-back) */
+    private _filesAutoReadThisRun = new Set<string>();
+    /** Whether the current model is a small model (≤9B params) — triggers read-then-act mode */
+    private _isSmallModel: boolean = false;
+    /** Whether preProcessEditTask() successfully injected file context this run */
+    private _editContextInjected: boolean = false;
 
     constructor(
         private workspaceRoot: string,
-        private readonly memory: TieredMemoryManager | null = null
+        private readonly memory: TieredMemoryManager | null = null,
+        private readonly codeIndex: CodeIndexer | null = null
     ) {
         this.diffViewManager = new DiffViewManager();
         this.refactorManager = new MultiFileRefactoringManager();
@@ -1410,8 +1349,11 @@ export class Agent {
             this._confirmTimeout = null;
         }
         if (this._confirmResolver) {
+            logWarn('[agent] Dismissing pending confirmation (agent stopped or new turn started)');
             this._confirmResolver(false);
             this._confirmResolver = null;
+            // Tell the webview to hide any open confirmation card
+            try { this.postFn({ type: 'dismissConfirmation' }); } catch { /* ignore if postFn is gone */ }
         }
     }
 
@@ -1424,8 +1366,9 @@ export class Agent {
 
     get historyLength(): number { return this.history.length; }
 
-    reset(): void { 
+    reset(): void {
         this.history = [];
+        this._currentTaskMessage = '';
         this.diffViewManager.dispose();
         this.diffViewManager = new DiffViewManager();
     }
@@ -1468,7 +1411,7 @@ export class Agent {
     }
 
     /** Manually compact conversation history to reduce context usage */
-    async compactContext(targetPercentage: number = 50): Promise<{ removed: number; newPercentage: number }> {
+    async compactContext(targetPercentage: number = 50): Promise<{ removed: number; newPercentage: number; summary?: string }> {
         const model = this.currentModel || getConfig().model;
         const stats = calculateContextStats(this.history, '', '', model);
         const oldCount = this.history.length;
@@ -1519,9 +1462,16 @@ export class Agent {
 
         logInfo(`[context] Manual compaction: removed ${removedCount} messages, ${this.history.length} remaining`);
 
+        // Extract summary from history if one was prepended
+        let summaryText: string | undefined;
+        if (this.history.length > 0 && this.history[0].content.startsWith('[Earlier conversation summary]')) {
+            summaryText = this.history[0].content.replace('[Earlier conversation summary] ', '');
+        }
+
         return {
             removed: removedCount,
-            newPercentage: targetPercentage
+            newPercentage: targetPercentage,
+            summary: summaryText,
         };
     }
 
@@ -1606,6 +1556,7 @@ export class Agent {
         this.stopRef = { stop: false };
         this.postFn  = post;
         this.currentModel = model; // Store current model for accurate context calculations
+        this._currentTaskMessage = userMessage; // Capture task for use in tool interception
 
         // If this model is known to need text mode, switch immediately
         if (this.toolMode === 'native' && Agent.textModeModels.has(model)) {
@@ -1625,14 +1576,14 @@ export class Agent {
         // and inject an action nudge so the model starts calling tools immediately
         const isConfirmation = /^\s*(yes|yeah|yep|yup|sure|ok|okay|go\s*ahead|do\s*it|proceed|confirmed|make\s*it\s*happen|run\s*(them|those|it)|execute\s*(them|those|that))\s*[.!]?\s*$/i.test(userMessage);
         if (isConfirmation && this.toolMode === 'text') {
-            this.history.push({ role: 'user', content: `${userMessage}\n\n[SYSTEM: The user confirmed. Start calling tools NOW to execute the plan. Call run_command, rename_file, write_file, or the appropriate tool immediately. Do NOT repeat the plan as code blocks — CALL THE TOOLS.]` });
+            this.history.push({ role: 'user', content: `${userMessage}\n\n[SYSTEM: The user confirmed. Start calling tools NOW to execute the plan. Call run_command or edit_file immediately. Do NOT repeat the plan as code blocks — CALL THE TOOLS.]` });
         } else {
             // Detect file paths in user message and add a hint to read them
             const filePathMatch = userMessage.match(/(?:look at|read|open|check|see|review)\s+([\w./\\-]+\.\w{1,10})\b/i)
                 || userMessage.match(/\b([\w./\\-]+\.(?:md|txt|py|ts|js|json|yaml|yml|toml|cfg|ini|html|css|sql|sh|bash|go|rs|java|rb|php|c|cpp|h))\b/i);
             if (filePathMatch && this.toolMode === 'text') {
                 const filePath = filePathMatch[1].replace(/\\/g, '/');
-                this.history.push({ role: 'user', content: `${userMessage}\n\n[SYSTEM: The user mentioned file "${filePath}". Call read_file with path="${filePath}" immediately. Do NOT call list_files on the directory.]` });
+                this.history.push({ role: 'user', content: `${userMessage}\n\n[SYSTEM: The user mentioned file "${filePath}". Use shell_read with command "cat ${filePath}" to read it immediately. Do NOT list the directory.]` });
             } else {
                 this.history.push({ role: 'user', content: userMessage });
             }
@@ -1641,7 +1592,12 @@ export class Agent {
         this.autoRetryCount = 0; // Reset auto-retry counter for each new user message
         this.memoryWritesThisResponse = 0; // Reset rate limiter for this response
         this._autoApprovedTools.clear(); // Reset batch-approve for each new user message
+        this._currentTaskMessage = userMessage; // Remember original task for post-compaction recovery
         this._failedCommandSignatures.clear(); // Reset failed command tracking
+        this._failedEditSignatures.clear();    // Reset failed edit tracking
+        this._focusedGrepInjectedThisTurn = false; // Reset focused-grep dedup flag
+        this._filesAutoReadThisRun.clear();    // Reset per-run auto-read tracking
+        this._editContextInjected = false;     // Reset read-then-act flag
         
         logInfo(`Agent run — model: ${model}, mode: ${this.toolMode}, history: ${this.history.length}`);
 
@@ -1650,7 +1606,25 @@ export class Agent {
         // do all discovery work programmatically BEFORE the model gets involved.
         // This eliminates the multi-step tool-calling chain that small models fail at.
         const preProcessedContext = await this.preProcessPathUpdate(userMessage, post);
-        if (preProcessedContext) {
+        if (preProcessedContext === '__NO_MOVES_DETECTED__') {
+            // Files haven't been moved yet — tell the user directly without involving the model
+            const msg = "The files don't appear to have been moved yet. The recommendations document describes a *proposed* structure — the files need to be moved into place first.\n\nWould you like me to move the files into the proposed folder structure now? If yes, say **\"do the reorganization\"** and I'll create the directories and move the files. Then you can re-run this command to update the imports.";
+            post({ type: 'streamStart' });
+            for (const char of msg) { post({ type: 'token', text: char }); }
+            post({ type: 'streamEnd' });
+            this.history.push({ role: 'assistant', content: msg });
+            logInfo('[pre-process] No moves detected — posted direct message to user, skipping model call');
+            return;
+        } else if (preProcessedContext === '__IMPORTS_ALREADY_CORRECT__') {
+            // Module map has moves but no stale imports found — imports already updated
+            const msg = "All import paths already point to the correct locations — no changes are needed.\n\nIf you expected changes, check that the files were actually moved to their new locations and that the imports in your code still reference the old paths.";
+            post({ type: 'streamStart' });
+            for (const char of msg) { post({ type: 'token', text: char }); }
+            post({ type: 'streamEnd' });
+            this.history.push({ role: 'assistant', content: msg });
+            logInfo('[pre-process] Imports already correct — posted direct message to user, skipping model call');
+            return;
+        } else if (preProcessedContext) {
             // Replace the user message in history with the enriched version
             // The last item in history is the user message we just pushed
             this.history[this.history.length - 1] = {
@@ -1660,11 +1634,445 @@ export class Agent {
             logInfo(`[pre-process] Injected ${preProcessedContext.length} chars of pre-processed context`);
         }
 
+        // ── Pre-search for explain/how/show queries ───────────────────────
+        // For questions like "explain how X works" or "show me how Y works",
+        // run a search programmatically BEFORE the model responds so it has
+        // real code to work with instead of hallucinating from training data.
+        const isExplainQuery = /\b(explain|show me how|how does|how do|describe how|walk me through|what does.*do|how is.*implemented)\b/i.test(userMessage)
+            && !/\b(import|path|move|rename|reorganize)\b/i.test(userMessage); // skip import-update queries
+        if (isExplainQuery && !preProcessedContext) {
+            const stopWords = new Set(['show','me','how','the','a','an','is','are','does','do','what','where','find','explain','describe','works','work','working','this','that','it','in','on','of','for','to','and','or','with','by','from','at','into','walk','through','implemented','tell','when','happens','happen','using','used','get','make','let','run','use','way','ways','give','want','need','have','has','can','will','would','should','could','been']);
+            const kws = userMessage.toLowerCase().split(/\W+/).filter(w => w.length > 2 && !stopWords.has(w));
+            // Stemming: strip common suffixes to improve search hit rate
+            // e.g. "voided" -> "void", "printing" -> "print", "calculated" -> "calculat"
+            const stemmed = kws.map(w => {
+                if (w.endsWith('ed') && w.length > 4) { return w.slice(0, -2); }
+                if (w.endsWith('ing') && w.length > 5) { return w.slice(0, -3); }
+                if (w.endsWith('tion') && w.length > 6) { return w.slice(0, -4); }
+                if (w.endsWith('s') && w.length > 4 && !w.endsWith('ss')) { return w.slice(0, -1); }
+                return w;
+            });
+            // Use stemmed keywords for search but limit to most distinctive terms
+            const uniqueKws = [...new Set(stemmed)].slice(0, 3);
+            const query = uniqueKws.join(' ') || userMessage.slice(0, 50);
+            if (query.trim()) {
+                // Run one search per keyword so each term gets its own 100-result budget.
+                // This prevents a multi-word phrase from missing files that only contain
+                // individual keywords (e.g. "void_refund_api.py" wouldn't match "transac void").
+                const searchId = `t_pre_explain_${Date.now()}`;
+                post({ type: 'toolCall', id: searchId, name: 'shell_read', args: { command: `grep -rn "${query}" .` } });
+                let searchResult = '';
+                const env = detectShellEnvironment();
+                const isWin = env.os === 'windows';
+                try {
+                    // Search each keyword individually (content search) and also by filename
+                    const individualResults: string[] = [];
+                    for (const kw of uniqueKws) {
+                        try {
+                            // Content search: grep for keyword in all files
+                            const grepCmd = isWin
+                                ? `Get-ChildItem -Recurse -Filter "*.py" | Select-String -Pattern "${kw}" | Select-Object -First 50 | ForEach-Object { "$($_.Path):$($_.LineNumber): $($_.Line)" }`
+                                : `grep -rn "${kw}" --include="*.py" -l 2>/dev/null | head -30`;
+                            const r = await this.executeTool('shell_read', { command: grepCmd }, `${searchId}_${kw}`);
+                            individualResults.push(r);
+                        } catch { /* skip failed keyword */ }
+                        // Also find files whose NAME contains this keyword
+                        try {
+                            const findCmd = isWin
+                                ? `Get-ChildItem -Recurse -Filter "*${kw}*.py" | Select-Object -ExpandProperty FullName | Select-Object -First 20`
+                                : `find . -name "*${kw}*.py" -not -path "*/node_modules/*" -not -path "*/__pycache__/*" 2>/dev/null | head -20`;
+                            const found = await this.executeTool('shell_read', { command: findCmd }, `${searchId}_fn_${kw}`);
+                            logInfo(`[pre-explain] find(*${kw}*.py): ${found.split('\n').filter(l => l.trim()).length} results — ${found.slice(0, 200)}`);
+                            // Convert to search-result format
+                            const syntheticLines = found.split('\n')
+                                .map(l => l.trim().replace(/\\/g, '/'))
+                                .filter(l => l.endsWith('.py'))
+                                .map(l => `${l}:1: [filename match:${kw}]`)
+                                .join('\n');
+                            if (syntheticLines) { individualResults.push(syntheticLines); }
+                        } catch (e) { logInfo(`[pre-explain] find(*${kw}*.py) failed: ${e}`); }
+                    }
+                    searchResult = individualResults.join('\n');
+                } catch { searchResult = '(search unavailable)'; }
+                post({ type: 'toolResult', id: searchId, name: 'shell_read', success: !!searchResult && searchResult !== '(search unavailable)', preview: searchResult.slice(0, 200) });
+                logInfo(`[pre-explain] Pre-searched "${uniqueKws.join(', ')}" — ${searchResult.length} chars`);
+
+                // Extract the most relevant file from search results and read it.
+                // Search results contain lines like "app/services/foo.py:42: ..."
+                // Prefer service/route files over models, avoid archive/test/migration dirs.
+                // Normalize backslashes to forward slashes for cross-platform compatibility.
+                // Track which files came from filename match (find_files) vs content search.
+                // Filename-matched files get a strong bonus because if the filename directly
+                // contains the action keyword (e.g. "void" in "void_refund_api.py"), it's
+                // almost certainly the dedicated file for that feature.
+                // We track the keyword that triggered the match so rarer keywords score higher.
+                const filenameMatched = new Map<string, string>(); // path → keyword
+                for (const m of searchResult.matchAll(/^([\w/\\.-]+\.py):1: \[filename match:(\w+)\]/gm)) {
+                    filenameMatched.set(m[1].replace(/\\/g, '/'), m[2]);
+                }
+                const fileMatches = [...searchResult.matchAll(/^([\w/\\.-]+\.py):\d+:/gm)]
+                    .map(m => m[1].replace(/\\/g, '/'));
+                const seen = new Set<string>();
+                const candidates = fileMatches.filter(f => {
+                    if (seen.has(f)) { return false; }
+                    seen.add(f);
+                    return !/archive|test|migration|__pycache__|node_modules/i.test(f);
+                });
+                // Score: prefer files whose basename contains the most query keywords.
+                // Use the basename (last path segment) for name scoring so deep paths
+                // don't accumulate false keyword hits from parent dir names.
+                const queryWords = query.toLowerCase().split(/\W+/).filter(Boolean);
+                const scored = candidates.map(f => {
+                    const base = f.toLowerCase();
+                    const basename = base.split('/').pop() ?? base; // e.g. "void_refund_api.py"
+                    const basenameNoExt = basename.replace(/\.py$/, '');
+                    // Count how many query words appear in the basename
+                    const nameMatchCount = queryWords.filter(w => basenameNoExt.includes(w)).length;
+                    // Bonus if basename IS essentially a query keyword (dedicated file)
+                    const isDedicatedFile = queryWords.some(w => w.length > 3 && basenameNoExt.startsWith(w));
+                    // Extra bonus if the file name contains ALL query keywords (strongest signal)
+                    const matchesAllKeywords = queryWords.every(w => basenameNoExt.includes(w));
+                    // Strong bonus if this file was found by filename search — its name IS the feature
+                    const filenameBonus = filenameMatched.has(f) ? 2 : 0;
+                    const nameScore = nameMatchCount * 3 + (isDedicatedFile ? 2 : 0) + (matchesAllKeywords && queryWords.length > 1 ? 3 : 0) + filenameBonus;
+                    // typeScore: only reward route/service bonus if the file also matches a query keyword.
+                    // Routes score equal to services — a dedicated route file is just as authoritative.
+                    const typeScore = nameMatchCount > 0
+                        ? ((base.includes('route') || base.includes('/routes/')) ? 1.5 : base.includes('service') ? 1 : base.includes('model') ? 0.5 : 0)
+                        : 0;
+                    // Penalize very generic names and long model files unlikely to have the specific logic
+                    const penalty = /(__init__|utils|helpers|base|common|permission|config)\.(py)$/.test(basename) ? -2
+                        : /transaction\.py$/.test(basename) && !queryWords.some(w => 'transaction'.startsWith(w)) ? -1
+                        : 0;
+                    return { f, score: nameScore + typeScore + penalty };
+                }).sort((a, b) => b.score - a.score);
+
+                logInfo(`[pre-explain] File candidates (top 5): ${scored.slice(0, 5).map(x => `${x.f}(${x.score.toFixed(1)})`).join(', ')}`);
+
+                // Read top candidates, then pick the one whose content has the most keyword hits.
+                // This breaks ties when multiple files score equally — the file that actually
+                // CONTAINS the queried logic (e.g. "void") wins over a file that just shares
+                // a naming pattern (e.g. "transaction_validators.py").
+                const readResults: Array<{ f: string; content: string; hits: number }> = [];
+                for (const { f } of scored.slice(0, 3)) {
+                    const readId = `t_pre_read_${Date.now()}`;
+                    const catCmd = isWin ? `Get-Content "${f}"` : `cat "${f}"`;
+                    post({ type: 'toolCall', id: readId, name: 'shell_read', args: { command: catCmd } });
+                    try {
+                        const content = await this.executeTool('shell_read', { command: catCmd }, readId);
+                        post({ type: 'toolResult', id: readId, name: 'shell_read', success: true, preview: content.slice(0, 150) });
+                        if (content.length > 200) {
+                            const lower = content.toLowerCase();
+                            // Count hits per keyword, then score by the MINIMUM hits across all keywords.
+                            // This ensures we pick the file that contains ALL keywords (e.g. both "void"
+                            // and "transact"), not a file that has 1000× "transact" but zero "void".
+                            const hitsPerKw = queryWords.map(w => {
+                                let count = 0, pos = 0;
+                                while ((pos = lower.indexOf(w, pos)) !== -1) { count++; pos++; }
+                                return count;
+                            });
+                            // Primary sort: minimum hits across keywords (file must contain all terms)
+                            // Secondary sort: total hits (prefer more comprehensive coverage)
+                            const minHits = Math.min(...hitsPerKw);
+                            const totalHits = hitsPerKw.reduce((a, b) => a + b, 0);
+                            readResults.push({ f, content, hits: minHits * 10000 + totalHits });
+                            logInfo(`[pre-explain] Pre-read "${f}" — ${content.length} chars, hits/kw: [${hitsPerKw.join(', ')}] minHits=${minHits}`);
+                        } else {
+                            logInfo(`[pre-explain] Skipping "${f}" — only ${content.length} chars`);
+                        }
+                    } catch (e) {
+                        post({ type: 'toolResult', id: readId, name: 'shell_read', success: false, preview: String(e) });
+                    }
+                }
+                // Pick the file with the most keyword hits; fall back to first if all tied
+                readResults.sort((a, b) => b.hits - a.hits);
+                let fileContent = readResults[0]?.content ?? '';
+                let readFilePath = readResults[0]?.f ?? '';
+                if (readFilePath) { logInfo(`[pre-explain] Selected "${readFilePath}" (${readResults[0].hits} hits) over ${readResults.slice(1).map(r => `"${r.f}"(${r.hits})`).join(', ')}`); }
+
+                // Extract the most relevant section of the file around query keywords.
+                // Rather than blindly taking first N chars, find where the keywords appear
+                // and extract a window around those lines.
+                let fileSection = '';
+                if (fileContent) {
+                    const lines = fileContent.split('\n');
+                    // Find lines that contain query keywords
+                    const qws = queryWords.filter(w => w.length > 3);
+                    const relevantLineIdxs = lines
+                        .map((l, i) => ({ i, hit: qws.some(w => l.toLowerCase().includes(w)) }))
+                        .filter(x => x.hit)
+                        .map(x => x.i);
+                    let extractedContent: string;
+                    if (relevantLineIdxs.length > 0) {
+                        // Window: 20 lines before first hit to 80 lines after last hit
+                        const start = Math.max(0, relevantLineIdxs[0] - 20);
+                        const end = Math.min(lines.length, (relevantLineIdxs[relevantLineIdxs.length - 1]) + 80);
+                        extractedContent = lines.slice(start, end).join('\n');
+                        logInfo(`[pre-explain] Extracted lines ${start}-${end} of ${readFilePath} (keyword window)`);
+                    } else {
+                        extractedContent = fileContent.slice(0, 4500);
+                    }
+                    fileSection = `\n\nRelevant section of ${readFilePath}:\n\`\`\`python\n${extractedContent.slice(0, 5000)}\n\`\`\``;
+                }
+                const injection = `\n\n[Codebase search results for "${query}" (${candidates.length} files matched):\n${searchResult.slice(0, 1000)}\n]${fileSection}\n\nAnswer the user's question using ONLY the real code shown above. Do NOT write hypothetical or example code. If you need to see another file, use shell_read with cat or grep.`;
+                this.history[this.history.length - 1] = {
+                    role: 'user',
+                    content: userMessage + injection,
+                };
+                logInfo(`[pre-explain] Injected ${injection.length} chars of search+read context`);
+            }
+        }
+
         // Resolve actual context limit from Ollama (cached after first call)
         await resolveModelContextLimit(model);
 
+        // ── Explicit "read FILE and tell me" pre-inject ───────────────────────
+        // When the user names a specific file to read, pre-load it so the model
+        // doesn't have to figure out the path or resort to grepping.
+        if (!preProcessedContext && !this._editContextInjected) {
+            const readFileMatch = userMessage.match(/\bread\s+([\w\\/.\-]+\.\w+)\b/i);
+            if (readFileMatch) {
+                const rawPath = readFileMatch[1].replace(/\\/g, path.sep);
+                // Try workspace-relative first, then absolute
+                const candidates = [
+                    path.join(this.workspaceRoot, rawPath),
+                    rawPath,
+                ];
+                for (const candidate of candidates) {
+                    try {
+                        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+                            const content = fs.readFileSync(candidate, 'utf8');
+                            const relPath = path.relative(this.workspaceRoot, candidate).replace(/\\/g, '/');
+                            const injection = `\n\n[FILE: ${relPath}]\n\`\`\`\n${content.slice(0, 30000)}\n\`\`\``;
+                            this.history[this.history.length - 1] = {
+                                role: 'user',
+                                content: userMessage + injection,
+                            };
+                            logInfo(`[pre-read] Injected ${content.length} chars from ${relPath}`);
+                            break;
+                        }
+                    } catch { /* skip */ }
+                }
+            }
+        }
+
+        // ── Read-then-act pipeline for small models ───────────────────────────
+        // For edit tasks on models ≤9B params: programmatically find, read, and
+        // inject the relevant file(s) BEFORE calling the model.  This eliminates
+        // the multi-turn shell exploration loop that small models consistently fail at.
+        this._isSmallModel = await this.resolveIsSmallModel(model);
+        // Multi-file restructure tasks (split/separate/break into files) need full shell access
+        // to read + write multiple files — not suitable for single-file pre-inject mode.
+        const isMultiFileRestructure = /\b(split|separate|break)\b.{0,40}\b(file|files|module|modules)\b/i.test(userMessage)
+            || /\binto\s+(separate|multiple|different)\s+(file|files|module|modules)\b/i.test(userMessage);
+        const isFindSimilar = this.codeIndex?.isReady
+            && (/\b(find|show|list|are there)\b.{0,30}\b(similar|duplicate|overlap|redundant)\b/i.test(userMessage)
+            || /\b(similar|duplicate|overlapping)\s+(files?|services?|modules?)\b/i.test(userMessage)
+            || /what\s+files?\s+(overlap|duplicate|are similar)\b/i.test(userMessage)
+            || /\bfiles?\s+(that\s+)?(do\s+)?(similar|the same|overlap)\b/i.test(userMessage));
+        const isEditTask = /\b(add|insert|append|implement|fix|modify|update|change|remove|delete|refactor|rename|replace|wrap|extract|move|convert|migrate)\b/i.test(userMessage)
+            && !/\b(import|path)\b/i.test(userMessage)
+            && !isMultiFileRestructure
+            && !isFindSimilar
+            && !isExplainQuery
+            && !preProcessedContext;  // already handled by preProcessPathUpdate
+        if (this._isSmallModel && isEditTask) {
+            const editContext = await this.preProcessEditTask(userMessage, post);
+            if (editContext) {
+                this.history[this.history.length - 1] = {
+                    role: 'user',
+                    content: `${userMessage}\n\n${editContext}`,
+                };
+                this._editContextInjected = true;
+                logInfo(`[pre-edit] Injected ${editContext.length} chars of pre-loaded file context`);
+            }
+        } else if (isMultiFileRestructure) {
+            // Programmatic split — no model needed.
+            // Find the target file via code index or keyword search, analyze its structure,
+            // and write the split files directly.
+            let targetAbs: string | undefined;
+
+            // Priority 1: explicit filename mentioned in message (most reliable)
+            const fnMatch = userMessage.match(/\b([\w-]+\.(?:py|ts|js|go|java|rs))\b/i);
+            if (fnMatch) {
+                const targetName = fnMatch[1].toLowerCase();
+                // Walk workspace to find exact filename match, preferring non-archive paths
+                const findFile = (dir: string, depth: number): string | undefined => {
+                    if (depth > 8) { return undefined; }
+                    let entries: fs.Dirent[];
+                    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return undefined; }
+                    let archiveMatch: string | undefined;
+                    for (const e of entries) {
+                        if (SKIP_DIRS.has(e.name)) { continue; }
+                        const full = path.join(dir, e.name);
+                        if (e.isDirectory()) {
+                            const found = findFile(full, depth + 1);
+                            if (found) {
+                                if (/[/\\](archive|backup|old[_-]?code)[/\\]/i.test(found)) {
+                                    archiveMatch = archiveMatch ?? found;
+                                } else {
+                                    return found; // non-archive win — return immediately
+                                }
+                            }
+                        } else if (e.name.toLowerCase() === targetName) {
+                            const rel = path.relative(this.workspaceRoot, full);
+                            if (/[/\\](archive|backup|old[_-]?code)[/\\]/i.test(rel)) {
+                                archiveMatch = archiveMatch ?? full;
+                            } else {
+                                return full;
+                            }
+                        }
+                    }
+                    return archiveMatch;
+                };
+                targetAbs = findFile(this.workspaceRoot, 0);
+                if (targetAbs) { logInfo(`[split] Found by filename: ${targetAbs}`); }
+            }
+
+            // Priority 2: semantic search via code index
+            if (!targetAbs && this.codeIndex?.isReady) {
+                const hits = await this.codeIndex.findRelevantFiles(userMessage, 5);
+                const nonArchive = hits.filter(h => !/[/\\](archive|backup|old[_-]?code)[/\\]/i.test(h.absPath));
+                targetAbs = (nonArchive[0] ?? hits[0])?.absPath;
+                if (targetAbs) { logInfo(`[split] Found via code index: ${targetAbs}`); }
+            }
+
+            const emitAssistant = (text: string) => {
+                post({ type: 'token', text });
+                post({ type: 'streamEnd' });
+            };
+
+            if (targetAbs) {
+                try {
+                    logInfo(`[split] Target file: ${targetAbs}`);
+                    const plan = analyzeFile(targetAbs, this.workspaceRoot);
+                    if (plan.splits.length < 2) {
+                        // Check if file is already a thin aggregator (previously split)
+                        const firstLines = fs.readFileSync(targetAbs, 'utf8').split('\n').slice(0, 5).join('\n');
+                        const alreadySplit = /auto.?split|re.?exports?\s+all\s+sub/i.test(firstLines);
+                        logInfo(`[split] Only ${plan.splits.length} group(s) found — file may already be well-organized`);
+                        if (alreadySplit) {
+                            emitAssistant(`\`${plan.relPath}\` was already split in a previous session — it is now a thin aggregator that imports the sub-blueprints. Nothing to do.`);
+                        } else {
+                            emitAssistant(`Only ${plan.splits.length} logical group found in \`${plan.relPath}\` — nothing to split.`);
+                        }
+                    } else {
+                        logInfo(`[split] Analyzed ${plan.relPath} → ${plan.splits.length} groups: ${plan.splits.map(s => s.name).join(', ')}`);
+                        const summary = await executeSplit(plan, this.workspaceRoot, post);
+                        emitAssistant(summary);
+                    }
+                } catch (err) {
+                    logError(`[split] Failed: ${toErrorMessage(err as Error)}`);
+                    emitAssistant(`Split failed: ${toErrorMessage(err as Error)}`);
+                }
+            } else {
+                logInfo('[split] Could not locate target file — falling through to model');
+                emitAssistant(`Could not find the target file in the workspace. Please check the filename and try again.`);
+            }
+            // Split is fully handled — don't run the model loop
+            return;
+        } else if (isFindSimilar && this.codeIndex) {
+            // Similarity analysis — pure vector math, no model needed
+            const emitAssistant = (text: string) => {
+                post({ type: 'token', text });
+                post({ type: 'streamEnd' });
+            };
+            try {
+                // Resolve scope: directory mentioned in message, or anchor file
+                let scopeDir: string | undefined;
+                let anchorFile: string | undefined;
+
+                // Look for explicit directory hint (e.g. "in services/", "in app/services")
+                const dirMatch = userMessage.match(/\bin\s+([\w/\\.-]+\/?)\b/i);
+                if (dirMatch) {
+                    const hint = dirMatch[1].replace(/\\/g, '/').replace(/\/$/, '');
+                    // Walk workspace looking for a directory whose name matches
+                    const findDir = (base: string, target: string): string | undefined => {
+                        try {
+                            const entries = fs.readdirSync(base, { withFileTypes: true });
+                            for (const e of entries) {
+                                if (!e.isDirectory() || SKIP_DIRS.has(e.name)) { continue; }
+                                const full = path.join(base, e.name);
+                                const rel = path.relative(this.workspaceRoot, full).replace(/\\/g, '/');
+                                if (rel === target || e.name === target || rel.endsWith('/' + target)) { return full; }
+                                const found = findDir(full, target);
+                                if (found) { return found; }
+                            }
+                        } catch { /* skip */ }
+                        return undefined;
+                    };
+                    scopeDir = findDir(this.workspaceRoot, hint);
+                }
+
+                // Look for anchor file (e.g. "what overlaps with pricing_engine.py")
+                if (!scopeDir) {
+                    const fnMatch = userMessage.match(/\bwith\s+([\w-]+\.(?:py|ts|js|go|java|rs))\b/i)
+                        ?? userMessage.match(/\blike\s+([\w-]+\.(?:py|ts|js|go|java|rs))\b/i);
+                    if (fnMatch) {
+                        const targetName = fnMatch[1].toLowerCase();
+                        const walk = (dir: string, depth: number): string | undefined => {
+                            if (depth > 8) { return undefined; }
+                            try {
+                                for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+                                    if (SKIP_DIRS.has(e.name)) { continue; }
+                                    const full = path.join(dir, e.name);
+                                    if (e.isDirectory()) {
+                                        const found = walk(full, depth + 1);
+                                        if (found) { return found; }
+                                    } else if (e.name.toLowerCase() === targetName) { return full; }
+                                }
+                            } catch { /* skip */ }
+                            return undefined;
+                        };
+                        const found = walk(this.workspaceRoot, 0);
+                        if (found) {
+                            anchorFile = path.relative(this.workspaceRoot, found).replace(/\\/g, '/');
+                        }
+                    }
+                }
+
+                // Default scope: services directory if mentioned, else workspace root
+                if (!scopeDir && !anchorFile) {
+                    if (/\bservices?\b/i.test(userMessage)) {
+                        const findDir = (base: string): string | undefined => {
+                            try {
+                                for (const e of fs.readdirSync(base, { withFileTypes: true })) {
+                                    if (!e.isDirectory() || SKIP_DIRS.has(e.name)) { continue; }
+                                    const full = path.join(base, e.name);
+                                    if (e.name === 'services') { return full; }
+                                    const found = findDir(full);
+                                    if (found) { return found; }
+                                }
+                            } catch { /* skip */ }
+                            return undefined;
+                        };
+                        scopeDir = findDir(this.workspaceRoot);
+                    }
+                    scopeDir = scopeDir ?? this.workspaceRoot;
+                }
+
+                if (anchorFile) {
+                    logInfo(`[similarity] Anchor mode: ${anchorFile}`);
+                    const report = await findFilesLike(anchorFile, this.workspaceRoot, this.codeIndex);
+                    emitAssistant(formatSimilarityReport(report));
+                } else {
+                    logInfo(`[similarity] Directory mode: ${scopeDir}`);
+                    const report = await findSimilarInDirectory(scopeDir!, this.workspaceRoot, this.codeIndex);
+                    emitAssistant(formatSimilarityReport(report));
+                }
+            } catch (err) {
+                logError(`[similarity] Failed: ${toErrorMessage(err as Error)}`);
+                post({ type: 'token', text: `Similarity analysis failed: ${toErrorMessage(err as Error)}` });
+                post({ type: 'streamEnd' });
+            }
+            return;
+        }
+
         const cfg = getConfig();
-        const baseSystemContent = cfg.systemPrompt.trim() || await buildSystemPromptAsync(cfg.autoSaveMemory, this.workspaceRoot);
+        const baseSystemContent = cfg.systemPrompt.trim()
+            || (this._isSmallModel
+                ? buildSmallModelSystemPrompt(this.workspaceRoot)
+                : await buildSystemPromptAsync(cfg.autoSaveMemory, this.workspaceRoot));
 
         // Inject periodic memory nudge as a separate system message (not mutating user message)
         let memoryNudgeMsg: OllamaMessage | null = null;
@@ -1705,7 +2113,7 @@ export class Agent {
             }
         }
 
-        const MAX_TURNS = 25;
+        const MAX_TURNS = this._isSmallModel ? 8 : 25;
         this.modeSwitchRetries = 0;
         let loopExhausted = true;
 
@@ -1729,13 +2137,20 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
 
         for (let turn = 0; turn < MAX_TURNS; turn++) {
             if (this.stopRef.stop) { break; }
+            this._focusedGrepInjectedThisTurn = false; // Reset per-turn to prevent double-injection
 
             // Build system content only when toolMode changes
             const isTextMode = this.toolMode === 'text';
             if (this.toolMode !== lastToolMode) {
-                systemContent = isTextMode
-                    ? baseSystemWithMemory + buildTextModeInstructions(cfg.autoSaveMemory)
-                    : baseSystemWithMemory;
+                if (isTextMode) {
+                    // Small models in edit mode get a minimal prompt — no shell examples
+                    const textSuffix = (this._isSmallModel && this._editContextInjected)
+                        ? buildSmallModelTextModeInstructions()
+                        : buildTextModeInstructions(cfg.autoSaveMemory, this.workspaceRoot);
+                    systemContent = baseSystemWithMemory + textSuffix;
+                } else {
+                    systemContent = baseSystemWithMemory;
+                }
                 lastToolMode = this.toolMode;
             }
             
@@ -1781,7 +2196,22 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                     
                     // Calculate removed count AFTER compaction
                     const messagesRemoved = oldMessageCount - this.history.length;
-                    
+
+                    // After compaction, ensure the original task is still in history.
+                    // compactHistory works backwards from the end, so the first user message
+                    // (the actual task) is often the first thing dropped when context is full.
+                    // Re-inject it at the start so the model stays on task.
+                    if (this._currentTaskMessage) {
+                        const taskStillPresent = this.history.some(
+                            m => m.role === 'user' && m.content.includes(this._currentTaskMessage.slice(0, 50))
+                        );
+                        if (!taskStillPresent) {
+                            const compactNote = `[CONTEXT NOTE: Earlier messages were removed to free up context. Your current task is: "${this._currentTaskMessage}". Continue working on this task. Do NOT start a new task or execute suggestions from any planning documents you may have read.]\n\n${this._currentTaskMessage}`;
+                            this.history.unshift({ role: 'user', content: compactNote });
+                            logInfo(`[context] Re-injected original task message after compaction`);
+                        }
+                    }
+
                     this.lastContextLevel = 'safe';
                     post({
                         type: 'contextCompacted',
@@ -1801,8 +2231,13 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
             }
             
             // Merge built-in tools with MCP tools
+            // Small models in edit mode get a restricted set (edit_file + run_command only)
+            // to prevent them from looping on shell exploration when context is pre-injected.
             const mcpTools = mcpToolsToOllamaFormat();
-            const tools = isTextMode ? [] : [...TOOL_DEFINITIONS, ...mcpTools];
+            const tools = isTextMode ? []
+                : (this._isSmallModel && this._editContextInjected)
+                    ? SMALL_MODEL_TOOL_DEFINITIONS
+                    : [...TOOL_DEFINITIONS, ...mcpTools];
             
             if (mcpTools.length > 0) {
                 logInfo(`[agent] Using ${TOOL_DEFINITIONS.length} built-in + ${mcpTools.length} MCP tools`);
@@ -1926,13 +2361,20 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
 
             if (!toolCalls.length) {
                 // ── Auto-retry: detect "asking permission" or verbose plan without action ──
-                if (isTextMode && turn < MAX_TURNS - 1 && this.autoRetryCount < this.MAX_AUTO_RETRIES) {
+                if (turn < MAX_TURNS - 1 && this.autoRetryCount < this.MAX_AUTO_RETRIES) {
                     const resp = (displayContent || result.content).toLowerCase();
                     const lastMsg = (userMessage).toLowerCase();
                     const isAskingPermission = /would you like me to|shall i|do you want me to|want me to proceed|like me to continue|is there anything specific/i.test(resp);
-                    const userWantsAction = /\b(do|implement|apply|execute|run|move|rename|reorganize|restructure|create|make|build|set up|migrate|edit|update|change|fix|modify|refactor|point|adjust|rewrite|convert|transform)\b/.test(lastMsg);
+                    // userWantsAction: message must be imperative (not a question) and use strong action verbs
+                    // Exclude: questions (?), explain/describe/show/tell/what/why/how requests
+                    const isQuestion = /\?/.test(userMessage) || /^\s*(what|why|how|can you|could you|would you|do you|is|are|explain|describe|show me|tell me|what is|what are)\b/i.test(userMessage);
+                    const userWantsAction = !isQuestion && !isExplainQuery && /\b(find|search|look|locate|show|implement|apply|execute|move|rename|reorganize|restructure|create|build|migrate|edit|update|fix|modify|refactor|rewrite|convert|transform|add|remove|delete|deploy|install|split|separate|extract|merge|run the|do the|do it|make the)\b/.test(lastMsg);
                     const hasCodeBlockButNoTool = /```/.test(resp) && !toolCalls.length;
-                    const isVerbosePlanDump = !toolCalls.length && userWantsAction && (resp.length > 400 || hasCodeBlockButNoTool);
+                    // Don't treat a correct answer to a read/explain task as a "verbose plan dump"
+                    const isVerbosePlanDump = !toolCalls.length && userWantsAction && !isExplainQuery
+                        && (resp.length > 400 || hasCodeBlockButNoTool);
+                    // Model asked user to provide file/content instead of reading it itself
+                    const isAskingUserToProvide = /please provide|provide the (contents|file|code|text)|share the (contents|file|code)|paste the|send me the|provide me with/i.test(resp);
 
                     if (isAskingPermission && userWantsAction) {
                         this.autoRetryCount++;
@@ -1949,43 +2391,113 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
 
                     if (isVerbosePlanDump) {
                         this.autoRetryCount++;
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model dumped a verbose plan (${resp.length} chars) without calling tools (turn ${turn})`);
+                        const fencedToolInPlan = /```[\s\S]*?\b(edit_file|edit_file_at_line|shell_read|run_command)\b[\s\S]*?```/.test(resp);
+                        const planNudge = fencedToolInPlan
+                            ? '[SYSTEM: You wrote a tool call inside a markdown code block (```). That does NOT execute the tool. You must output a raw <tool>{"name":"...","arguments":{...}}</tool> XML block — no backticks, no code fences, no explanation. Output ONLY the <tool> block now.]'
+                            : (this._isSmallModel && this._editContextInjected)
+                                ? '[SYSTEM: Stop explaining. The file content is in [PRE-LOADED CONTEXT] above. Call edit_file_at_line NOW with the line numbers shown. Output ONLY the <tool> block — no text before or after it.]'
+                                : '[SYSTEM: You output a plan as text instead of calling tools. Do NOT explain what you will do — CALL THE FIRST TOOL NOW. Output only a <tool> block, nothing else.]';
+                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model ${fencedToolInPlan ? 'used fenced code block for tool call' : 'dumped a verbose plan'} (${resp.length} chars) without calling tools (turn ${turn})`);
                         this.history.pop();
                         this.history.push({
                             role: 'user',
-                            content: '[SYSTEM: You output a plan as text instead of calling tools. Do NOT explain what you will do — CALL THE FIRST TOOL NOW. Output only a <tool> block, nothing else.]'
+                            content: planNudge,
                         });
                         post({ type: 'removeLastAssistant' });
                         continue;
                     }
 
-                    // Third path: model summarized tool results and asked what to do next
-                    // instead of continuing to act (e.g., "Here are the results... Would you like me to proceed?")
-                    const isSummaryWithQuestion = !isAskingPermission && userWantsAction && !toolCalls.length
+                    // Third path: model summarized tool results and asked what to do next / offered help
+                    // instead of continuing to answer (applies regardless of userWantsAction — explain/show/how queries too)
+                    const isOfferingHelp = /\b(is there anything (else|more)|anything else i can|feel free to ask|let me know if|how can i (further )?help|do you (have|want|need)|would you like|shall i|next steps?)\b/i.test(resp);
+                    // Model described what it would do instead of doing it (planning dump after reading a file)
+                    const isPlanningInsteadOfDoing = userWantsAction && turn > 0 && !toolCalls.length && resp.length > 300
+                        && /\b(you would|you could|you can|you need to|would need to|to (split|refactor|separate|reorganize|restructure|move|create|migrate))\b/i.test(resp);
+                    // Don't retry explain/read tasks that already received tool results and produced a substantive answer.
+                    // "read X and tell me Y" tasks are done once the model answers after reading — no further tools needed.
+                    const modelAlreadyAnswered = isExplainQuery && turn > 0 && toolCalls.length === 0
+                        && resp.length > 400;
+                    const isSummaryWithQuestion = !isAskingPermission && !toolCalls.length
+                        && !modelAlreadyAnswered
                         && turn > 0 && resp.length > 100
-                        && /\b(here are|the (?:search|results?|output|matches)|found \d+|instances?|occurrences?)\b/i.test(resp)
-                        && /\b(would you|shall i|do you want|like me to|specific file|which file|what file|have another|next step)\b/i.test(resp);
+                        && (isOfferingHelp || isPlanningInsteadOfDoing || (/\b(here are|the (?:search|results?|output|matches)|found \d+|instances?|occurrences?)\b/i.test(resp)
+                        && /\b(would you|shall i|do you want|like me to|specific file|which file|what file|have another|next step)\b/i.test(resp)));
                     if (isSummaryWithQuestion) {
                         this.autoRetryCount++;
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model summarized results and asked instead of acting (turn ${turn})`);
+                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model summarized results and asked/offered help instead of answering (turn ${turn})`);
                         this.history.pop();
                         this.history.push({
                             role: 'user',
-                            content: '[SYSTEM: You summarized the results and asked for permission. STOP ASKING. The user already told you to do it. Pick the FIRST affected file from the search results, call read_file on it, then call edit_file to update the import. Do NOT summarize or ask — ACT NOW.]'
+                            content: `[SYSTEM: You summarized a tool result and asked the user a follow-up question or offered help. Do NOT ask — just answer. The user's original question was: "${userMessage}". Use what you already found to answer it directly. If you need more detail, use shell_read with cat/grep on the most relevant file. Do NOT ask the user anything.]`
                         });
                         post({ type: 'removeLastAssistant' });
                         continue;
                     }
 
-                    // Fourth path: model gave a text-only response on the first turn when user wants action
-                    // This catches cases where the model gives generic advice instead of calling tools
-                    if (turn === 0 && userWantsAction && !toolCalls.length && resp.length > 20) {
+                    // Fourth path: model gave a text-only response on the first turn when user wants action,
+                    // OR gave a long generic answer (e.g., Windows steps) when the user asked a codebase question.
+                    // Sub-cases:
+                    //   a) Model asked user to provide file contents — always retry
+                    //   b) Model emitted a fenced code block tool call — always retry
+                    //   c) Model gave verbose response (>200 chars) with no tool calls on turn 0 — retry
+                    //      (applies even for "where is X" style questions — model should search the codebase)
+                    const respIsQuestion = /\?/.test(displayContent || result.content);
+                    const isDeflecting = isAskingUserToProvide;
+                    // Detect model emitting tool call in a fenced code block instead of <tool> XML
+                    const hasFencedToolCall = hasCodeBlockButNoTool && /```[\s\S]*?\b(edit_file|shell_read|run_command)\b[\s\S]*?```/.test(resp);
+                    // Detect model answering about OS/system instead of searching the codebase
+                    const isOsAnswer = /device manager|control panel|program files|appdata|windows update|epson.*software|driver.*download|official website|troubleshoot.*printer/i.test(resp);
+                    // Detect model asking user for clarification instead of searching the codebase
+                    const isAskingForContext = turn === 0 && respIsQuestion
+                        && /could you (please )?(specify|clarify|provide|tell me|let me know|give me)|which (aspect|part|type|kind|version)|more (context|information|detail)|what (type|kind|aspect|part|version|specific)|please (specify|clarify|provide more|let me know)/i.test(resp)
+                        && !toolCalls.length;
+                    // Verbose turn-0 no-tool: fire even for question-phrased messages (e.g., "where is X", "show me how")
+                    // If the model gives a long generic answer with no file references, it answered from training
+                    // data instead of searching the codebase — always retry in that case.
+                    // hasCodebaseRef: true only if response references actual project paths/files,
+                    // not just generic code snippets with def/class/import that the model hallucinated.
+                    // Hypothetical code blocks ("Example:", "hypothetical example", fake URLs) don't count.
+                    const hasHypotheticalMarker = /hypothetical|example scenario|your-auth-server|your_server|example\.com|placeholder|simplified example|import nfc\b|import requests\b.*verify|if you were to implement|example implementation|example route|would typically involve|might look something like|example of how.*might be implemented|logic might be implemented|how.*might look|you would need to implement|you would need to create/i.test(resp);
+                    const hasCodebaseRef = !hasHypotheticalMarker && /app\/|routes\/|services\/|\.py"|\.ts"|\.js"/i.test(resp);
+                    const isGenericLongAnswer = turn === 0 && !toolCalls.length && resp.length > 300 && !hasCodebaseRef;
+                    const isVerboseTurn0 = turn === 0 && !toolCalls.length && resp.length > 200 && !respIsQuestion;
+                    if (!toolCalls.length && turn === 0 && (isDeflecting || hasFencedToolCall || isOsAnswer || isAskingForContext || isGenericLongAnswer || (isVerboseTurn0 && userWantsAction))) {
                         this.autoRetryCount++;
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model gave text-only response on first turn when user wants action (${resp.length} chars, turn ${turn})`);
+                        const toolCallHint = isTextMode ? ' Output only a <tool> block, nothing else.' : ' Call the tool now — do not explain, just call it.';
+                        const nudgeContent = isDeflecting
+                            ? `[SYSTEM: You asked the user to provide file contents, but you have tools to read files yourself. Use shell_read with cat/Get-Content on the file path. Do NOT ask the user — call the tool NOW.${toolCallHint}]`
+                            : hasFencedToolCall
+                            ? '[SYSTEM: You wrote a tool call inside a code block. That is NOT how tools work here. You must output a raw <tool>{"name":"...","parameters":{...}}</tool> block — no markdown, no code fences, no explanation. Output ONLY the <tool> block now.]'
+                            : isOsAnswer
+                            ? `[SYSTEM: You gave a generic OS/Windows answer. You are a coding assistant with access to the user's codebase. Search the project files instead. Use shell_read with grep/Get-ChildItem to find the relevant code NOW.${toolCallHint}]`
+                            : isAskingForContext
+                            ? `[SYSTEM: You asked the user for clarification, but you have tools to search the codebase yourself. Use shell_read with grep to search for the relevant code NOW instead of asking.${toolCallHint}]`
+                            : isGenericLongAnswer
+                            ? await (async () => {
+                                // Model answered from training data — run a grep search programmatically
+                                const stopWords = new Set(['show','me','how','the','a','an','is','are','does','do','what','where','find','all','please','works','work','working','this','that','it','in','on','of','for','to','and','or','with','by','from','at','into']);
+                                const keywords = lastMsg.split(/\W+/).filter(w => w.length > 2 && !stopWords.has(w.toLowerCase()));
+                                const query = keywords.slice(0, 3).join(' ') || lastMsg.slice(0, 40);
+                                const isWin = process.platform === 'win32';
+                                const grepCmd = isWin
+                                    ? `Get-ChildItem -Recurse -Include *.py,*.ts,*.js | Select-String "${keywords[0] ?? query}" | Select-Object -First 20`
+                                    : `grep -rn --include="*.py" --include="*.ts" --include="*.js" -l "${keywords[0] ?? query}" . 2>/dev/null | head -10`;
+                                const searchId = `t_autosearch_${Date.now()}`;
+                                post({ type: 'toolCall', id: searchId, name: 'shell_read', args: { command: grepCmd } });
+                                let searchResult = '';
+                                try {
+                                    searchResult = await this.executeTool('shell_read', { command: grepCmd }, searchId);
+                                } catch { searchResult = '(search failed)'; }
+                                post({ type: 'toolResult', id: searchId, name: 'shell_read', success: true, preview: searchResult.slice(0, 200) });
+                                const preview = searchResult.slice(0, 2000);
+                                return `[SYSTEM: You answered from general knowledge instead of searching the codebase. Here are the ACTUAL project files containing "${keywords[0] ?? query}":\n\n${preview}\n\nAnswer the user's question using ONLY the real code from these files. Use shell_read with cat/grep to read the relevant file. Do NOT generate hypothetical code.]`;
+                            })()
+                            : '[SYSTEM: You responded with text instead of calling a tool. The user wants you to take ACTION on their codebase. Use shell_read to read or search files, or edit_file to make changes. Output only a <tool> block, nothing else.]';
+                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: ${isDeflecting ? 'model asked user to provide file' : hasFencedToolCall ? 'model used fenced code block for tool call' : isAskingForContext ? 'model asked user for clarification' : isOsAnswer ? 'model gave OS answer' : isGenericLongAnswer ? 'model answered from training data' : 'model gave verbose text-only response'} on first turn (${resp.length} chars, turn ${turn})`);
                         this.history.pop();
                         this.history.push({
                             role: 'user',
-                            content: '[SYSTEM: You responded with text instead of calling a tool. The user wants you to take ACTION on their codebase. Start by reading the relevant file or searching the codebase. Call read_file, search_files, shell_read, or list_files NOW. Output only a <tool> block, nothing else.]'
+                            content: nudgeContent,
                         });
                         post({ type: 'removeLastAssistant' });
                         continue;
@@ -2018,14 +2530,17 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
             }
 
             // ── Execute tool calls ────────────────────────────────────────────
-            // In text mode, execute only the FIRST tool call.
-            // The model often dumps all planned calls in one response;
-            // executing only the first aligns with the "one tool per response" loop.
+            // In text mode, execute only the FIRST tool call per turn.
+            // Remaining calls are saved and re-injected as a reminder after the first
+            // result so the model continues in order without rediscovering its own plan.
             const callsToExecute = isTextMode && toolCalls.length > 1
                 ? [toolCalls[0]]
                 : toolCalls;
-            if (isTextMode && toolCalls.length > 1) {
-                logInfo(`[agent] Text-mode: model emitted ${toolCalls.length} tool calls, executing only the first (${toolCalls[0].function.name})`);
+            const deferredCalls = isTextMode && toolCalls.length > 1
+                ? toolCalls.slice(1)
+                : [];
+            if (deferredCalls.length > 0) {
+                logInfo(`[agent] Text-mode: model emitted ${toolCalls.length} tool calls, executing first (${toolCalls[0].function.name}), deferring ${deferredCalls.length} remaining`);
             }
             for (const tc of callsToExecute) {
                 if (this.stopRef.stop) { break; }
@@ -2062,7 +2577,11 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                 // Break if identical call repeated
                 if (this.consecutiveRepeats >= this.MAX_CONSECUTIVE_REPEATS) {
                     logWarn(`[agent] Breaking repeat loop: ${name} called ${this.consecutiveRepeats + 1} times with same args`);
-                    const hint = `You already called ${name} with the same arguments ${this.consecutiveRepeats + 1} times and got the same result. DO NOT call this tool again. Use the result you already have and respond to the user with a text answer now.`;
+                    // If the repeated command was a file-search that returned a path, guide the model to read it
+                    const isFileSearch = /Get-ChildItem|find\s|ls\s|-name\s|dir\s/i.test(String(args.command ?? ''));
+                    const hint = isFileSearch
+                        ? `You already ran this file search and got the result. DO NOT run it again. Take the file path from the result and READ the file content now: use shell_read with "cat <path>" or "Get-Content <path>".`
+                        : `You already called ${name} with the same arguments ${this.consecutiveRepeats + 1} times and got the same result. DO NOT call this tool again. Use the result you already have and respond to the user with a text answer now.`;
                     if (isTextMode) {
                         this.history.push({ role: 'user', content: `[SYSTEM: ${hint}]` });
                     } else {
@@ -2077,16 +2596,16 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                 }
 
                 // Break if same tool called too many times in a row (even with different args)
-                // Use higher limit for action tools (rename_file, run_command) which legitimately
+                // Use higher limit for action tools (run_command, edit_file) which legitimately
                 // need many consecutive calls during batch operations (e.g., reorganizing 20 files)
-                const ACTION_BATCH_TOOLS = new Set(['rename_file', 'run_command', 'shell_read', 'edit_file', 'write_file', 'create_file', 'delete_file', 'memory_tier_write']);
+                const ACTION_BATCH_TOOLS = new Set(['run_command', 'shell_read', 'edit_file', 'memory_tier_write']);
                 const sameToolLimit = ACTION_BATCH_TOOLS.has(name)
                     ? this.MAX_CONSECUTIVE_SAME_TOOL_ACTION
                     : this.MAX_CONSECUTIVE_SAME_TOOL_DEFAULT;
                 if (this.consecutiveSameToolCalls >= sameToolLimit) {
                     logWarn(`[agent] Breaking same-tool loop: ${name} called ${this.consecutiveSameToolCalls} times consecutively (limit: ${sameToolLimit})`);
-                    // Tell the model to summarize progress and continue — don't tell it to stop entirely
-                    const hint = `You have called ${name} ${this.consecutiveSameToolCalls} times in a row. Summarize what you have done so far and what remains. If there are more steps, the user will ask you to continue.`;
+                    // Tell the model to try a different approach — not just summarize and give up
+                    const hint = `You have called ${name} ${this.consecutiveSameToolCalls} times in a row. Try a different approach — use a different tool or different arguments.`;
                     if (isTextMode) {
                         this.history.push({ role: 'user', content: `[SYSTEM: ${hint}]` });
                     } else {
@@ -2098,10 +2617,67 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                     break;
                 }
 
+
+                // ── Small-model shell_read block ──────────────────────────────
+                // When context was pre-injected by preProcessEditTask(), the model
+                // already has the file content.  Prevent it from wasting turns on
+                // shell exploration by short-circuiting shell_read calls.
+                if (name === 'shell_read' && this._isSmallModel && this._editContextInjected) {
+                    const blockedResult = '[SYSTEM: File content has already been provided in the [PRE-LOADED CONTEXT] section. Do NOT search again. Use edit_file with old_string copied verbatim from that content.]';
+                    post({ type: 'toolCall', id: toolId, name, args });
+                    post({ type: 'toolResult', id: toolId, name, success: true, preview: blockedResult });
+                    if (isTextMode) {
+                        this.history.push({ role: 'user', content: `Tool ${name} returned:\n${blockedResult}` });
+                    } else {
+                        this.history.push({ role: 'tool', content: blockedResult });
+                    }
+                    logInfo(`[pre-edit] Blocked shell_read for small model — context already injected`);
+                    continue;
+                }
+
                 let toolResult: string;
                 try {
                     toolResult = await this.executeTool(name, args, toolId);
                     logInfo(`Tool ${name} OK — ${toolResult.length} chars`);
+                    // Intercept large file reads when user wants an edit: replace with focused grep
+                    // so the model never sees 16000-char file content that floods context.
+                    if (name === 'shell_read' && toolResult.length > 3000
+                        && /Get-Content|cat\s/i.test(String(args.command ?? ''))
+                        && /\b(apply|implement|update|edit|modify|fix|refactor|improve|change|add|append|write|create|replace)\b/i.test(this._currentTaskMessage)) {
+                        const interceptCmd = String(args.command ?? '');
+                        const interceptPathMatch = interceptCmd.match(/['"](.*?)['"]/);
+                        const interceptPath = interceptPathMatch?.[1] ?? '';
+                        if (interceptPath) {
+                            const envI = detectShellEnvironment();
+                            const absInterceptPath = path.isAbsolute(interceptPath)
+                                ? interceptPath
+                                : path.join(this.workspaceRoot, interceptPath.replace(/\//g, path.sep));
+                            const interceptKw = this._currentTaskMessage
+                                .toLowerCase()
+                                .match(/\b(fail|timeout|retry|auth|login|upload|download|connect|validat)\w*\b/g)
+                                ?.slice(0, 3)
+                                .join('|');
+                            const interceptPattern = interceptKw
+                                ? `except|raise|\\.error\\(|\\.critical\\(|${interceptKw}`
+                                : 'except|raise|\\.error\\(|\\.critical\\(';
+                            const focusCmd = envI.os === 'windows'
+                                ? `Get-Content "${absInterceptPath}" | Select-String -Pattern "${interceptPattern}" -Context 3,3`
+                                : `grep -n -A 3 -B 3 -E "${interceptPattern}" "${absInterceptPath}" | head -200`;
+                            logInfo(`[agent] Intercepting large Get-Content (${toolResult.length} chars) → focused grep: ${focusCmd}`);
+                            try {
+                                const focusResult = await this.runShellRead(focusCmd, this.workspaceRoot, toolId + '_focus');
+                                if (focusResult && focusResult.trim().length > 50) {
+                                    const relI = path.relative(this.workspaceRoot, absInterceptPath).replace(/\\/g, '/');
+                                    // Strip PowerShell "> " prefixes and cap at 2000 chars
+                                    const focusClean = stripSelectStringPrefixes(focusResult);
+                                    const focusTrunc = focusClean.length > 2000 ? focusClean.slice(0, 2000) + '\n...(truncated)' : focusClean;
+                                    toolResult = `[FOCUSED READ of ${relI} — exception/error blocks only]\n${focusTrunc}\n\n(Use EXACT strings from above in edit_file. If the change is ALREADY present, say so and stop.)`;
+                                    logInfo(`[agent] Focused grep returned ${focusResult.length} chars — replaced large read`);
+                                    this._focusedGrepInjectedThisTurn = true;
+                                }
+                            } catch { /* keep original if grep fails */ }
+                        }
+                    }
                     // Detect soft failures: run_command/shell_read that returned non-zero exit code
                     const isSoftFailure = (name === 'run_command' || name === 'shell_read')
                         && /exit (?:[1-9]|\-1)/.test(toolResult)
@@ -2131,24 +2707,101 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                         logInfo(`[agent] Revoked auto-approval for "${name}" after failure`);
                     }
 
-                    // When rename_file fails with ENOENT, nudge model to discover actual files
-                    if (name === 'rename_file' && toolResult.includes('ENOENT')) {
-                        const oldPath = String(args.old_path ?? '');
-                        const parentDir = oldPath.includes('/') ? oldPath.substring(0, oldPath.lastIndexOf('/')) : '.';
-                        const enoentHint = `The file "${oldPath}" does not exist. Call list_files with path="${parentDir}" to see what files actually exist, then use the correct filename. Do NOT create placeholder files.`;
-                        if (isTextMode) {
-                            this.history.push({ role: 'user', content: `Tool ${name} returned:\n${toolResult}\n---\n${enoentHint}` });
-                        } else {
-                            this.history.push({ role: 'tool', content: `${toolResult}\n\n${enoentHint}` });
+                    // (ENOENT handlers for removed file tools removed — model now uses shell commands)
+
+                    // Track edit_file failures per (path, old_string) to catch repeated identical failures.
+                    if (name === 'edit_file') {
+                        const editSig = `${String(args.path ?? '')}::${String(args.old_string ?? '').slice(0, 120)}`;
+                        const editFailCount = (this._failedEditSignatures.get(editSig) ?? 0) + 1;
+                        this._failedEditSignatures.set(editSig, editFailCount);
+                        if (editFailCount >= this.MAX_SAME_EDIT_FAILURES) {
+                            const editHint = `You have tried to edit "${args.path}" with old_string "${String(args.old_string ?? '').slice(0, 80)}..." ${editFailCount} times and it keeps failing. The old_string does NOT exist in the file as written. Either:\n1. The string is not in this file at all (wrong file — skip it and move to the next one)\n2. The exact text differs (whitespace, quotes, etc.) — use shell_read with grep -n to get the EXACT content first\nDo NOT retry the same edit_file again. Move on to the next file.`;
+                            logWarn(`[agent] edit_file same-signature failure ${editFailCount}x on "${args.path}" — breaking loop`);
+                            if (isTextMode) {
+                                this.history.push({ role: 'user', content: `Tool ${name} returned:\n${toolResult}\n---\n[SYSTEM: ${editHint}]` });
+                            } else {
+                                this.history.push({ role: 'tool', content: `${toolResult}\n\n${editHint}` });
+                            }
+                            this.consecutiveFailures = 0;
+                            break;
                         }
-                        continue;
                     }
-                    
+
+                    // On edit_file "old_string not found" failure: read the exact line range reported
+                    // in the error ("First line found at line N") and inject with line numbers so the
+                    // model can construct a precise old_string with correct indentation.
+                    // Skip if focused grep was already injected this turn (auto-read pipeline already ran).
+                    if (name === 'edit_file' && /old_string not found|matches \d+ locations/i.test(toolResult) && !this._focusedGrepInjectedThisTurn) {
+                        const failedPath = String(args.path ?? '');
+                        if (failedPath) {
+                            const envFail = detectShellEnvironment();
+                            // Resolve to absolute path for the read command
+                            const absFailPath = path.isAbsolute(failedPath)
+                                ? failedPath
+                                : path.join(this.workspaceRoot, failedPath.replace(/\//g, path.sep));
+                            // Extract the line number from the error message if available
+                            const lineNumMatch = toolResult.match(/found at line (\d+)/i);
+                            const lineNum = lineNumMatch ? parseInt(lineNumMatch[1], 10) : 0;
+                            // Read 20 lines around the reported line (or grep for exception blocks if no line)
+                            let grepFailCmd: string;
+                            if (lineNum > 0) {
+                                const startLine = Math.max(1, lineNum - 3);
+                                const endLine = startLine + 19;
+                                // Include line numbers so model sees exact indentation (leading spaces visible)
+                                grepFailCmd = envFail.os === 'windows'
+                                    ? `$lines = Get-Content "${absFailPath}"; $lines[${startLine - 1}..${endLine - 1}] | ForEach-Object -Begin {$n=${startLine}} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`
+                                    : `awk 'NR>=${startLine} && NR<=${endLine} {printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`;
+                                logInfo(`[agent] edit_file failed at line ${lineNum} — reading lines ${startLine}-${endLine}`);
+                            } else {
+                                const failKeywords = this._currentTaskMessage
+                                    .toLowerCase()
+                                    .match(/\b(fail|timeout|retry|auth|login|upload|download|connect|validat)\w*\b/g)
+                                    ?.slice(0, 3)
+                                    .join('|');
+                                const failPattern = failKeywords
+                                    ? `except|raise|\\.error\\(|\\.critical\\(|${failKeywords}`
+                                    : 'except|raise|\\.error\\(|\\.critical\\(';
+                                grepFailCmd = envFail.os === 'windows'
+                                    ? `Get-Content "${absFailPath}" | Select-String -Pattern "${failPattern}" -Context 2,2`
+                                    : `grep -n -A 2 -B 2 -E "${failPattern}" "${absFailPath}" | head -100`;
+                                logInfo(`[agent] edit_file old_string failed — running focused grep: ${grepFailCmd}`);
+                            }
+                            const failGrepId = `t_failgrep_${Date.now()}`;
+                            post({ type: 'toolCall', id: failGrepId, name: 'shell_read', args: { command: grepFailCmd } });
+                            let failGrepContent = '';
+                            try {
+                                failGrepContent = await this.runShellRead(grepFailCmd, this.workspaceRoot, failGrepId);
+                                post({ type: 'toolResult', id: failGrepId, name: 'shell_read', success: true, preview: failGrepContent.slice(0, 150) });
+                            } catch (e) {
+                                post({ type: 'toolResult', id: failGrepId, name: 'shell_read', success: false, preview: String(e) });
+                            }
+                            if (failGrepContent && failGrepContent.trim().length > 50) {
+                                const relFailPath = path.relative(this.workspaceRoot, absFailPath).replace(/\\/g, '/');
+                                const failReason = /matches \d+ locations/i.test(toolResult)
+                                    ? 'Your old_string is too short and matches multiple places — add MORE surrounding context lines to make it unique.'
+                                    : `Your old_string did NOT match — wrong indentation or whitespace. The exact lines from line ${lineNum > 0 ? lineNum - 3 : '?'} are shown below.`;
+                                // Strip PowerShell "> " prefixes if Select-String was used; plain Get-Content lines need no stripping
+                                const failGrepClean = lineNum > 0 ? failGrepContent : stripSelectStringPrefixes(failGrepContent);
+                                const lineNote = lineNum > 0
+                                    ? `Lines are shown as "NNNN: content" — the "NNNN: " prefix is NOT part of the file. Use only the content after the colon+space in old_string.`
+                                    : '';
+                                const injectMsg = `[FILE CONTENT: ${relFailPath} lines ~${lineNum > 0 ? lineNum - 3 : '?'}-${lineNum > 0 ? lineNum + 16 : '?'}]\n${failGrepClean}\n\n${lineNote} ${failReason} Copy the EXACT content (preserving all leading spaces) into old_string and retry edit_file with path="${relFailPath}". If the logging is already present, say so and stop.`;
+                                if (isTextMode) {
+                                    this.history.push({ role: 'user', content: `Tool ${name} returned:\n${toolResult}\n---\n[SYSTEM: ${injectMsg}]` });
+                                } else {
+                                    this.history.push({ role: 'tool', content: `${toolResult}\n\n${injectMsg}` });
+                                }
+                                this.consecutiveFailures = 0;
+                                continue; // Skip the normal history push below — we already added it
+                            }
+                        }
+                    }
+
                     // Break loop if too many consecutive failures — give model a hint to try differently
                     if (this.consecutiveFailures >= this.MAX_CONSECUTIVE_FAILURES) {
                         logWarn(`[agent] ${this.consecutiveFailures} consecutive tool failures — nudging model to try a different approach`);
                         const hint = name === 'edit_file'
-                            ? `You have had ${this.consecutiveFailures} consecutive edit_file failures — your old_string does not match the file content. STOP guessing. Call read_file on the file FIRST to see the EXACT current content, then retry edit_file with the correct old_string copied exactly from the file. If the file structure is very different from what you expected, use write_file instead.`
+                            ? `You have had ${this.consecutiveFailures} consecutive edit_file failures — your old_string does not match the file content. STOP guessing. Use shell_read with "grep -n 'pattern' file" or "cat -n file" to see the EXACT current content, then retry edit_file with the correct old_string copied exactly from the file.`
                             : `You have had ${this.consecutiveFailures} consecutive tool failures. Try a different approach or respond to the user explaining what went wrong.`;
                         if (isTextMode) {
                             this.history.push({ role: 'user', content: `[SYSTEM: ${hint}]` });
@@ -2162,104 +2815,282 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
 
                 // In text mode, inject the result as a user turn so the model sees it
                 if (isTextMode) {
-                    const FILE_WRITE_TOOLS = new Set(['edit_file', 'write_file', 'append_to_file', 'create_file']);
-                    const FILE_READ_TOOLS = new Set(['read_file', 'workspace_summary', 'list_files', 'search_files', 'find_files']);
-                    const ACTION_TOOLS = new Set(['run_command', 'rename_file', 'delete_file']);
                     let nudge: string;
 
-                    // Special case: if the model jumped to mkdir/move without discovering first,
-                    // and the command failed, nudge it to list_files first
-                    if (name === 'run_command' && /\b(mkdir|move|ren)\b/i.test(String(args.command ?? ''))) {
+                    if (name === 'run_command') {
                         const cmdStr = String(args.command ?? '');
-                        const isMoveCmd = /\bmove\b/i.test(cmdStr);
-                        const isMkdirCmd = /\bmkdir\b/i.test(cmdStr);
-                        const lastUserMsg = (this.lastUserMessage ?? '').toLowerCase();
+                        const isMoveCmd = /\bmv\b|\bmove\b|\bMove-Item\b/i.test(cmdStr);
+                        const isMkdirCmd = /\bmkdir\b|\bNew-Item\b/i.test(cmdStr);
+                        const lastUserMsg = this._currentTaskMessage.toLowerCase();
                         const userWantsPathUpdate = /\b(point|location|path|import|reference)\b/i.test(lastUserMsg) && /\b(edit|update|change|fix|modify)\b/i.test(lastUserMsg);
                         const hasFailed = toolResult.includes('cannot find') || toolResult.includes('not found') || toolResult.includes('Error') || toolResult.includes('syntax') || toolResult.includes('incorrect') || (toolResult.includes('exit 1') && !toolResult.includes('file(s) moved'));
-                        // If user explicitly wants to update code references, block mkdir/move entirely
                         if (userWantsPathUpdate && (isMoveCmd || isMkdirCmd)) {
-                            nudge = 'STOP — the user wants you to UPDATE CODE REFERENCES (import statements, paths in code), NOT move files. The files are already in their new locations. Use search_files or shell_read with findstr/grep to find where the OLD import paths are used, then use edit_file to update them. Do NOT use mkdir or move.';
+                            nudge = 'STOP — the user wants you to UPDATE CODE REFERENCES (import statements, paths in code), NOT move files. Use shell_read with grep/findstr to find where the OLD import paths are used, then use edit_file to update them.';
                         } else if (toolResult.includes('already exists')) {
-                            nudge = 'The directory already exists — that is fine, no need to retry. Continue with the next step (e.g., moving files into the directory).';
+                            nudge = 'The directory already exists — that is fine. Continue with the next step.';
                         } else if (hasFailed && isMoveCmd) {
-                            // Track this specific failing command
-                            const cmdSig = String(args.command ?? '').toLowerCase().trim();
+                            const cmdSig = cmdStr.toLowerCase().trim();
                             const failCount = (this._failedCommandSignatures.get(cmdSig) ?? 0) + 1;
                             this._failedCommandSignatures.set(cmdSig, failCount);
                             if (failCount >= this.MAX_SAME_COMMAND_FAILURES) {
-                                nudge = `STOP — you have tried this exact move command ${failCount} times and it keeps failing. The files do NOT exist at those paths. They were ALREADY MOVED previously. The user wants you to UPDATE IMPORT STATEMENTS and code references to point to the new file locations — NOT move files again. Use search_files or shell_read with findstr/grep to find where the OLD import paths are used in the codebase, then use edit_file to update them to the NEW paths.`;
+                                nudge = `STOP — you have tried this exact move command ${failCount} times and it keeps failing. The filenames do NOT match. Use shell_read with ls/dir to see the EXACT filenames on disk, then build a new command using those names.`;
                             } else {
-                                nudge = 'The move command FAILED — one or more source files do not exist at those paths. You MUST call list_files NOW on the source directory to see the ACTUAL filenames, then retry with the correct names. Do NOT guess filenames from a document — verify them first.';
+                                nudge = `The move command FAILED. Use shell_read with ls/dir to see the REAL filenames on disk, then retry with the exact names.`;
                             }
                         } else if (hasFailed) {
-                            nudge = 'The command failed. Before creating directories or moving files, you MUST call list_files first to see what files and directories actually exist. Call list_files NOW on the relevant directory. On Windows, use backslashes in paths (e.g., app\\routes\\admin).';
+                            nudge = `The command failed. Use shell_read to check what files/directories actually exist before retrying.`;
                         } else if (isMoveCmd) {
-                            nudge = 'Good — files moved. If there are MORE files to move, batch as many as possible into ONE run_command call (e.g., "move a.py admin\\ && move b.py admin\\ && move c.py cashier\\"). Do NOT call list_files between moves — you already know the filenames. Do NOT stop until ALL files have been moved.';
+                            nudge = 'Files moved. If there are MORE files to move, batch them in ONE run_command call. Do NOT stop until ALL files are moved.';
                         } else if (isMkdirCmd) {
-                            nudge = 'Directories created. Now move the files into them. Batch ALL moves into as few run_command calls as possible (e.g., "move a.py admin\\ && move b.py admin\\ && move c.py cashier\\"). Do NOT call list_files between moves — you already know the filenames from your earlier discovery.';
+                            nudge = 'Directories created. Now move the files into them. Batch ALL moves into as few run_command calls as possible.';
                         } else {
                             nudge = 'Command completed. Continue with the next step.';
                         }
-                    } else if (FILE_WRITE_TOOLS.has(name)) {
-                        nudge = 'If you have MORE edits to make for the user\'s request, call the next edit_file or write_file tool NOW. Do NOT show remaining changes as a code block — CALL THE TOOL. Only respond with text once ALL file changes are complete.';
-                    } else if (ACTION_TOOLS.has(name)) {
-                        // Specific nudge for successful rename_file: do NOT read the moved file
-                        if (name === 'rename_file') {
-                            nudge = 'File moved successfully. Do NOT call read_file on the moved file — it is already done. Proceed to the NEXT rename_file call immediately. Only respond with text once ALL files have been moved.';
-                        } else {
-                            nudge = 'If you have MORE actions to perform for the user\'s request (more files to move, more commands to run, more directories to create), call the next tool NOW. Do NOT show remaining commands as code blocks — CALL THE TOOL. Only respond with text once ALL actions are complete.';
-                        }
-                    } else if (FILE_READ_TOOLS.has(name) || name === 'shell_read') {
-                        // Check if the user's request implies file modifications or actions are needed
-                        const lastUserMsg = (this.lastUserMessage ?? '').toLowerCase();
-                        // FIRST: detect path-update intent — this takes priority over everything else
+                    } else if (name === 'edit_file') {
+                        nudge = 'If you have MORE edits to make, call the next edit_file NOW. Do NOT show changes as a code block — CALL THE TOOL. Only respond with text once ALL edits are complete.';
+                    } else if (name === 'shell_read') {
+                        const lastUserMsg = this._currentTaskMessage.toLowerCase();
                         const wantsPathUpdate = /\b(point|location|path|import|reference|reorganiz|moved|new folder|new director)\b/i.test(lastUserMsg)
                             && /\b(edit|update|change|fix|modify|point|adjust|rewrite)\b/i.test(lastUserMsg);
                         const wantsAction = /\b(move|rename|reorganize|restructure|migrate|run|execute|do\s+(it|them|that|those|this|the)|go\s+ahead|make\s+it|mkdir|delete|remove|copy)\b/.test(lastUserMsg)
-                            || (/\b(implement|apply)\b/.test(lastUserMsg) && /\b(organiz|restructur|folder|director|migrat|move|layout|recommend)/.test(lastUserMsg))
-                            || (/\b(do)\b/.test(lastUserMsg) && /\b(recommend|suggestion|change|reorganiz|restructur|organiz)/.test(lastUserMsg));
+                            || (/\b(implement|apply)\b/.test(lastUserMsg) && /\b(organiz|restructur|folder|director|migrat|move|layout|recommend)/.test(lastUserMsg));
                         const wantsEdit = /\b(apply|implement|rewrite|update|edit|modify|fix|refactor|improve|change|add|append|write|create|replace|overhaul|rework|redo|revise|optimize|clean\s*up)\b/.test(lastUserMsg);
-                        // Detect empty filename search results from shell_read (dir, where, find)
-                        const isEmptyFileSearch = name === 'shell_read'
-                            && /\b(dir|where|find)\b/i.test(String(args.command ?? ''))
-                            && (/File Not Found|not found|No matches|0 File/i.test(toolResult) || toolResult.trim().split('\n').every(l => /^\s*(Volume|Directory|File Not Found|$)/i.test(l.trim())));
+                        // Detect PowerShell/shell errors that mean the path doesn't exist
+                        const isShellError = /Cannot find path|does not exist|ItemNotFoundException|PathNotFound|No such file|not recognized as|is not recognized/i.test(toolResult);
+                        // Detect empty file searches: explicit "not found" messages OR PowerShell
+                        // table with only header/dashes and no actual file paths
+                        const isEmptyFileSearch = /\b(dir|where|find|Get-ChildItem|ls)\b/i.test(String(args.command ?? ''))
+                            && (/File Not Found|not found|No matches|0 File|no such file/i.test(toolResult)
+                                || toolResult.trim() === ''
+                                || isShellError
+                                || /^[\s\r\n]*(FullName|Name|Path)[\s\r\n]*-+[\s\r\n]*(searched in:|$)/im.test(toolResult));
+                        // Detect if the result is just a file path list (not file content):
+                        // Handle both bare paths and PowerShell Select-Object table format (FullName header + dashes).
+                        // Works even on truncated output — checks if ANY line looks like an absolute path.
+                        // Exclude shell error output — it contains paths but they refer to missing files.
+                        const resultLines = toolResult.trim().split('\n').map(l => l.trim()).filter(Boolean);
+                        const contentLines = resultLines.filter(l => !/^-+$/.test(l) && l !== 'FullName' && l !== 'Name' && l !== 'Path');
+                        // A line is a file path if it's an absolute path (C:\ or /) or ends with a known extension
+                        const isAbsPath = (l: string) => /^[A-Za-z]:[\\\/]/.test(l) || l.startsWith('/');
+                        const isFilePath = (l: string) => /\.(py|ts|js|json|yaml|yml|md|txt|sh|toml|cfg|ini|html|css|sql|go|rs|java|rb|php|c|cpp|h|pyc)$/i.test(l) || isAbsPath(l);
+                        // Fire if at least one content line is a path (truncated output may only show 1)
+                        // Do NOT fire on shell errors — the path in the error is the wrong/missing one.
+                        // Raise the length limit to 4000 to handle multi-file search results.
+                        const isFilePathList = !isShellError && contentLines.length > 0 && toolResult.length < 4000
+                            && contentLines.some(isFilePath)
+                            && contentLines.every(l => isFilePath(l) || /^searched in:/i.test(l));
                         if (wantsPathUpdate) {
-                            // Path-update intent detected — redirect to the correct workflow
-                            // The workflow depends on which tool just ran:
-                            // - After search_files: we have the list of affected files, now read_file the first one
-                            // - After read_file: we have the file content, now edit_file to update the import
-                            // - After other tools: redirect to search_files first
-                            if (name === 'search_files') {
-                                // We have search results — pick the first affected file and READ it
-                                nudge = 'Good — you found files with old import paths. Now pick the FIRST file from the search results and call read_file on it to see the EXACT current content. Do NOT call edit_file yet — you must read_file FIRST to get the exact old_string. After reading, you will call edit_file with the precise import line.';
-                            } else if (name === 'read_file') {
-                                // We have file content — now edit it
-                                nudge = 'You have now read the file. Find the import statement that needs updating (e.g., "from app.routes.admin import ...") and call edit_file with the EXACT old_string from the file content above. Replace it with the new import path. Do NOT guess — copy the exact line from the file.';
-                            } else {
-                                // Other tools (workspace_summary, list_files, etc.) — redirect to search_files
-                                nudge = 'STOP reading more files. The user wants you to UPDATE IMPORT PATHS. Your NEXT STEP must be: use search_files to find where the OLD import paths are referenced (e.g., search for "from app.routes.admin"). Do NOT call workspace_summary, list_files, or read more docs. Do NOT move files — they are already in their new locations.';
-                            }
+                            nudge = 'STOP reading more files. The user wants you to UPDATE IMPORT PATHS. Use shell_read with grep to find OLD import paths, then edit_file to update them. Do NOT move files.';
                         } else if (wantsAction) {
-                            nudge = 'You have the information you need. The user wants you to PERFORM ACTIONS (move files, run commands, create directories, etc.). Call run_command, rename_file, or the appropriate tool NOW. Do NOT show commands as code blocks — ACTUALLY CALL THE TOOL.';
+                            nudge = 'You have the information. The user wants you to PERFORM ACTIONS. Use run_command with the EXACT filenames you found above. Do NOT show commands as code blocks — CALL run_command NOW.';
+                        } else if (wantsEdit && isFilePathList) {
+                            // Model found the file path but hasn't read the content yet.
+                            // Programmatically read the most relevant file and inject content so
+                            // the model doesn't loop trying to re-search.
+                            // Pick the most relevant path: prefer .py service files, skip __pycache__
+                            const relevantPath = contentLines
+                                .filter(l => !/__pycache__|\.pyc$|htmlcov/.test(l))
+                                .find(l => /service/i.test(l) && /\.py$/i.test(l))
+                                ?? contentLines.filter(l => !/__pycache__|\.pyc$|htmlcov/.test(l)).find(l => /\.py$/i.test(l))
+                                ?? contentLines.filter(l => !/__pycache__|\.pyc$|htmlcov/.test(l))[0]
+                                ?? contentLines[0];
+                            // Skip auto-read if we already injected content for this file this run
+                            if (this._filesAutoReadThisRun.has(relevantPath)) {
+                                nudge = `You already have the file content above. Use edit_file with EXACT strings from the [AUTO-READ] section. Do NOT search again.`;
+                                // skip the grep/read block below by jumping to the else
+                            } else {
+                            const env2 = detectShellEnvironment();
+                            // Keep backslashes as-is for Windows paths; convert forward slashes for Unix
+                            const pathForCmd = env2.os === 'windows' ? relevantPath.replace(/\//g, '\\') : relevantPath;
+                            // Build a focused grep/Select-String command to extract only relevant sections
+                            // (exception/error handling + user-task keywords) with surrounding context lines.
+                            // This prevents the full file (potentially thousands of lines) from flooding context.
+                            // Only use specific, low-frequency task keywords (skip noisy terms like 'log', 'ocr', 'process').
+                            const autoKeywords = lastUserMsg
+                                .toLowerCase()
+                                .match(/\b(fail|timeout|retry|auth|login|upload|download|connect|validat)\w*\b/g)
+                                ?.slice(0, 3)
+                                .join('|');
+                            // Always anchor on exception/error handling constructs; add user keywords if specific enough
+                            const grepPattern = autoKeywords
+                                ? `except|raise|\\.error\\(|\\.critical\\(|${autoKeywords}`
+                                : 'except|raise|\\.error\\(|\\.critical\\(';
+                            const grepCmd = env2.os === 'windows'
+                                ? `Get-Content "${pathForCmd}" | Select-String -Pattern "${grepPattern}" -Context 3,3`
+                                : `grep -n -A 3 -B 3 -E "${grepPattern}" "${pathForCmd}" | head -200`;
+                            const catCmd = env2.os === 'windows'
+                                ? `Get-Content "${pathForCmd}"`
+                                : `cat "${pathForCmd}"`;
+                            logInfo(`[agent] Auto-reading file (focused grep) after path search: ${grepCmd}`);
+                            const autoReadId = `t_autoread_${Date.now()}`;
+                            post({ type: 'toolCall', id: autoReadId, name: 'shell_read', args: { command: grepCmd } });
+                            let fileContent = '';
+                            let usedFullRead = false;
+                            try {
+                                fileContent = await this.runShellRead(grepCmd, this.workspaceRoot, autoReadId);
+                                // If grep returned almost nothing, fall back to full file read
+                                if (fileContent.trim().length < 100) {
+                                    logInfo(`[agent] Focused grep returned little (${fileContent.length} chars), falling back to full read`);
+                                    post({ type: 'toolResult', id: autoReadId, name: 'shell_read', success: false, preview: 'grep returned little, falling back' });
+                                    const autoReadId2 = `t_autoread2_${Date.now()}`;
+                                    post({ type: 'toolCall', id: autoReadId2, name: 'shell_read', args: { command: catCmd } });
+                                    try {
+                                        fileContent = await this.runShellRead(catCmd, this.workspaceRoot, autoReadId2);
+                                        post({ type: 'toolResult', id: autoReadId2, name: 'shell_read', success: true, preview: fileContent.slice(0, 150) });
+                                        usedFullRead = true;
+                                    } catch (e2) {
+                                        post({ type: 'toolResult', id: autoReadId2, name: 'shell_read', success: false, preview: String(e2) });
+                                    }
+                                } else {
+                                    post({ type: 'toolResult', id: autoReadId, name: 'shell_read', success: true, preview: fileContent.slice(0, 150) });
+                                }
+                            } catch (e) {
+                                post({ type: 'toolResult', id: autoReadId, name: 'shell_read', success: false, preview: String(e) });
+                            }
+                            if (fileContent && fileContent.length > 100) {
+                                const relPath = path.relative(this.workspaceRoot, relevantPath.replace(/\//g, path.sep)).replace(/\\/g, '/');
+                                const readNote = usedFullRead
+                                    ? 'The FULL file content is shown above.'
+                                    : 'Relevant sections of the file are shown above (lines matching the task keywords + context).';
+                                // Strip PowerShell "> " prefixes and cap at 2000 chars
+                                const fileContentClean = usedFullRead ? fileContent : stripSelectStringPrefixes(fileContent);
+                                const fileContentTrunc = fileContentClean.length > 2000 ? fileContentClean.slice(0, 2000) + '\n...(truncated)' : fileContentClean;
+                                nudge = `[AUTO-READ: ${relPath}]\n${fileContentTrunc}\n\n${readNote} Now apply the user's requested change using edit_file with path="${relPath}" and EXACT strings copied from the content above. Do NOT use absolute paths. Do NOT search again. If the change is ALREADY present in the file, say so and stop.`;
+                                this._focusedGrepInjectedThisTurn = true;
+                                this._filesAutoReadThisRun.add(relevantPath);
+                            } else {
+                                nudge = `You found the file path. Now READ the file content before editing. Call shell_read with: ${catCmd}`;
+                            }
+                            } // close the else-block for "not already auto-read"
+                        } else if (wantsEdit && /Get-Content|cat\s/i.test(String(args.command ?? '')) && toolResult.length < 300 && !/def |class |import |#/.test(toolResult)) {
+                            // Get-Content returned too little to be real source code — wrong path.
+                            // Search recursively using the filename from the command.
+                            const cmdStr = String(args.command ?? '');
+                            const fileNameMatch = cmdStr.match(/['\"]([^'"]*?([^'/\\]+\.py))['"]/i);
+                            const fileName = fileNameMatch?.[2] ?? '';
+                            const wsRoot2 = this.workspaceRoot.replace(/\\/g, '/');
+                            const env2 = detectShellEnvironment();
+                            const searchCmd = fileName
+                                ? (env2.os === 'windows'
+                                    ? `Get-ChildItem -Path '${wsRoot2}' -Recurse -Filter '${fileName}' | Where-Object { $_.FullName -notmatch '__pycache__|htmlcov' } | Select-Object FullName`
+                                    : `find '${wsRoot2}' -name '${fileName}' -not -path '*__pycache__*' -not -path '*htmlcov*'`)
+                                : '';
+                            if (searchCmd) {
+                                const autoSearchId = `t_autosearch_${Date.now()}`;
+                                post({ type: 'toolCall', id: autoSearchId, name: 'shell_read', args: { command: searchCmd } });
+                                let searchResult = '';
+                                try {
+                                    searchResult = await this.runShellRead(searchCmd, this.workspaceRoot, autoSearchId);
+                                    post({ type: 'toolResult', id: autoSearchId, name: 'shell_read', success: true, preview: searchResult.slice(0, 200) });
+                                } catch (e) {
+                                    post({ type: 'toolResult', id: autoSearchId, name: 'shell_read', success: false, preview: String(e) });
+                                }
+                                // Extract the best path from the search result and auto-read it
+                                const pathLines = searchResult.split('\n').map(l => l.trim()).filter(l => /\.py$/i.test(l) && isAbsPath(l));
+                                const bestPath = pathLines.find(l => /service/i.test(l)) ?? pathLines[0];
+                                if (bestPath) {
+                                    const readCmd = env2.os === 'windows' ? `Get-Content "${bestPath.replace(/\//g, '\\')}"` : `cat "${bestPath}"`;
+                                    const autoReadId2 = `t_autoread2_${Date.now()}`;
+                                    post({ type: 'toolCall', id: autoReadId2, name: 'shell_read', args: { command: readCmd } });
+                                    let fileContent2 = '';
+                                    try {
+                                        fileContent2 = await this.runShellRead(readCmd, this.workspaceRoot, autoReadId2);
+                                        post({ type: 'toolResult', id: autoReadId2, name: 'shell_read', success: true, preview: fileContent2.slice(0, 150) });
+                                    } catch (e) {
+                                        post({ type: 'toolResult', id: autoReadId2, name: 'shell_read', success: false, preview: String(e) });
+                                    }
+                                    if (fileContent2 && fileContent2.length > 200) {
+                                        const relPath2 = path.relative(this.workspaceRoot, bestPath.replace(/\//g, path.sep)).replace(/\\/g, '/');
+                                        nudge = `[AUTO-READ: ${relPath2}]\n${fileContent2}\n\nThis is the REAL file. Now apply the user's requested change using edit_file with path="${relPath2}" and EXACT strings from the content above. Do NOT use absolute paths.`;
+                                    } else {
+                                        nudge = `The path "${bestPath}" was found but returned empty. The file at "${String(args.command ?? '').match(/['"][^'"]*['"]/)?.[0] ?? 'the path you tried'}" does not exist. Use the path from the search result: ${searchResult.slice(0, 200)}`;
+                                    }
+                                } else {
+                                    nudge = `The file at the path you tried does not exist. Search result: ${searchResult.slice(0, 300)}. Use the EXACT full path from the search results above.`;
+                                }
+                            } else {
+                                nudge = `The file you tried to read returned almost no content (${toolResult.length} chars) — it may be at the wrong path. Use shell_read with Get-ChildItem -Recurse -Filter to find the correct absolute path first.`;
+                            }
+                        } else if (wantsEdit && /Get-Content|cat\s/i.test(String(args.command ?? '')) && toolResult.length > 2000) {
+                            // Model read a large file — extract focused section to help it find the right old_string.
+                            const cmdStr2 = String(args.command ?? '');
+                            const pathMatch2 = cmdStr2.match(/['"](.*?)['"]/);
+                            const largePath = pathMatch2?.[1] ?? '';
+                            const env3 = detectShellEnvironment();
+                            if (largePath) {
+                                const autoKeywords2 = lastUserMsg
+                                    .toLowerCase()
+                                    .match(/\b(fail|timeout|retry|auth|login|upload|download|connect|validat)\w*\b/g)
+                                    ?.slice(0, 3)
+                                    .join('|');
+                                const grepPattern2 = autoKeywords2
+                                    ? `except|raise|\\.error\\(|\\.critical\\(|${autoKeywords2}`
+                                    : 'except|raise|\\.error\\(|\\.critical\\(';
+                                const focusedCmd = env3.os === 'windows'
+                                    ? `Get-Content "${largePath}" | Select-String -Pattern "${grepPattern2}" -Context 3,3`
+                                    : `grep -n -A 3 -B 3 -E "${grepPattern2}" "${largePath}" | head -200`;
+                                logInfo(`[agent] Large file read, running focused grep: ${focusedCmd}`);
+                                const focusId = `t_focus_${Date.now()}`;
+                                post({ type: 'toolCall', id: focusId, name: 'shell_read', args: { command: focusedCmd } });
+                                let focusedContent = '';
+                                try {
+                                    focusedContent = await this.runShellRead(focusedCmd, this.workspaceRoot, focusId);
+                                    post({ type: 'toolResult', id: focusId, name: 'shell_read', success: true, preview: focusedContent.slice(0, 150) });
+                                } catch (e) {
+                                    post({ type: 'toolResult', id: focusId, name: 'shell_read', success: false, preview: String(e) });
+                                }
+                                if (focusedContent && focusedContent.trim().length > 80) {
+                                    const relPath3 = path.relative(this.workspaceRoot, largePath.replace(/\//g, path.sep)).replace(/\\/g, '/');
+                                    nudge = `[FOCUSED-READ: ${relPath3}]\n${focusedContent}\n\nThese are the relevant lines (exception/error handling with context). Now call edit_file with path="${relPath3}" and EXACT strings from the lines above. Do NOT search again.`;
+                                } else {
+                                    nudge = 'You have the file content. The user wants you to MODIFY it. Use the EXACT strings from the output above as old_string in edit_file. Call edit_file NOW — do NOT show changes as a code block.';
+                                }
+                            } else {
+                                nudge = 'You have the file content. The user wants you to MODIFY it. Use the EXACT strings from the output above as old_string in edit_file. Call edit_file NOW — do NOT show changes as a code block.';
+                            }
                         } else if (wantsEdit) {
-                            nudge = 'You have now read the file. The user wants you to MODIFY it. Call write_file or edit_file NOW with the updated content. Do NOT show the changes as a code block — ACTUALLY CALL THE TOOL.';
+                            nudge = 'You have the file content. The user wants you to MODIFY it. Use the EXACT strings from the output above as old_string in edit_file. Call edit_file NOW — do NOT show changes as a code block.';
                         } else if (isEmptyFileSearch) {
-                            const env = detectShellEnvironment();
-                            const searchHint = env.os === 'windows'
-                                ? 'findstr /S /N /I "keyword" *.py *.html *.js *.ts *.json'
-                                : 'grep -rn "keyword" --include="*.py" --include="*.html" .';
-                            nudge = `The filename search returned no results. The code you are looking for is probably INSIDE files, not in the filename. Try searching FILE CONTENTS instead using shell_read with: ${searchHint} — replace "keyword" with the most distinctive word from the user\'s query. You can also try search_files or find_files with a simpler/shorter pattern.`;
+                            const env2 = detectShellEnvironment();
+                            const wsRoot = this.workspaceRoot;
+                            // Extract filename from the failed command to build a recursive search hint
+                            const failedCmd = String(args.command ?? '');
+                            const failedFilenameMatch = failedCmd.match(/['"\/\\]([^'"\/\\]+\.[a-z]{2,4})['"]/i);
+                            const failedFilename = failedFilenameMatch?.[1] ?? '';
+                            const recursiveHint = env2.os === 'windows'
+                                ? `Get-ChildItem -Path "${wsRoot}" -Recurse -Filter "${failedFilename || '*.py'}" | Select-Object FullName`
+                                : `find "${wsRoot}" -name "${failedFilename || '*.py'}" 2>/dev/null`;
+                            nudge = `The path you tried does not exist. The file is not at that location. Search RECURSIVELY to find the correct path:\nshell_read with: ${recursiveHint}\nWorkspace root: "${wsRoot}"`;
+
+                        } else if (/\b(find|where|all|every|places?|used?|locate|show)\b/i.test(this.lastUserMessage ?? '')) {
+                            nudge = 'You have the search results. The user asked to FIND something — these results ARE the answer. Summarize what you found. Do NOT read individual files. Answer the user NOW.';
                         } else {
-                            nudge = 'The user can already see the tool output above. Do NOT repeat or reformat the raw output. Summarize the result and answer the user\'s question. If the result is INCOMPLETE (e.g., you found JS dependencies but the project is Python, or you only checked one config file), call the appropriate tool to check additional sources. Otherwise, do NOT call more tools.';
+                            nudge = 'The user can see the tool output above. Summarize the result and answer the question. If you need more detail, use shell_read with cat/grep to get specific lines. Do NOT call more tools unless necessary.';
+                        }
+                    } else if (name === 'workspace_summary') {
+                        const stopWords = new Set(['show','me','how','the','a','an','is','are','does','do','what','where','find','explain','describe','works','work','working','this','that','it','in','on','of','for','to','and','or','with','by','from','at','into']);
+                        const kws = (this.lastUserMessage ?? '').toLowerCase().split(/\W+/).filter(w => w.length > 2 && !stopWords.has(w));
+                        const searchTerm = kws.slice(0, 3).join(' ') || (this.lastUserMessage ?? '').slice(0, 40);
+                        if (/\b(explain|show|how|where|what|describe)\b/i.test(this.lastUserMessage ?? '')) {
+                            nudge = `Good — you have the project overview. Now use shell_read with grep to find "${searchTerm}" in the codebase, then cat the relevant file and answer from the actual code.`;
+                        } else {
+                            nudge = 'You have the project structure. Now call the appropriate tool to complete the user\'s request.';
                         }
                     } else if ((name === 'memory_list' || name === 'memory_tier_list' || name === 'memory_stats') && /\b(explain|describe|what does|what is|overview|understand|about this project|how does|walk me through|summarize|summary)\b/i.test(this.lastUserMessage ?? '')) {
-                        nudge = 'Memory alone does NOT answer the user\'s question — they want to understand the actual codebase. Call workspace_summary NOW to see the project structure, then read_file on key files (package.json, README.md, etc.) to give a real answer. Do NOT answer based only on memory notes.';
+                        nudge = 'Memory alone does NOT answer the user\'s question — they want to understand the actual codebase. Call workspace_summary NOW to see the project structure, then use shell_read to read key files. Do NOT answer based only on memory notes.';
                     } else {
                         nudge = 'If this result answers the user\'s question, respond to the user NOW with the information. Do NOT call more tools unless absolutely necessary.';
                     }
+                    // If the model emitted multiple tool calls, remind it of the remaining ones
+                    // so it continues in order rather than rediscovering its own plan
+                    let deferredReminder = '';
+                    if (deferredCalls.length > 0) {
+                        const deferredNames = deferredCalls.map(dc => dc.function.name).join(', ');
+                        deferredReminder = `\n\nYou still have ${deferredCalls.length} more tool call(s) to execute in order: ${deferredNames}. Call the NEXT one now.`;
+                    }
                     this.history.push({
                         role: 'user',
-                        content: `Tool ${name} returned:\n${toolResult}\n---\n${nudge}`,
+                        content: `Tool ${name} returned:\n${toolResult}\n---\n${nudge}${deferredReminder}`,
                     });
                 } else {
                     this.history.push({ role: 'tool', content: toolResult });
@@ -2303,201 +3134,26 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                 return `${summary}\n\nHost environment: ${env.label} (shell: ${env.shell}, os: ${env.os})`;
             }
 
-            // ── read_file ──────────────────────────────────────────────────
-            case 'read_file': {
-                const rel = String(args.path ?? '');
-                if (!rel) { throw new Error('path is required'); }
-                const full = this.safePath(root, rel);
-                const content = fs.readFileSync(full, 'utf8');
-                const lineCount = content.split('\n').length;
-                return `File: ${rel} (${lineCount} lines)\n${'─'.repeat(50)}\n${content}`;
-            }
-
-            // ── list_files ─────────────────────────────────────────────────
-            case 'list_files': {
-                const rel = String(args.path ?? '.');
-                const dir = this.safePath(root, rel);
-                const entries = fs.readdirSync(dir, { withFileTypes: true });
-                const lines = entries
-                    .filter((e) => !SKIP_DIRS.has(e.name))
-                    .sort((a, b) => {
-                        if (a.isDirectory() !== b.isDirectory()) { return a.isDirectory() ? -1 : 1; }
-                        return a.name.localeCompare(b.name);
-                    })
-                    .map((e) => `${e.isDirectory() ? '📁' : '📄'} ${e.name}`)
-                    .join('\n');
-                return `${rel}:\n${lines || '(empty)'}`;
-            }
-
-            // ── search_files ───────────────────────────────────────────────
-            case 'search_files': {
-                const query = String(args.query ?? '');
-                if (!query) { throw new Error('query is required'); }
-                const searchDir = args.path ? this.safePath(root, String(args.path)) : root;
-                logInfo(`[search_files] Searching for "${query}" in: ${searchDir}`);
-                
-                // Use native OS tools for efficient searching
-                const isWindows = process.platform === 'win32';
-                const MAX_RESULTS = 100;
-                
-                // Binary/generated file extensions to exclude from search results
-                const BINARY_EXTENSIONS = new Set([
-                    '.pyc', '.pyo', '.pyd', '.class', '.jar', '.war', '.ear',
-                    '.dll', '.exe', '.obj', '.o', '.so', '.dylib', '.a', '.lib',
-                    '.wasm', '.node',
-                    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.svg', '.webp', '.tiff',
-                    '.woff', '.woff2', '.ttf', '.eot', '.otf',
-                    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
-                    '.zip', '.gz', '.tar', '.bz2', '.7z', '.rar', '.xz',
-                    '.db', '.sqlite', '.sqlite3', '.mdb',
-                    '.mp3', '.mp4', '.avi', '.mov', '.wav', '.flac', '.ogg',
-                    '.bin', '.dat', '.pak', '.cache', '.log',
-                    '.min.js', '.min.css', '.map',
-                ]);
-                
-                return new Promise<string>((resolve) => {
-                    let searchCommand: string;
-                    let searchArgs: string[];
-                    
-                    // Directories to exclude from search results
-                    const SKIP_SEARCH_DIRS = new Set([
-                        'node_modules', '.git', '.vscode-test', '__pycache__',
-                        'dist', 'coverage', '.nyc_output', '.next', '.nuxt',
-                        'build', 'out', '.tox', '.mypy_cache', '.pytest_cache',
-                        'venv', '.venv', 'env', '.env', 'htmlcov', 'vendor',
-                        '.svn', '.hg', 'bower_components', '.cache', 'archive',
-                        'logs', 'tests', 'test', '.eggs', 'migrations',
-                    ]);
-
-                    if (isWindows) {
-                        // Windows: use findstr with recursive search
-                        // /S = recursive, /N = line numbers, /I = case insensitive
-                        searchCommand = 'findstr';
-                        searchArgs = ['/S', '/N', '/I', query, '*.*'];
-                    } else {
-                        // Unix/Linux/macOS: use grep with --exclude-dir
-                        // -r = recursive, -n = line numbers, -i = case insensitive, -I = skip binary files
-                        searchCommand = 'grep';
-                        const excludeDirs = [...SKIP_SEARCH_DIRS].map(d => `--exclude-dir=${d}`);
-                        searchArgs = ['-r', '-n', '-i', '-I', ...excludeDirs, '--', query, '.'];
-                    }
-                    
-                    const child = spawn(searchCommand, searchArgs, {
-                        cwd: searchDir,
-                        shell: false,
-                        env: { ...process.env }
-                    });
-                    this.trackChild(child);
-                    
-                    let output = '';
-                    let lineCount = 0;
-                    const results: string[] = [];
-                    
-                    child.stdout?.on('data', (data: Buffer) => {
-                        output += data.toString();
-                    });
-                    
-                    child.stderr?.on('data', (data: Buffer) => {
-                        // Log stderr but don't fail (grep returns 1 if no matches)
-                        const err = data.toString();
-                        if (err.trim()) {
-                            logInfo(`[search_files] stderr: ${err.trim()}`);
-                        }
-                    });
-                    
-                    child.on('close', (code) => {
-                        // grep/findstr exit codes:
-                        // 0 = matches found
-                        // 1 = no matches (not an error)
-                        // 2+ = actual error
-                        
-                        if (code !== null && code > 1) {
-                            logError(`[search_files] Command failed with code ${code}`);
-                            resolve(`Search failed. Make sure ${searchCommand} is available on your system.`);
-                            return;
-                        }
-                        
-                        if (!output.trim()) {
-                            resolve(`No matches found for "${query}"`);
-                            return;
-                        }
-                        
-                        // Parse output and format results
-                        const lines = output.split('\n');
-                        for (const line of lines) {
-                            if (!line.trim() || lineCount >= MAX_RESULTS) break;
-                            
-                            // Format: filepath:linenum:content (grep)
-                            // Format: filepath:linenum:content (findstr)
-                            const match = line.match(/^(?:[A-Za-z]:)?([^:]+):(\d+):(.*)$/);
-                            if (match) {
-                                const [, filepath, linenum, content] = match;
-                                // Make path relative to workspace root
-                                // On Windows, findstr returns paths relative to cwd already
-                                let relPath: string;
-                                const fullFilepath = line.slice(0, line.length - content.length - linenum.length - 2);
-                                if (path.isAbsolute(fullFilepath)) {
-                                    relPath = path.relative(root, fullFilepath);
-                                } else if (searchDir === root) {
-                                    relPath = filepath;
-                                } else {
-                                    relPath = path.relative(root, path.join(searchDir, filepath));
-                                }
-                                
-                                // Skip binary/generated files (especially important on Windows where findstr doesn't skip them)
-                                const ext = path.extname(relPath).toLowerCase();
-                                if (BINARY_EXTENSIONS.has(ext)) { continue; }
-                                // Skip excluded directories (critical on Windows where findstr has no --exclude-dir)
-                                const pathParts = relPath.split(/[\\/]/);
-                                if (pathParts.some(part => SKIP_SEARCH_DIRS.has(part))) { continue; }
-                                
-                                results.push(`${relPath}:${linenum}: ${content.trim()}`);
-                                lineCount++;
-                            }
-                        }
-                        
-                        if (results.length === 0) {
-                            resolve(`No matches found for "${query}"`);
-                        } else {
-                            const truncated = lineCount >= MAX_RESULTS ? ` (showing first ${MAX_RESULTS})` : '';
-                            resolve(`Results for "${query}" (${results.length})${truncated}:\n${results.join('\n')}`);
-                        }
-                    });
-                    
-                    child.on('error', (err) => {
-                        logError(`[search_files] Failed to spawn ${searchCommand}: ${err.message}`);
-                        resolve(`Search failed: ${searchCommand} not available. Error: ${err.message}`);
-                    });
-                    
-                    // Timeout after 30 seconds
-                    setTimeout(() => {
-                        child.kill();
-                        resolve(`Search timed out after 30 seconds. Try narrowing the search path.`);
-                    }, 30000);
-                });
-            }
-
-            // ── create_file ────────────────────────────────────────────────
-            case 'create_file': {
-                const rel     = String(args.path ?? '');
-                const content = String(args.content ?? '');
-                if (!rel) { throw new Error('path is required'); }
-                const full = this.safePath(root, rel);
-                if (fs.existsSync(full)) {
-                    throw new Error(`File already exists: ${rel}. Use write_file to overwrite or edit_file to modify.`);
-                }
-                // Block placeholder/dummy file creation — model should find and move real files
-                const isPlaceholder = /^#\s*(placeholder|empty|stub|todo)/im.test(content.trim())
-                    || (content.trim().split('\n').length <= 3 && /def\s+\w+\(\):\s*pass/m.test(content));
-                if (isPlaceholder) {
-                    throw new Error(`Blocked: "${rel}" looks like a placeholder file. Do NOT create dummy files. Use list_files to find the real source files and rename_file to move them.`);
-                }
-                fs.mkdirSync(path.dirname(full), { recursive: true });
-                fs.writeFileSync(full, content, 'utf8');
-                this._lastFileOp = { path: rel, originalContent: null, action: 'created' };
-                this.postFn({ type: 'fileChanged', path: rel, action: 'created' });
-                clearWorkspaceSummaryCache();
-                return `Created: ${rel} (${content.split('\n').length} lines)`;
+            // ── search_files (legacy — redirects to shell_read hint) ──────
+            case 'search_files':
+            case 'read_file':
+            case 'list_files':
+            case 'find_files':
+            case 'create_file':
+            case 'write_file':
+            case 'append_to_file':
+            case 'rename_file':
+            case 'delete_file': {
+                // These tools have been removed. Use shell_read/run_command instead.
+                const env2 = detectShellEnvironment();
+                const isWin2 = env2.os === 'windows';
+                return `The tool "${name}" is no longer available. Use shell commands instead:\n` +
+                    `- Read a file: shell_read with ${isWin2 ? 'Get-Content path/to/file' : 'cat path/to/file'}\n` +
+                    `- Find files: shell_read with ${isWin2 ? 'Get-ChildItem -Recurse -Filter "*name*"' : 'find . -name "*name*"'}\n` +
+                    `- Search content: shell_read with ${isWin2 ? 'Select-String -Path "*.py" -Pattern "keyword"' : 'grep -rn "keyword" --include="*.py" .'}\n` +
+                    `- Create/overwrite file: run_command with ${isWin2 ? 'Set-Content' : 'cat > file << EOF'}\n` +
+                    `- Move/rename: run_command with ${isWin2 ? 'Move-Item old new' : 'mv old new'}\n` +
+                    `- Delete: run_command with ${isWin2 ? 'Remove-Item path' : 'rm path'}`;
             }
 
             // ── edit_file ──────────────────────────────────────────────────
@@ -2513,15 +3169,66 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                 const original = fs.readFileSync(full, 'utf8');
 
                 if (!original.includes(oldString)) {
-                    // Provide helpful context so the model can self-correct
-                    const firstLineOld = oldString.split('\n')[0].trim();
-                    const nearLine = original.split('\n').findIndex(
-                        (l) => l.trim() === firstLineOld
+                    // ── Fuzzy indentation recovery ─────────────────────────────
+                    // Small models (7B) often drop leading spaces from the first line
+                    // of multi-line old_string values. Try to auto-correct by detecting
+                    // the indentation of the first line in the file and re-indenting
+                    // every line in old_string by the same delta.
+                    const oldLines = oldString.split('\n');
+                    const firstLineOldTrimmed = oldLines[0].trim();
+                    const fileLines = original.split('\n');
+                    const nearLineIdx = fileLines.findIndex(
+                        (l) => l.trim() === firstLineOldTrimmed
                     );
-                    const hint = nearLine >= 0
-                        ? ` First line found at line ${nearLine + 1}, but the full block didn't match — check indentation.`
-                        : ' The first line of old_string was not found in the file.';
-                    throw new Error(`edit_file: old_string not found in ${rel}.${hint} Re-read the file and try again.`);
+                    if (nearLineIdx >= 0) {
+                        const fileIndent = fileLines[nearLineIdx].match(/^(\s*)/)?.[1] ?? '';
+                        const modelIndent = oldLines[0].match(/^(\s*)/)?.[1] ?? '';
+                        if (fileIndent !== modelIndent) {
+                            // Re-indent every old_string line by (fileIndent - modelIndent) delta
+                            const delta = fileIndent.length - modelIndent.length;
+                            const reindented = oldLines.map((line, i) => {
+                                if (i === 0) { return fileIndent + line.trimStart(); }
+                                // For subsequent lines, shift by same delta, clamping at 0
+                                const lineIndent = line.match(/^(\s*)/)?.[1] ?? '';
+                                const newIndentLen = Math.max(0, lineIndent.length + delta);
+                                return ' '.repeat(newIndentLen) + line.trimStart();
+                            }).join('\n');
+                            if (original.includes(reindented)) {
+                                // Auto-corrected — apply silently
+                                const newContent2 = original.replace(reindented, newString.split('\n').map((line, i) => {
+                                    if (i === 0) { return fileIndent + line.trimStart(); }
+                                    const lineIndent = line.match(/^(\s*)/)?.[1] ?? '';
+                                    const newIndentLen = Math.max(0, lineIndent.length + delta);
+                                    return ' '.repeat(newIndentLen) + line.trimStart();
+                                }).join('\n'));
+                                const occurrences2 = (original.split(reindented).length - 1);
+                                if (occurrences2 === 1) {
+                                    // Apply the auto-corrected edit
+                                    const isAutoApproved2 = this._autoApprovedTools.has('edit_file');
+                                    if (!isAutoApproved2) {
+                                        await this.diffViewManager.showDiffPreview(full, original, newContent2);
+                                    }
+                                    const accepted2 = await this.requestConfirmation('edit', `Edit "${rel}" — ${oldLines.length} line(s) changed (auto-corrected indentation)`, 'edit_file');
+                                    if (!isAutoApproved2) {
+                                        this.diffViewManager.closeDiffPreview();
+                                    }
+                                    if (!accepted2) { return 'Edit cancelled by user.'; }
+                                    fs.writeFileSync(full, newContent2, 'utf8');
+                                    this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
+                                    this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
+                                    const editResult2 = `Edited: ${rel} — ${oldLines.length} line(s) replaced (indentation auto-corrected)`;
+                                    const editDiags2 = this.getDiagnostics(root, rel);
+                                    if (editDiags2 !== 'No errors or warnings found.') {
+                                        return `${editResult2}\n\nDiagnostics after edit:\n${editDiags2}`;
+                                    }
+                                    return editResult2;
+                                }
+                            }
+                        }
+                        const hint = ` First line found at line ${nearLineIdx + 1}, but the full block didn't match — check indentation.`;
+                        throw new Error(`edit_file: old_string not found in ${rel}.${hint} Re-read the file and try again.`);
+                    }
+                    throw new Error(`edit_file: old_string not found in ${rel}. The first line of old_string was not found in the file. Re-read the file and try again.`);
                 }
 
                 // Ensure the match is unique to avoid unintended replacements
@@ -2535,10 +3242,17 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
 
                 const newContent = original.replace(oldString, newString);
 
-                // Open diff view for review, then ask for confirmation in chat
-                await this.diffViewManager.showDiffPreview(full, original, newContent);
+                // Open diff view for review, then ask for confirmation in chat.
+                // Skip the diff preview when auto-approved (e.g., "Accept All") — no point
+                // flashing it open and immediately closed for every edit in a batch.
+                const isAutoApproved = this._autoApprovedTools.has('edit_file');
+                if (!isAutoApproved) {
+                    await this.diffViewManager.showDiffPreview(full, original, newContent);
+                }
                 const accepted = await this.requestConfirmation('edit', `Edit "${rel}" — ${oldString.split('\n').length} line(s) changed`, 'edit_file');
-                this.diffViewManager.closeDiffPreview();
+                if (!isAutoApproved) {
+                    this.diffViewManager.closeDiffPreview();
+                }
 
                 if (!accepted) { return 'Edit cancelled by user.'; }
 
@@ -2554,144 +3268,57 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                 return editResult;
             }
 
-            // ── write_file ─────────────────────────────────────────────────
-            case 'write_file': {
-                const rel     = String(args.path ?? '');
-                const content = String(args.content ?? '');
-                if (!rel) { throw new Error('path is required'); }
-                const full = this.safePath(root, rel);
-                // Block placeholder/dummy file creation via write_file too
-                if (!fs.existsSync(full)) {
-                    const isPlaceholder = /^#\s*(placeholder|empty|stub|todo)/im.test(content.trim())
-                        || (content.trim().split('\n').length <= 3 && /def\s+\w+\(\):\s*pass/m.test(content))
-                        || (content.trim().split('\n').length <= 2 && /^#\s*placeholder/im.test(content.trim()));
-                    if (isPlaceholder) {
-                        throw new Error(`Blocked: "${rel}" looks like a placeholder file. Do NOT create dummy files. The file was already moved to its new location. Use search_files to find where the old path is referenced, then edit_file to update the import paths.`);
-                    }
+            // ── edit_file_at_line ──────────────────────────────────────────
+            case 'edit_file_at_line': {
+                const rel2       = String(args.path ?? '');
+                const startLine  = Math.round(Number(args.start_line ?? 0));
+                const endLine    = Math.round(Number(args.end_line ?? 0));
+                const newContent = String(args.new_content ?? '');
+
+                if (!rel2)        { throw new Error('path is required'); }
+                if (!startLine)   { throw new Error('start_line is required'); }
+                if (endLine < startLine - 1) { throw new Error(`end_line (${endLine}) must be >= start_line - 1 (${startLine - 1})`); }
+
+                const full2    = this.safePath(root, rel2);
+                const original2 = fs.readFileSync(full2, 'utf8');
+                const lines2   = original2.split('\n');
+                const totalLines = lines2.length;
+
+                if (startLine < 1 || startLine > totalLines + 1) {
+                    throw new Error(`start_line ${startLine} is out of range (file has ${totalLines} lines)`);
                 }
-                const originalContent = fs.existsSync(full) ? fs.readFileSync(full, 'utf8') : null;
 
-                const accepted = await this.requestConfirmation('write', `Overwrite "${rel}" (${content.split('\n').length} lines)`, 'write_file');
-                if (!accepted) { return 'Write cancelled by user.'; }
+                // Build new file: lines before start, new_content, lines after end
+                const before  = lines2.slice(0, startLine - 1);
+                const after   = endLine >= startLine ? lines2.slice(endLine) : lines2.slice(startLine - 1);
+                const newLines = newContent === '' ? [] : newContent.split('\n');
+                const newFile  = [...before, ...newLines, ...after].join('\n');
 
-                fs.mkdirSync(path.dirname(full), { recursive: true });
-                fs.writeFileSync(full, content, 'utf8');
-                this._lastFileOp = { path: rel, originalContent, action: 'written' };
-                this.postFn({ type: 'fileChanged', path: rel, action: 'written' });
-                clearWorkspaceSummaryCache();
-                const writeResult = `Written: ${rel} (${content.split('\n').length} lines)`;
-                // Auto-check diagnostics after write
-                const writeDiags = this.getDiagnostics(root, rel);
-                if (writeDiags !== 'No errors or warnings found.') {
-                    return `${writeResult}\n\nDiagnostics after write:\n${writeDiags}`;
+                const replacedCount = endLine >= startLine ? endLine - startLine + 1 : 0;
+                const action = replacedCount === 0 ? 'insert' : 'replace';
+
+                const isAutoApproved3 = this._autoApprovedTools.has('edit_file_at_line');
+                if (!isAutoApproved3) {
+                    await this.diffViewManager.showDiffPreview(full2, original2, newFile);
                 }
-                return writeResult;
-            }
+                const detail3 = action === 'insert'
+                    ? `Insert ${newLines.length} line(s) at line ${startLine} in "${rel2}"`
+                    : `Replace lines ${startLine}-${endLine} (${replacedCount} line(s)) in "${rel2}"`;
+                const accepted3 = await this.requestConfirmation('edit', detail3, 'edit_file_at_line');
+                if (!isAutoApproved3) { this.diffViewManager.closeDiffPreview(); }
+                if (!accepted3) { return 'Edit cancelled by user.'; }
 
-            // ── append_to_file ─────────────────────────────────────────────
-            case 'append_to_file': {
-                const rel     = String(args.path ?? '');
-                const content = String(args.content ?? '');
-                if (!rel) { throw new Error('path is required'); }
-                const full = this.safePath(root, rel);
-                if (!fs.existsSync(full)) {
-                    throw new Error(`File not found: ${rel}. Use create_file instead.`);
+                fs.writeFileSync(full2, newFile, 'utf8');
+                this._lastFileOp = { path: rel2, originalContent: original2, action: 'edited' };
+                this.postFn({ type: 'fileChanged', path: rel2, action: 'edited' });
+                const editResult3 = action === 'insert'
+                    ? `Inserted ${newLines.length} line(s) at line ${startLine} in ${rel2}`
+                    : `Replaced lines ${startLine}-${endLine} with ${newLines.length} line(s) in ${rel2}`;
+                const editDiags3 = this.getDiagnostics(root, rel2);
+                if (editDiags3 !== 'No errors or warnings found.') {
+                    return `${editResult3}\n\nDiagnostics after edit:\n${editDiags3}`;
                 }
-                const beforeAppend = fs.readFileSync(full, 'utf8');
-                fs.appendFileSync(full, content, 'utf8');
-                this._lastFileOp = { path: rel, originalContent: beforeAppend, action: 'appended' };
-                this.postFn({ type: 'fileChanged', path: rel, action: 'appended' });
-                return `Appended ${content.length} chars to ${rel}`;
-            }
-
-            // ── rename_file ────────────────────────────────────────────────
-            case 'rename_file': {
-                const oldRel = String(args.old_path ?? '');
-                const newRel = String(args.new_path ?? '');
-                if (!oldRel || !newRel) { throw new Error('old_path and new_path are required'); }
-                const oldFull = this.safePath(root, oldRel);
-                const newFull = this.safePath(root, newRel);
-
-                const accepted = await this.requestConfirmation('rename', `Rename "${oldRel}" → "${newRel}"`, 'rename_file');
-                if (!accepted) { return 'Rename cancelled by user.'; }
-
-                fs.mkdirSync(path.dirname(newFull), { recursive: true });
-                fs.renameSync(oldFull, newFull);
-                this.postFn({ type: 'fileChanged', path: newRel, action: 'renamed' });
-                clearWorkspaceSummaryCache();
-                return `Renamed: ${oldRel} → ${newRel}`;
-            }
-
-            // ── delete_file ────────────────────────────────────────────────
-            case 'delete_file': {
-                const rel = String(args.path ?? '');
-                if (!rel) { throw new Error('path is required'); }
-                const full = this.safePath(root, rel);
-                if (!fs.existsSync(full)) {
-                    throw new Error(`File not found: ${rel}`);
-                }
-                const originalContent = fs.readFileSync(full, 'utf8');
-
-                const accepted = await this.requestConfirmation('delete', `Delete "${rel}" — this cannot be undone`, 'delete_file');
-                if (!accepted) { return 'Delete cancelled by user.'; }
-
-                fs.unlinkSync(full);
-                this._lastFileOp = { path: rel, originalContent, action: 'deleted' };
-                this.postFn({ type: 'fileChanged', path: rel, action: 'deleted' });
-                clearWorkspaceSummaryCache();
-                return `Deleted: ${rel}`;
-            }
-
-            // ── find_files ─────────────────────────────────────────────────
-            case 'find_files': {
-                const pattern = String(args.pattern ?? '');
-                if (!pattern) { throw new Error('pattern is required'); }
-                const searchDir = args.path ? String(args.path) : '';
-                const MAX_RESULTS = 200;
-                const excludePattern = '{**/node_modules/**,**/.git/**,**/dist/**,**/__pycache__/**,**/.nyc_output/**,**/coverage/**}';
-
-                try {
-                    // First try exact glob match
-                    const globPattern = searchDir ? `${searchDir}/${pattern}` : `**/${pattern}`;
-                    let uris = await vscode.workspace.findFiles(globPattern, excludePattern, MAX_RESULTS + 1);
-
-                    // If no results, try substring/keyword fallback:
-                    // Extract the base name without glob chars and search for files containing those keywords
-                    if (uris.length === 0) {
-                        const baseName = pattern.replace(/^\*+/, '').replace(/\*+$/, '').replace(/\.[^.]*$/, '').replace(/[*?\[\]{}]/g, '');
-                        if (baseName.length >= 3) {
-                            const keywords = baseName.split(/[_\-]+/).filter(k => k.length >= 3);
-                            if (keywords.length > 0) {
-                                // Search for files containing the first keyword in the name
-                                const broadGlob = searchDir ? `${searchDir}/**/*${keywords[0]}*` : `**/*${keywords[0]}*`;
-                                const broadUris = await vscode.workspace.findFiles(broadGlob, excludePattern, MAX_RESULTS * 2);
-                                // Filter to files that contain ALL keywords (case-insensitive)
-                                const lowerKeywords = keywords.map(k => k.toLowerCase());
-                                uris = broadUris.filter(uri => {
-                                    const name = path.basename(uri.fsPath).toLowerCase();
-                                    return lowerKeywords.every(kw => name.includes(kw));
-                                }).slice(0, MAX_RESULTS + 1);
-                                if (uris.length > 0) {
-                                    logInfo(`[find_files] Glob "${pattern}" had no results; substring fallback on keywords [${keywords.join(', ')}] found ${uris.length}`);
-                                }
-                            }
-                        }
-                    }
-
-                    if (uris.length === 0) {
-                        return `No files matching "${pattern}". Try a broader pattern or use search_files to search file contents.`;
-                    }
-
-                    const results = uris.slice(0, MAX_RESULTS).map(uri => {
-                        return path.relative(root, uri.fsPath).replace(/\\/g, '/');
-                    }).filter(l => !l.startsWith('..'));
-
-                    const truncated = uris.length > MAX_RESULTS;
-                    const suffix = truncated ? `\n(showing first ${MAX_RESULTS} of ${uris.length}+)` : '';
-                    return `Files matching "${pattern}" (${results.length}):${suffix}\n${results.join('\n')}`;
-                } catch (err) {
-                    return `find_files failed: ${toErrorMessage(err)}`;
-                }
+                return editResult3;
             }
 
             // ── shell_read ─────────────────────────────────────────────────
@@ -3045,12 +3672,12 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
             const post = this.postFn;
             post({ type: 'commandStart', id: cmdId, cmd });
 
-            // Use shell: true for cross-platform compatibility (Windows/Unix)
-            const child = spawn(cmd, {
-                cwd,
-                env: { ...process.env },
-                shell: true,
-            });
+            // On Windows, PowerShell cmdlets must run via powershell.exe, not cmd.exe.
+            const isPSCmd = process.platform === 'win32'
+                && /Get-ChildItem|Get-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|\$_|\$PSItem/.test(cmd);
+            const child = isPSCmd
+                ? spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { cwd, env: { ...process.env } })
+                : spawn(cmd, { cwd, env: { ...process.env }, shell: true });
             this.trackChild(child);
 
             let output = '';
@@ -3108,11 +3735,14 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
             const post = this.postFn;
             post({ type: 'commandStart', id: cmdId, cmd });
 
-            const child = spawn(cmd, {
-                cwd,
-                env: { ...process.env },
-                shell: true,
-            });
+            // On Windows, PowerShell cmdlets must run via powershell.exe, not cmd.exe.
+            // Detect PowerShell commands and spawn accordingly.
+            const isPowerShellCmd = process.platform === 'win32'
+                && /Get-ChildItem|Get-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Out-Host|\$_|\$PSItem/.test(cmd);
+            const spawnArgs: [string, string[], object] = isPowerShellCmd
+                ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { cwd, env: { ...process.env } }]
+                : [cmd, [], { cwd, env: { ...process.env }, shell: true }];
+            const child = spawn(...spawnArgs);
             this.trackChild(child);
 
             let output = '';
@@ -3140,7 +3770,15 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                 finished = true;
                 clearTimeout(timer);
                 post({ type: 'commandEnd', id: cmdId, exitCode: code ?? 0 });
-                resolve(output.slice(0, LIMIT) || `(exited with code ${code ?? 0})`);
+                let result = output.slice(0, LIMIT) || `(exited with code ${code ?? 0})`;
+                // Append cwd to empty/near-empty file search results so the model
+                // knows which directory was searched — helps diagnose workspace mismatches
+                const isFileSearch = /Get-ChildItem|find\s|dir\s/i.test(cmd);
+                const looksEmpty = result.length < 150 && !/error/i.test(result);
+                if (isFileSearch && looksEmpty) {
+                    result += `\n(searched in: ${cwd})`;
+                }
+                resolve(result);
             };
 
             child.on('close', finish);
@@ -3234,17 +3872,23 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
 
     private safePath(root: string, rel: string): string {
         const full = path.resolve(root, rel);
-        if (!full.startsWith(root)) {
+        // Use case-insensitive comparison on Windows (paths may differ in drive letter case)
+        const fullNorm = process.platform === 'win32' ? full.toLowerCase() : full;
+        const rootNorm = process.platform === 'win32' ? root.toLowerCase() : root;
+        if (!fullNorm.startsWith(rootNorm)) {
             throw new Error(`Path "${rel}" is outside the workspace`);
         }
         // Resolve symlinks to prevent escaping workspace via symlink
         try {
             const real = fs.realpathSync(full);
-            if (!real.startsWith(fs.realpathSync(root))) {
+            const realNorm = process.platform === 'win32' ? real.toLowerCase() : real;
+            const rootReal = fs.realpathSync(root);
+            const rootRealNorm = process.platform === 'win32' ? rootReal.toLowerCase() : rootReal;
+            if (!realNorm.startsWith(rootRealNorm)) {
                 throw new Error(`Path "${rel}" resolves outside the workspace via symlink`);
             }
         } catch (err) {
-            // realpathSync throws if file doesn't exist yet (create_file) — that's OK
+            // realpathSync throws if file doesn't exist yet — that's OK
             if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
                 throw err;
             }
@@ -3473,11 +4117,20 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
         }
 
         const docToolId = `t_${Date.now()}_pre1`;
-        post({ type: 'toolCall', id: docToolId, name: 'read_file', args: { path: docPath } });
-        post({ type: 'toolResult', id: docToolId, name: 'read_file', success: true, preview: `Read ${docPath} (${docContent.split('\n').length} lines)` });
+        post({ type: 'toolCall', id: docToolId, name: 'shell_read', args: { command: `cat "${docPath}"` } });
+        post({ type: 'toolResult', id: docToolId, name: 'shell_read', success: true, preview: `Read ${docPath} (${docContent.split('\n').length} lines)` });
 
-        // Step 2: Build a map of module_name → new_subdir by scanning the actual filesystem.
-        // E.g., if routes/admin/dashboard.py exists, then "app.routes.dashboard" → "app.routes.admin.dashboard"
+        // Step 2: Build a map of old_import → new_import by scanning the actual filesystem.
+        //
+        // A mapping is ONLY generated when ALL three conditions hold:
+        //   a) The file exists at the NEW path (subdir/module.py) — the move already happened
+        //   b) The OLD import path (parent.module) does NOT resolve to any file on disk —
+        //      i.e., parent/module.py does not exist at the top-level anymore
+        //   c) At least one source file in the project contains "from <old_import>" —
+        //      i.e., there are actually stale imports to fix
+        //
+        // This prevents generating bogus double-nested paths like app.routes.admin.admin.X
+        // when the file is already at app/routes/admin/X.py (old path still works as-is).
         const moduleMap = new Map<string, string>();
 
         // Extract parent directories mentioned in the doc (e.g., "routes/", "models/", "services/")
@@ -3512,6 +4165,16 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                             const parentDotted = parentDir.replace(/\//g, '.');
                             const oldImport = `${parentDotted}.${moduleName}`;
                             const newImport = `${parentDotted}.${entry.name}.${moduleName}`;
+
+                            // Condition (a): new file exists on disk
+                            const newFilePath = path.resolve(root, parentDir, entry.name, pyFile);
+                            if (!fs.existsSync(newFilePath)) { continue; }
+
+                            // Condition (b): old file does NOT exist at parent level anymore
+                            // (if it still exists there, the old import still works — nothing to fix)
+                            const oldFilePath = path.resolve(root, parentDir, pyFile);
+                            if (fs.existsSync(oldFilePath)) { continue; }
+
                             moduleMap.set(oldImport, newImport);
                         }
                     } catch { /* skip unreadable subdirs */ }
@@ -3520,8 +4183,8 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
         }
 
         if (moduleMap.size === 0) {
-            logInfo('[pre-process] No module relocations detected, skipping pipeline');
-            return '';
+            logInfo('[pre-process] No module relocations detected (files may not have been moved yet, or imports are already correct)');
+            return '__NO_MOVES_DETECTED__';
         }
 
         logInfo(`[pre-process] Built module map: ${moduleMap.size} relocated modules`);
@@ -3531,7 +4194,7 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
         interface ImportEdit { lineNum: number; oldLine: string; oldImport: string; newImport: string }
         const editsPerFile = new Map<string, ImportEdit[]>();
 
-        post({ type: 'toolCall', id: searchToolId, name: 'search_files', args: { query: `(scanning .py files for ${moduleMap.size} old import patterns)` } });
+        post({ type: 'toolCall', id: searchToolId, name: 'shell_read', args: { command: `grep -rn "from ..." . (scanning .py files for ${moduleMap.size} old import patterns)` } });
 
         // Build a set of old import strings for fast lookup
         const oldImportStrings = new Map<string, string>(); // "from X" → newImport
@@ -3596,11 +4259,11 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
         }
 
         const totalEdits = [...editsPerFile.values()].reduce((sum, edits) => sum + edits.length, 0);
-        post({ type: 'toolResult', id: searchToolId, name: 'search_files', success: true, preview: `Found ${totalEdits} stale imports across ${editsPerFile.size} files` });
+        post({ type: 'toolResult', id: searchToolId, name: 'shell_read', success: true, preview: `Found ${totalEdits} stale imports across ${editsPerFile.size} files` });
 
         if (editsPerFile.size === 0) {
             logInfo('[pre-process] No stale imports found — imports may already be up to date');
-            return '[SYSTEM: Pre-processing complete. Searched for stale imports based on the recommendations doc but found none — all imports appear to already point to the correct locations. Tell the user that no import changes are needed.]';
+            return '__IMPORTS_ALREADY_CORRECT__';
         }
 
         logInfo(`[pre-process] Found ${totalEdits} stale imports in ${editsPerFile.size} files — executing edits`);
@@ -3666,6 +4329,63 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
 
         logInfo(`[pre-process] Pipeline complete: ${successCount} edits applied, ${failCount} failed`);
 
+        // Step 5: Validate that every new import path resolves to a real file on disk.
+        // For any that don't, search the project for a file with the same name (renamed/moved elsewhere).
+        const validationLines: string[] = [];
+        const newImportsApplied = new Set<string>();
+        for (const edits of editsPerFile.values()) {
+            for (const edit of edits) { newImportsApplied.add(edit.newImport); }
+        }
+
+        if (newImportsApplied.size > 0) {
+            // Helper: find all .py files under root matching a given base name
+            const findByName = (baseName: string): string[] => {
+                const results: string[] = [];
+                const walk = (dir: string) => {
+                    let entries: fs.Dirent[];
+                    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+                    for (const e of entries) {
+                        if (e.name.startsWith('.') || e.name === '__pycache__') { continue; }
+                        const full = path.join(dir, e.name);
+                        if (e.isDirectory()) { walk(full); }
+                        else if (e.isFile() && e.name === `${baseName}.py`) {
+                            results.push(path.relative(root, full).replace(/\\/g, '/'));
+                        }
+                    }
+                };
+                walk(root);
+                return results;
+            };
+
+            const broken: string[] = [];
+            const renamed: string[] = [];
+
+            for (const newImport of newImportsApplied) {
+                const filePath = newImport.replace(/\./g, '/') + '.py';
+                const fullPath = path.resolve(root, filePath);
+                if (fs.existsSync(fullPath)) { continue; } // ✅ confirmed — skip
+
+                // File not found at expected path — search by base name
+                const baseName = newImport.split('.').pop() ?? '';
+                const matches = findByName(baseName);
+
+                if (matches.length > 0) {
+                    // Found under a different path — likely renamed or in different subdir
+                    const matchList = matches.map(m => `\`${m.replace(/\//g, '.')
+                        .replace(/\.py$/, '')}\``).join(', ');
+                    renamed.push(`⚠️  \`${newImport}\` — file not at expected path. Found as: ${matchList}`);
+                } else {
+                    broken.push(`❌  \`${newImport}\` — not found anywhere in project (may be deleted or not yet created)`);
+                }
+            }
+
+            if (renamed.length > 0 || broken.length > 0) {
+                validationLines.push(``, `## Import Validation Issues`, ``);
+                validationLines.push(...renamed, ...broken);
+                validationLines.push(``, `Note: The above imports were updated but the target files could not be confirmed on disk. They may have been renamed — check the paths above and correct the imports manually if needed.`);
+            }
+        }
+
         const summary = [
             `[SYSTEM: Import path update pipeline completed programmatically.]`,
             ``,
@@ -3676,8 +4396,10 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
             ``,
             `## Changes Made`,
             ...editSummary,
+            ...validationLines,
             ``,
             `Tell the user what was done. List the files that were updated and summarize the import path changes.`,
+            validationLines.length > 0 ? `Also highlight the validation issues found — imports that point to missing files, with any close matches shown.` : '',
             failCount > 0 ? `Also mention the ${failCount} edit(s) that failed and suggest the user review them manually.` : '',
             `Do NOT call any more tools — the work is done.`,
         ].filter(Boolean).join('\n');
@@ -3702,5 +4424,270 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
         if (raw.includes('timed out'))    { return 'Request timed out. The model may be loading or overloaded.'; }
         if (raw.includes('404'))          { return 'Model not found. Run: ollama pull <model-name>'; }
         return raw;
+    }
+
+    // ── Small-model read-then-act pipeline ───────────────────────────────────
+
+    /**
+     * Determine if the current model is "small" (≤9B params).
+     * Small models get pre-injected file context instead of shell exploration.
+     */
+    private async resolveIsSmallModel(model: string): Promise<boolean> {
+        // Fast path: extract param count from model tag (e.g. "qwen2.5-coder:7b-256k" → 7B)
+        const nameMatch = model.toLowerCase().match(/:(\d+\.?\d*)([bm])/);
+        if (nameMatch) {
+            const num = parseFloat(nameMatch[1]);
+            const unit = nameMatch[2];
+            const params = unit === 'b' ? num : num / 1000;
+            if (params <= 9)  { return true; }
+            if (params >= 13) { return false; }
+            // 10-12B: fall through to API check
+        }
+        // Slow path: ask Ollama for model details
+        try {
+            const { fetchModelInfo } = await import('./ollamaClient');
+            const info = await fetchModelInfo(model);
+            if (info?.parameterSize) {
+                const m = info.parameterSize.match(/(\d+\.?\d*)\s*([bBmM])/);
+                if (m) {
+                    const num = parseFloat(m[1]);
+                    const unit = m[2].toLowerCase();
+                    return (unit === 'b' ? num : num / 1000) <= 9;
+                }
+            }
+        } catch { /* ignore */ }
+        return false; // unknown → treat as large (conservative)
+    }
+
+    /**
+     * Walk the workspace and find files whose names match the given keywords.
+     * Returns candidates scored by filename relevance, sorted descending.
+     */
+    private findEditCandidates(
+        filenameKeywords: string[],
+        extensions: string[],
+        fullServiceName?: string   // e.g. "thermal_receipt" — scores highest on exact basename match
+    ): Array<{ relPath: string; absPath: string; score: number }> {
+        const root = this.workspaceRoot;
+        const results: Array<{ relPath: string; absPath: string; score: number }> = [];
+        const extSet = new Set(extensions.map(e => e.toLowerCase()));
+
+        const walk = (dir: string, depth: number) => {
+            if (depth > 8) { return; }
+            let entries: fs.Dirent[];
+            try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+            for (const entry of entries) {
+                if (SKIP_DIRS.has(entry.name)) { continue; }
+                const full = path.join(dir, entry.name);
+                if (entry.isDirectory()) {
+                    walk(full, depth + 1);
+                } else if (entry.isFile()) {
+                    const ext = path.extname(entry.name).toLowerCase();
+                    if (!extSet.has(ext)) { continue; }
+                    const rel = path.relative(root, full).replace(/\\/g, '/');
+                    const baseLower = entry.name.toLowerCase().replace(/\.\w+$/, '');
+                    const relLower = rel.toLowerCase();
+                    let score = 0;
+                    // Highest priority: basename starts with or equals the full service name
+                    if (fullServiceName) {
+                        if (baseLower === fullServiceName || baseLower === fullServiceName + '_service') { score += 30; }
+                        else if (baseLower.startsWith(fullServiceName)) { score += 20; }
+                        else if (baseLower.includes(fullServiceName))   { score += 15; }
+                    }
+                    // Per-keyword scoring
+                    for (const kw of filenameKeywords) {
+                        if (baseLower === kw)             { score += 10; } // exact match
+                        else if (baseLower.startsWith(kw + '_') || baseLower.endsWith('_' + kw)) { score += 8; } // word boundary
+                        else if (baseLower.includes(kw))  { score += 5;  } // partial in name
+                        else if (relLower.includes(kw))   { score += 2;  } // in path
+                    }
+                    // Penalise archive/backup/old dirs — never the right file
+                    if (/archive|backup|old.code|\.bak/i.test(relLower)) { score = Math.max(0, score - 20); }
+                    // Penalise test files — prefer source/service files for edit tasks
+                    if (/(?:^|\/)(tests?|__tests?__|spec)\//i.test(relLower) || /[._](test|spec)\.\w+$/.test(relLower)) { score = Math.max(0, score - 6); }
+                    if (score > 0) { results.push({ relPath: rel, absPath: full, score }); }
+                }
+            }
+        };
+        walk(root, 0);
+        results.sort((a, b) => b.score - a.score);
+        return results;
+    }
+
+    /**
+     * Pre-processing pipeline for edit tasks on small models.
+     * Finds the relevant file(s), reads them, and returns a formatted
+     * context block to inject into the user message before calling the model.
+     * Returns '' if no relevant file is found (fall through to normal loop).
+     */
+    private async preProcessEditTask(userMessage: string, post: PostFn): Promise<string> {
+        const root = this.workspaceRoot;
+
+        // ── 1. Extract keywords ──────────────────────────────────────────────
+        // Priority: explicit service/module name > file path mention > content words
+        const filenameKeywords: string[] = [];
+
+        // "the thermal receipt service" → "thermal_receipt"
+        // "the drivers_license_ocr service" → "drivers_license_ocr"
+        // Captures multi-word names (spaces or underscores/hyphens) before the role word
+        const serviceMatch = userMessage.match(
+            /\b(?:the\s+)?(\w+(?:[\s_-]\w+)*?)\s+(?:service|module|handler|controller|view|model|util|helper|component|route|router|api)\b/i
+        );
+        if (serviceMatch) {
+            // Normalise spaces to underscores: "thermal receipt" → "thermal_receipt"
+            const svc = serviceMatch[1].toLowerCase().replace(/\s+/g, '_');
+            filenameKeywords.push(svc);
+            // Also push individual words for fallback scoring
+            svc.split(/[_-]/).filter(w => w.length > 2).forEach(w => filenameKeywords.push(w));
+        }
+
+        // Explicit file path: "in auth.py", "look at routes/user.ts"
+        const fileMatch = userMessage.match(/\b([\w./\\-]+\.(?:py|ts|js|go|java|rs|rb|php|c|cpp|cs))\b/i);
+        if (fileMatch) { filenameKeywords.push(path.basename(fileMatch[1]).replace(/\.\w+$/, '').toLowerCase()); }
+
+        // Content-keyword fallback
+        const STOP = new Set(['add','insert','fix','update','change','modify','implement',
+            'the','a','an','to','in','on','of','for','whenever','when','every','time',
+            'that','this','so','and','or','with','by','from','at','into','should',
+            'would','could','will','can','all','any','some','statement','log','logging',
+            'make','sure','please','just','need','want','also']);
+        const contentKws = userMessage.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !STOP.has(w)).slice(0, 5);
+        if (filenameKeywords.length === 0) { filenameKeywords.push(...contentKws); }
+
+        // ── 2. Detect file extensions from project type ──────────────────────
+        // Default to common code extensions; prefer Python if workspace has .py files
+        const hasTs = fs.existsSync(path.join(root, 'tsconfig.json')) || fs.existsSync(path.join(root, 'package.json'));
+        const hasPy = fs.existsSync(path.join(root, 'pyproject.toml')) || fs.existsSync(path.join(root, 'requirements.txt')) || fs.existsSync(path.join(root, 'setup.py'));
+        const extensions = hasPy ? ['.py'] : hasTs ? ['.ts', '.js', '.tsx', '.jsx'] : ['.py', '.ts', '.js', '.go', '.java', '.rs'];
+
+        if (filenameKeywords.length === 0) { return ''; }
+
+        // Full service name for exact-match boosting (e.g. "thermal_receipt" from "thermal receipt service")
+        const fullServiceName = serviceMatch ? serviceMatch[1].toLowerCase() : undefined;
+
+        logInfo(`[pre-edit] Searching for edit candidates — keywords: [${filenameKeywords.join(', ')}], fullService: ${fullServiceName ?? '(none)'}, exts: [${extensions.join(', ')}]`);
+
+        // ── 3. Find candidate files — semantic search via code index, fallback to keyword ──
+        let candidates: Array<{ relPath: string; absPath: string; score: number }>;
+        if (this.codeIndex) {
+            const indexResults = await this.codeIndex.findRelevantFiles(userMessage, 5);
+            candidates = indexResults.map(r => ({ relPath: r.relPath, absPath: r.absPath, score: Math.round(r.score * 100) }));
+            logInfo(`[pre-edit] Code index returned ${candidates.length} result(s) for: "${userMessage.slice(0, 60)}" (ready=${this.codeIndex.isReady})`);
+            // Fall back to keyword search if index returned nothing (not ready yet, or no matches)
+            if (candidates.length === 0) {
+                candidates = this.findEditCandidates(filenameKeywords, extensions, fullServiceName);
+                if (candidates.length > 0) {
+                    logInfo(`[pre-edit] Code index empty — using keyword fallback: ${candidates.slice(0, 3).map(c => c.relPath).join(', ')}`);
+                }
+            }
+        } else {
+            candidates = this.findEditCandidates(filenameKeywords, extensions, fullServiceName);
+        }
+
+        if (candidates.length === 0) {
+            logInfo('[pre-edit] No candidate files found — falling through to normal loop');
+            return '';
+        }
+
+        logInfo(`[pre-edit] Found ${candidates.length} candidate(s): ${candidates.slice(0, 5).map(c => `${c.relPath}(${c.score})`).join(', ')}`);
+
+        // ── 4. Read top candidates and score by content keyword hits ─────────
+        const isMultiFile = /\b(all|every|each)\b.*\b(service|route|model|file|handler|view|controller)s?\b/i.test(userMessage);
+        const maxFiles = isMultiFile ? 2 : 1;
+        const top = candidates.slice(0, Math.min(3, candidates.length));
+
+        interface ReadResult { relPath: string; absPath: string; content: string; lineCount: number; hits: number; }
+        const readResults: ReadResult[] = [];
+
+        for (const c of top) {
+            try {
+                const stat = fs.statSync(c.absPath);
+                if (stat.size > 100_000) {
+                    logInfo(`[pre-edit] Skipping ${c.relPath} — too large (${stat.size} bytes)`);
+                    continue;
+                }
+                const content = fs.readFileSync(c.absPath, 'utf8');
+                const lineCount = content.split('\n').length;
+                const lower = content.toLowerCase();
+                // Score by content keyword hits (minimum across all keywords for coverage)
+                const hitsPerKw = contentKws.map(w => {
+                    let count = 0, pos = 0;
+                    while ((pos = lower.indexOf(w, pos)) !== -1) { count++; pos++; }
+                    return count;
+                });
+                const minHits = contentKws.length > 0 ? Math.min(...hitsPerKw) : 1;
+                const totalHits = hitsPerKw.reduce((a, b) => a + b, 0);
+                readResults.push({ relPath: c.relPath, absPath: c.absPath, content, lineCount, hits: minHits * 10000 + totalHits + c.score * 100 });
+                logInfo(`[pre-edit] Read ${c.relPath} (${lineCount} lines, score=${c.score}, hits=${minHits}/${totalHits})`);
+            } catch (e) {
+                logWarn(`[pre-edit] Failed to read ${c.relPath}: ${toErrorMessage(e as Error)}`);
+            }
+        }
+
+        if (readResults.length === 0) { return ''; }
+        readResults.sort((a, b) => b.hits - a.hits);
+        const selected = readResults.slice(0, maxFiles);
+
+        // ── 5. Build the context injection string ────────────────────────────
+        const FILE_LINE_LIMIT = 600; // inject full file up to this length
+        const contextBlocks: string[] = [];
+
+        for (const r of selected) {
+            // Post a visible tool call so the user sees what we're doing
+            const preReadId = `pre_edit_read_${Date.now()}`;
+            post({ type: 'toolCall', id: preReadId, name: 'shell_read', args: { command: `cat "${r.relPath}"` } });
+            post({ type: 'toolResult', id: preReadId, name: 'shell_read', success: true, preview: `${r.lineCount} lines` });
+
+            const lines = r.content.split('\n');
+            let startIdx = 0;
+            let endIdx   = lines.length;
+
+            if (r.lineCount > FILE_LINE_LIMIT) {
+                // Focused window around keyword-matching lines
+                const kwsForWindow = [...filenameKeywords, ...contentKws].filter(w => w.length > 3);
+                const relevantIdxs = lines
+                    .map((l, i) => ({ i, hit: kwsForWindow.some(w => l.toLowerCase().includes(w)) }))
+                    .filter(x => x.hit).map(x => x.i);
+                if (relevantIdxs.length > 0) {
+                    startIdx = Math.max(0, relevantIdxs[0] - 20);
+                    endIdx   = Math.min(lines.length, relevantIdxs[relevantIdxs.length - 1] + 80);
+                    logInfo(`[pre-edit] Focused window lines ${startIdx + 1}-${endIdx} of ${r.relPath}`);
+                } else {
+                    endIdx = Math.min(lines.length, FILE_LINE_LIMIT);
+                }
+            }
+
+            // Line-numbered content — model reads line numbers, uses edit_file_at_line
+            const numberedLines = lines.slice(startIdx, endIdx)
+                .map((l, i) => `${String(startIdx + i + 1).padStart(4, ' ')}: ${l}`)
+                .join('\n');
+
+            const ext = path.extname(r.relPath).slice(1) || 'text';
+            const windowNote = (startIdx > 0 || endIdx < lines.length)
+                ? ` [showing lines ${startIdx + 1}-${endIdx} of ${r.lineCount}]`
+                : ` [${r.lineCount} lines]`;
+            contextBlocks.push(
+                `[FILE: ${r.relPath}${windowNote}]\n` +
+                `\`\`\`${ext}\n${numberedLines}\n\`\`\``
+            );
+        }
+
+        const pathList = selected.map(r => `"${r.relPath}"`).join(', ');
+        const injection = [
+            `[PRE-LOADED CONTEXT for your task]`,
+            `The file(s) below are shown with line numbers (format: "  42: code"). Line numbers are for edit_file_at_line only — they are NOT part of the file.`,
+            ``,
+            contextBlocks.join('\n\n---\n\n'),
+            ``,
+            `INSTRUCTIONS:`,
+            `- Use edit_file_at_line with path=${pathList}`,
+            `- Specify start_line and end_line from the numbers shown above`,
+            `- Write new_content with the same indentation style as the surrounding code`,
+            `- Do NOT call shell_read — the file content is already above`,
+            `- If the change is already present, say so and stop`,
+        ].join('\n');
+
+        logInfo(`[pre-edit] Injected ${injection.length} chars of pre-loaded context for ${selected.map(r => r.relPath).join(', ')}`);
+        return injection;
     }
 }
