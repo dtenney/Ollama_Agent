@@ -2183,7 +2183,32 @@ export class Agent {
                         const alreadySplit = /auto.?split|re.?exports?\s+all\s+sub/i.test(firstLines);
                         logInfo(`[split] Only ${plan.splits.length} group(s) found — file may already be well-organized`);
                         if (alreadySplit) {
-                            emitAssistant(`\`${plan.relPath}\` was already split in a previous session — it is now a thin aggregator that imports the sub-blueprints. Nothing to do.`);
+                            // List only related sibling files (same name stem) so the user can see what it was split into
+                            const dir = path.dirname(targetAbs);
+                            const stem = path.basename(targetAbs, '.py').replace(/_api$/, '').replace(/_/g, '_?');
+                            const stemRe = new RegExp(`^${stem}`, 'i');
+                            let siblings = '';
+                            try {
+                                const related = fs.readdirSync(dir)
+                                    .filter(f => f.endsWith('.py') && f !== path.basename(targetAbs) && stemRe.test(f));
+                                siblings = related
+                                    .map(f => `  - \`${path.join(path.relative(this.workspaceRoot, dir), f).replace(/\\/g, '/')}\``)
+                                    .join('\n');
+                            } catch { /* ignore */ }
+                            // Also show the imports from the aggregator file itself
+                            let importLines = '';
+                            try {
+                                const content = fs.readFileSync(targetAbs, 'utf8');
+                                importLines = content.split('\n')
+                                    .filter(l => /^\s*(from|import)\s/.test(l))
+                                    .slice(0, 20)
+                                    .map(l => `  ${l.trim()}`)
+                                    .join('\n');
+                            } catch { /* ignore */ }
+                            const detail = importLines
+                                ? `\n\nImports in the aggregator:\n${importLines}`
+                                : (siblings ? `\n\nRelated files from the split:\n${siblings}` : '');
+                            emitAssistant(`\`${plan.relPath}\` was already split in a previous session — it is now a thin aggregator that imports the sub-blueprints.${detail}`);
                         } else {
                             emitAssistant(`Only ${plan.splits.length} logical group found in \`${plan.relPath}\` — nothing to split.`);
                         }
