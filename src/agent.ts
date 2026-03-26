@@ -40,6 +40,12 @@ export interface ShellEnvironment {
     catCmd: string;
 }
 
+interface FilePlan {
+    relPath: string;
+    action: 'create' | 'modify';
+    description: string;
+}
+
 let _cachedShellEnv: ShellEnvironment | null = null;
 
 /**
@@ -49,6 +55,56 @@ let _cachedShellEnv: ShellEnvironment | null = null;
  * - Context lines get 2 extra spaces prepended by Select-String → strip 2 chars
  * - Blank lines have no prefix → leave as-is
  */
+/**
+ * Extract verifiable claims from a documentation file's content.
+ * Returns grep commands the model should run to cross-check each claim.
+ */
+function extractDocVerificationHints(docContent: string): string[] {
+    const hints: string[] = [];
+
+    // ── Numeric retention/period claims ─────────────────────────────────────
+    // e.g. "3-year retention", "5 years minimum", "90-day hold", "15 days"
+    const retentionMatches = docContent.matchAll(
+        /(\d+)[\s-]*(year|month|day|hour)s?[\s-]*(?:minimum\s+)?(?:retention|hold|period|record|reporting|threshold)/gi
+    );
+    for (const m of retentionMatches) {
+        hints.push(`- Retention/period claim: "${m[0].trim()}" — grep source for the actual value: grep -rn "${m[1]}" app/ --include="*.py" | grep -i "retention\\|days\\|year\\|threshold"`);
+    }
+
+    // Also catch "X-year" / "X year" standalone phrases near retention context
+    const yearPhrases = docContent.matchAll(/\b(\d+)[\s-]year\b.*?(?:retention|records?|minimum)/gi);
+    for (const m of yearPhrases) {
+        const days = parseInt(m[1]) * 365;
+        hints.push(`- Year-based claim: "${m[0].slice(0, 60).trim()}" — Python code often stores this as days in timedelta(). Run BOTH:\n  1. grep -rn "timedelta(days=" app/ --include="*.py" | grep -v "pycache"\n  2. grep -rn "${days}" app/ --include="*.py" | grep -v "pycache"\n  The actual days value in code is the source of truth — use that value, not the doc's year claim.`);
+    }
+
+    // ── Class/function name claims ───────────────────────────────────────────
+    // Backtick or inline code references to class/function names
+    const codeRefs = [...docContent.matchAll(/`([A-Z][a-zA-Z]+(?:Service|Manager|Encryption|Storage|Validator|Helper|Audit|Log)[a-zA-Z]*)`/g)];
+    const uniqueRefs = [...new Set(codeRefs.map(m => m[1]))].slice(0, 6);
+    for (const ref of uniqueRefs) {
+        hints.push(`- Class/function "${ref}" — verify it exists: grep -r "class ${ref}\\|def ${ref}" app/ --include="*.py"`);
+    }
+
+    // ── Specific numeric config values ───────────────────────────────────────
+    // e.g. "100,000 iterations", "$500", "15 days", "24-hour"
+    const numericClaims = [...docContent.matchAll(/\b(\d{2,}(?:,\d{3})*)\s*(iterations?|days?|hours?|requests?)\b/gi)];
+    for (const m of numericClaims.slice(0, 4)) {
+        const rawNum = m[1].replace(/,/g, '');
+        hints.push(`- Numeric claim: "${m[0].trim()}" — grep for ${rawNum} in source: grep -r "${rawNum}" app/ --include="*.py"`);
+    }
+
+    // ── File path claims ──────────────────────────────────────────────────────
+    // e.g. references to specific file paths in backticks
+    const filePaths = [...docContent.matchAll(/`(app\/[a-zA-Z0-9_\/\.]+\.py)`/g)];
+    const uniquePaths = [...new Set(filePaths.map(m => m[1]))].slice(0, 4);
+    for (const p of uniquePaths) {
+        hints.push(`- File path "${p}" — verify it exists: shell_read Get-Item '${p}'`);
+    }
+
+    return hints;
+}
+
 function stripSelectStringPrefixes(text: string): string {
     return text.split('\n').map(line => {
         if (line.startsWith('> ')) { return line.slice(2); }   // match line
@@ -203,7 +259,7 @@ export const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'edit_file',
-            description: 'Make a targeted edit to an existing file by replacing old_string with new_string. Use shell_read with grep/cat to get the exact current content first. The old_string must match exactly (including whitespace/indentation).',
+            description: 'Make a targeted edit to an existing file by replacing old_string with new_string. ONLY use this when you do NOT have line numbers. If you have line numbers from a previous shell_read, use edit_file_at_line instead — it is more reliable. The old_string must match exactly (including whitespace/indentation).',
             parameters: {
                 type: 'object',
                 properties: {
@@ -531,10 +587,20 @@ Rules:
 Current date: ${dateStr}, ${timeStr}.${activeLanguage ? ` Active file: ${activeFile} (${activeLanguage}).` : ''}${workspaceInfo ? `\n${workspaceInfo}` : ''}
 
 CRITICAL — You are operating INSIDE A REAL PROJECT. When the user asks ANY question about code, features, or how something works, you MUST search the actual project files to answer — do NOT answer from general knowledge or training data.
-- "show me how X works" → shell_read with grep to find X in the project, then cat the file
-- "where is X configured" → shell_read with grep/find to locate it in the project
-- "explain how X works" → shell_read with grep to find X, cat the relevant file, explain THAT code
-- NEVER answer with generic NFC / payment / hardware explanations — find the ACTUAL code
+
+CRITICAL — MEMORY BEFORE FILES. For any feature request or vague business requirement, you MUST call memory_search FIRST to retrieve project context, THEN use shell_read to find the affected files. This sequence is mandatory:
+  1. memory_search("<topic>") — retrieve what you already know about this area
+  2. shell_read / grep — find the specific files using what memory told you
+  3. edit_file — make the change
+
+Examples:
+- "allow decimals for X" → memory_search("weight field") THEN grep for weight in the codebase
+- "add feature Y to page Z" → memory_search("page Z") THEN find the template/route
+- "how does X work?" → memory_search("X") THEN cat the file memory pointed you to
+- "show me how X works" → memory_search("X") THEN shell_read with grep to find X, then cat the file
+- "where is X configured" → memory_search("X config") THEN shell_read with grep/find to locate it
+- "explain how X works" → memory_search("X") THEN grep to find X, cat the relevant file
+- NEVER skip memory_search for ANY feature/change/question — always check memory first
 ${autoSaveBlock}
 You have access to the following tools:
 
@@ -559,8 +625,9 @@ ${buildShellExamples(detectShellEnvironment(), workspaceRoot)}
 Guidelines:
 - ALWAYS CALL TOOLS DIRECTLY — never explain what tool to call, just call it immediately
 - Use shell_read for ALL reading: cat file.py, grep -n pattern file.py, find . -name '*.py', ls dir/, git diff
-- Use run_command for ALL writes/moves/deletes: mv, cp, rm, mkdir, touch, pip install, npm install, tests, builds
-- Use edit_file ONLY for precise string replacements in source files (grep for exact strings first)
+- Use run_command for moves/deletes/installs/builds: mv, cp, rm, mkdir, pip install, npm install, tests
+- Use edit_file for string replacements OR creating new files (old_string="" creates the file automatically)
+- NEVER use New-Item/touch/run_command to create source files — always use edit_file with old_string=""
 - CRITICAL: When user asks about errors or diagnostics, call get_diagnostics FIRST — do NOT run external linters unless asked
 - After editing files, call get_diagnostics to check for new errors
 - Prefer shell_read for ANY read-only operation — no confirmation required
@@ -569,6 +636,8 @@ ${memoryGuidelines}
 - CRITICAL: When user asks "what do you know about this project", call memory_list — do not answer from conversation alone
 - CRITICAL: When user asks "explain what this project does", call workspace_summary FIRST — memory alone is not enough
 - CRITICAL: Before calling memory_delete, ALWAYS call memory_list first to get real IDs — never guess IDs
+- CRITICAL: When the user gives a VAGUE BUSINESS REQUIREMENT (e.g. "allow decimals for X", "add feature Y to page Z"), call memory_search FIRST with the relevant concept (e.g. "weight field", "transaction page") to discover what the project already knows — then use shell_read to find the affected files
+- CRITICAL: Before implementing ANY feature request or code change, call memory_search("<feature area>") to check if there are existing patterns, conventions, or past decisions relevant to that area
 - Be concise and accurate. Format all code with markdown fenced code blocks.
 
 CRITICAL — Action-Oriented Responses:
@@ -580,6 +649,20 @@ CRITICAL — Action-Oriented Responses:
 CRITICAL — Discover Before Acting:
 - Before moving/renaming/reorganizing files, use shell_read to list the directory first — verify real filenames
 - NEVER create placeholder files when moving fails — find the real files with shell_read instead
+
+CRITICAL — Docs Must Match Code:
+- When you read a documentation file (.md, .rst, .txt) that makes specific claims about code behavior (e.g. retention periods, class names, method names, config values), you MUST verify those claims against the actual source code using shell_read/grep
+- If you find a discrepancy between a doc and the code, flag it clearly: "⚠️ Doc says X but code does Y (file:line)" and ask the user if they want you to update the doc
+- NEVER present doc content as fact without cross-checking verifiable claims (numbers, class names, function names, config values) against the real code
+- When answering questions about compliance, security, or data handling: ALWAYS check BOTH the docs folder (shell_read docs/*.md) AND the actual source code — then cross-check them and report any mismatches
+
+CRITICAL — Security/PII Questions:
+- When asked about PII, encryption, security, or data protection, you MUST follow this exact sequence:
+  1. shell_read the relevant doc file FIRST: Get-Content 'docs/PII_COMPLIANCE.md' or docs/COMPLIANCE.md
+  2. shell_read the actual source files to verify: app/utils/pii_encryption.py, app/models/customer.py, app/utils/pii_audit.py
+  3. Cross-check: for every specific claim in the doc (numbers, class names, retention periods), verify against the code
+  4. Report any mismatches with ⚠️ and ask user if they want the doc updated
+- Do NOT skip step 1 — docs must always be read AND cross-checked, not just the code alone
 ${projectGuidance ?? (workspaceRoot ? buildProjectTypeGuidance(workspaceRoot) : '')}`;
 }
 
@@ -623,11 +706,20 @@ The number before the colon is the line number. Use it with edit_file_at_line.
    - end_line: last line to replace (inclusive). Use end_line = start_line - 1 to insert without replacing.
    - new_content: your replacement (match surrounding indentation)
 
+## Before making any change — VALIDATE silently first
+Read the [PRE-LOADED CONTEXT] and check internally (do NOT narrate the checks):
+1. **Duplicate**: Is there already a route or function that does the same thing? If yes → output only: "Already exists: [name]. No change needed."
+2. **Model**: Does my change need a database model? If yes → it MUST be in the "RULE" list in [PRE-LOADED CONTEXT]. If missing → output only: "Cannot proceed: [ModelName] is not a known model. Available: ..."
+3. **Pattern**: Use the same blueprint name, decorators, and import style shown in the file.
+4. **Fit**: Does this change belong in this file?
+
+**If any check fails → output one short sentence explaining why, then stop.**
+**If all checks pass → call edit_file_at_line immediately. Output ONLY the tool call — no explanation, no narration.**
+
 ## Rules
 - PREFER edit_file_at_line over edit_file — it is more reliable
 - Do NOT call shell_read — the file content is already provided
-- Do NOT describe what you will do — call the tool immediately
-- If the change is already present, say so and stop`;
+- Never use placeholder logic like \`pass\` or \`# TODO\` — implement the actual logic based on the patterns in the file`;
 }
 
 // ── Text-mode tool calling (fallback for models without native tool support) ──
@@ -825,7 +917,7 @@ ${buildTextModeShellExamples(detectShellEnvironment(), workspaceRoot)}
 CRITICAL — File Modifications:
 - To READ a file: shell_read with cat, head, grep, etc.
 - To EDIT a file: grep for the exact string first, then edit_file with that exact string
-- To CREATE a file: run_command with cat/heredoc or echo redirect, OR write inline with run_command
+- To CREATE a new file: use edit_file with old_string="" and new_string=<full file content> — it will create the file automatically
 - To MOVE/RENAME: run_command with mv/Move-Item
 - To DELETE: run_command with rm/Remove-Item
 - NEVER show shell commands in code blocks — CALL THE TOOL
@@ -1230,7 +1322,10 @@ function stripToolBlocks(text: string): string {
         return true;
     });
     
-    return filtered.join('\n').replace(/\n{2,}/g, '\n').trim();
+    let out = filtered.join('\n').replace(/\n{2,}/g, '\n').trim();
+    // Remove code fences whose body is empty or only whitespace/punctuation after stripping tool blocks
+    out = out.replace(/```\w*\s*\n[\s})\]]*\n```/g, '').trim();
+    return out;
 }
 
 // ── Agent ─────────────────────────────────────────────────────────────────────
@@ -1253,6 +1348,29 @@ export class Agent {
 
     /** Models known to need text mode (persisted across sessions via static map) */
     private static textModeModels = new Set<string>();
+
+    /**
+     * Model families that never support native tool calling.
+     * Matched as case-insensitive prefix/substring of the model name.
+     * No detection round-trip needed — go straight to text-mode silently.
+     */
+    private static readonly KNOWN_TEXT_MODE_FAMILIES = [
+        'qwen',
+        'deepseek-coder',
+        'deepseek-r',
+        'codellama',
+        'starcoder',
+        'wizardcoder',
+        'phind-codellama',
+        'magicoder',
+        'codegemma',
+        'yi-coder',
+    ];
+
+    private static isKnownTextModeModel(model: string): boolean {
+        const lower = model.toLowerCase();
+        return Agent.KNOWN_TEXT_MODE_FAMILIES.some(family => lower.startsWith(family) || lower.includes(':' + family));
+    }
     /** Track consecutive failed tool calls to prevent infinite loops */
     private consecutiveFailures = 0;
     private readonly MAX_CONSECUTIVE_FAILURES = 3;
@@ -1295,6 +1413,7 @@ export class Agent {
     private refactorManager: MultiFileRefactoringManager;
     /** Last file operation for undo support */
     private _lastFileOp: { path: string; originalContent: string | null; action: string } | null = null;
+    private _editsThisRun = 0; // count of successful file edits in current agent run
     /** Pending inline confirmation resolver */
     private _confirmResolver: ((accepted: boolean) => void) | null = null;
     /** Timeout for pending confirmation to prevent hanging forever */
@@ -1313,8 +1432,18 @@ export class Agent {
     private _filesAutoReadThisRun = new Set<string>();
     /** Whether the current model is a small model (≤9B params) — triggers read-then-act mode */
     private _isSmallModel: boolean = false;
+    private _isSweepTask: boolean = false;
+    private _isEditTask: boolean = false;
+    /** Last system prompt content — used by compactContext for accurate token counting */
+    private _lastSystemContent: string = '';
+    /** Last memory context — used by compactContext for accurate token counting */
+    private _lastMemoryContext: string = '';
     /** Whether preProcessEditTask() successfully injected file context this run */
     private _editContextInjected: boolean = false;
+    /** Active multi-file plan steps remaining (for sequential execution) */
+    private _pendingPlanSteps: FilePlan[] = [];
+    /** Output summary from the last completed plan step — passed as context to the next */
+    private _lastPlanStepOutput: string = '';
 
     constructor(
         private workspaceRoot: string,
@@ -1411,23 +1540,32 @@ export class Agent {
     }
 
     /** Manually compact conversation history to reduce context usage */
-    async compactContext(targetPercentage: number = 50): Promise<{ removed: number; newPercentage: number; summary?: string }> {
+    async compactContext(targetPercentage: number = 50, onToken?: (token: string) => void): Promise<{ removed: number; newPercentage: number; summary?: string }> {
         const model = this.currentModel || getConfig().model;
-        const stats = calculateContextStats(this.history, '', '', model);
+        const stats = calculateContextStats(this.history, this._lastSystemContent, this._lastMemoryContext, model);
         const oldCount = this.history.length;
 
         // Grab the messages that will be dropped for summarization
-        const compacted = compactHistory(
+        let compacted = compactHistory(
             this.history,
             targetPercentage,
             stats.modelLimit,
-            0,
-            0
+            stats.systemPromptTokens,
+            stats.memoryTokens
         );
+
+        // Guarantee at least 25% of messages are removed — compactHistory may remove
+        // nothing if we're already under the target percentage.
+        const minRemove = Math.max(Math.floor(oldCount * 0.4), 4);
+        if (oldCount - compacted.length < minRemove && oldCount > minRemove) {
+            compacted = this.history.slice(minRemove);
+        }
         const removedCount = oldCount - compacted.length;
 
+        logInfo(`[context] compactContext: oldCount=${oldCount} removed=${removedCount} minRemove=${Math.max(Math.floor(oldCount * 0.4), 4)}`);
+
         // Summarize dropped messages if there are enough to be worth it
-        if (removedCount >= 4) {
+        if (removedCount >= 2) {
             const dropped = this.history.slice(0, removedCount);
             const summaryText = dropped
                 .filter(m => m.role === 'user' || m.role === 'assistant')
@@ -1444,7 +1582,7 @@ export class Agent {
                             { role: 'user', content: summaryText.slice(0, 4000) },
                         ],
                         [],
-                        (token) => { summary += token; },
+                        (token) => { summary += token; onToken?.(token); },
                         this.stopRef
                     );
                     if (summary.trim()) {
@@ -1558,11 +1696,18 @@ export class Agent {
         this.currentModel = model; // Store current model for accurate context calculations
         this._currentTaskMessage = userMessage; // Capture task for use in tool interception
 
-        // If this model is known to need text mode, switch immediately
-        if (this.toolMode === 'native' && Agent.textModeModels.has(model)) {
-            this.toolMode = 'text';
-            logInfo(`Model ${model} → using text-mode (known from previous session)`);
-            post({ type: 'modeSwitch', mode: 'text', model });
+        // Pre-classify model: known text-mode families skip detection entirely (no toast, no wasted turn)
+        if (this.toolMode === 'native') {
+            if (Agent.isKnownTextModeModel(model)) {
+                this.toolMode = 'text';
+                Agent.textModeModels.add(model);
+                logInfo(`Model ${model} → text-mode (known family, no detection needed)`);
+                // No modeSwitch notification — user doesn't need to see this
+            } else if (Agent.textModeModels.has(model)) {
+                this.toolMode = 'text';
+                logInfo(`Model ${model} → text-mode (learned from previous session)`);
+                // No notification — already established, no surprise
+            }
         }
         
         // Trim history BEFORE adding new message to prevent exceeding limit
@@ -1598,6 +1743,7 @@ export class Agent {
         this._focusedGrepInjectedThisTurn = false; // Reset focused-grep dedup flag
         this._filesAutoReadThisRun.clear();    // Reset per-run auto-read tracking
         this._editContextInjected = false;     // Reset read-then-act flag
+        this._editsThisRun = 0;                // Reset edit counter
         
         logInfo(`Agent run — model: ${model}, mode: ${this.toolMode}, history: ${this.history.length}`);
 
@@ -1870,21 +2016,99 @@ export class Agent {
             || /\b(similar|duplicate|overlapping)\s+(files?|services?|modules?)\b/i.test(userMessage)
             || /what\s+files?\s+(overlap|duplicate|are similar)\b/i.test(userMessage)
             || /\bfiles?\s+(that\s+)?(do\s+)?(similar|the same|overlap)\b/i.test(userMessage));
+        const isNewFileTask = /\b(create|add|make|generate|scaffold)\b.{0,50}\bnew\s+(route\s+file|file|module|blueprint)\b/i.test(userMessage)
+            || /\b(create|generate|scaffold)\b.{0,50}\b(route\s+file|module|blueprint)\b/i.test(userMessage)
+            || /\bnew\s+(route\s+file|module|blueprint)\b/i.test(userMessage);
         const isEditTask = /\b(add|insert|append|implement|fix|modify|update|change|remove|delete|refactor|rename|replace|wrap|extract|move|convert|migrate)\b/i.test(userMessage)
             && !/\b(import|path)\b/i.test(userMessage)
             && !isMultiFileRestructure
             && !isFindSimilar
             && !isExplainQuery
+            && !isNewFileTask
             && !preProcessedContext;  // already handled by preProcessPathUpdate
-        if (this._isSmallModel && isEditTask) {
-            const editContext = await this.preProcessEditTask(userMessage, post);
-            if (editContext) {
+
+        // Multi-file feature request: "add a new model with routes and tests"
+        const isMultiFeatureRequest = !isMultiFileRestructure && !isNewFileTask
+            && /\b(add|create|implement|build|scaffold)\b.{0,80}\b(model|feature|endpoint|blueprint)\b.{0,80}\b(with|and|including|plus)\b.{0,80}\b(test|route|migration|service|schema)\b/i.test(userMessage)
+            && !/\b(error.handl|try.except)\b/i.test(userMessage); // don't trigger for sweep tasks
+
+        // ── Pre-inject sibling template for new-file tasks ─────────────────────
+        // When a small model is asked to create a new file, inject a sibling file
+        // from the target directory as a structural template. This lets the model
+        // produce correct code on turn 1 instead of spending turns exploring.
+        if (this._isSmallModel && isNewFileTask && !preProcessedContext) {
+            try {
+                // Detect target directory from message hints (e.g. "under fleet routes" → routes/fleet)
+                const dirHintMatch = userMessage.match(/\bunder\s+(?:the\s+)?(\w+)\s+(?:route|routes?|directory|folder|dir)\b/i)
+                    ?? userMessage.match(/\bin\s+(?:the\s+)?(\w+)\s+(?:route|routes?|directory|folder|dir)\b/i);
+                const dirHint = dirHintMatch?.[1]?.toLowerCase() ?? '';
+
+                // Walk routes directories to find best match
+                const wsRoot = this.workspaceRoot;
+                const routesRoot = path.join(wsRoot, 'app', 'routes');
+                let siblingDir = routesRoot;
+                if (dirHint && fs.existsSync(path.join(routesRoot, dirHint))) {
+                    siblingDir = path.join(routesRoot, dirHint);
+                }
+
+                // Pick first .py sibling that isn't __init__
+                let siblingFile: string | undefined;
+                if (fs.existsSync(siblingDir)) {
+                    const entries = fs.readdirSync(siblingDir);
+                    siblingFile = entries
+                        .filter(e => e.endsWith('.py') && !e.startsWith('__'))
+                        .map(e => path.join(siblingDir, e))
+                        .find(f => {
+                            try { return fs.statSync(f).size < 30_000; } catch { return false; }
+                        });
+                }
+
+                if (siblingFile) {
+                    const siblingContent = fs.readFileSync(siblingFile, 'utf8').slice(0, 6000);
+                    const siblingRel = path.relative(wsRoot, siblingFile).replace(/\\/g, '/');
+                    const targetDir = path.relative(wsRoot, siblingDir).replace(/\\/g, '/');
+                    const template = `\n\n[TEMPLATE — existing file in target directory (${targetDir}/): ${siblingRel}]\n\`\`\`python\n${siblingContent}\n\`\`\`\n\nCreate the new file using edit_file with path="${targetDir}/<new_filename>.py", old_string="" (empty string), and new_string=<full file content based on template above>. Do NOT use run_command or New-Item.`;
+                    this.history[this.history.length - 1] = {
+                        role: 'user',
+                        content: `${userMessage}${template}`,
+                    };
+                    logInfo(`[pre-new-file] Injected template from ${siblingRel} (${siblingContent.length} chars)`);
+                }
+            } catch (e) {
+                logInfo(`[pre-new-file] Template injection failed: ${e}`);
+            }
+        }
+
+        // ── Programmatic error-handler sweep ──────────────────────────────────
+        // "add error handling to any route that's missing it" — detect, execute directly,
+        // skip the model entirely for the wrapping work.
+        const isErrorHandlerSweep = isEditTask
+            && /\berror[\s_-]?handl|\btry[\s_-]?except|\bexception[\s_-]?handl/i.test(userMessage)
+            && /\b(all|every|each|any|missing|without)\b/i.test(userMessage);
+
+        this._isEditTask = isEditTask;
+        logInfo(`[error-sweep] isEditTask=${isEditTask} isErrorHandlerSweep=${isErrorHandlerSweep}`);
+        if (isErrorHandlerSweep) {
+            const swept = await this.sweepAddErrorHandling(userMessage, post);
+            if (swept) { return; } // handled — skip model call entirely
+        }
+
+        if (this._isSmallModel && isEditTask && !isErrorHandlerSweep) {
+            const preResult = await this.preProcessEditTask(userMessage, post);
+            if (preResult.blocked) {
+                // Programmatic duplicate detected — skip model entirely
+                post({ type: 'chunk', content: preResult.blocked });
+                post({ type: 'done' });
+                this._editContextInjected = false;
+                return;
+            }
+            if (preResult.injection) {
                 this.history[this.history.length - 1] = {
                     role: 'user',
-                    content: `${userMessage}\n\n${editContext}`,
+                    content: `${userMessage}\n\n${preResult.injection}`,
                 };
                 this._editContextInjected = true;
-                logInfo(`[pre-edit] Injected ${editContext.length} chars of pre-loaded file context`);
+                logInfo(`[pre-edit] Injected ${preResult.injection.length} chars of pre-loaded file context`);
             }
         } else if (isMultiFileRestructure) {
             // Programmatic split — no model needed.
@@ -2068,6 +2292,74 @@ export class Agent {
             return;
         }
 
+        // ── Multi-file plan gate ───────────────────────────────────────────────────
+        // If there are pending plan steps from a prior run (sequential execution),
+        // advance to the next step rather than re-generating the plan.
+        if (this._pendingPlanSteps.length > 0) {
+            const nextStep = this._pendingPlanSteps.shift()!;
+            const remaining = this._pendingPlanSteps.length;
+            const stepContext = [
+                `[MULTI-FILE PLAN — step in progress]`,
+                `Now implement: \`${nextStep.relPath}\` — ${nextStep.description}`,
+                nextStep.action === 'modify'
+                    ? `This file already exists. Modify it as described.`
+                    : `This file does not exist yet. Create it.`,
+                '',
+                this._lastPlanStepOutput
+                    ? `Context from previous step:\n${this._lastPlanStepOutput}`
+                    : '',
+                '',
+                remaining > 0
+                    ? `After this step, ${remaining} more step(s) remain in the plan.`
+                    : `This is the final step in the plan.`,
+                `Follow the patterns in the existing codebase. Use only models from app/models/.`,
+            ].filter(Boolean).join('\n');
+            this.history[this.history.length - 1] = {
+                role: 'user',
+                content: `Continue multi-file plan — implement ${nextStep.relPath}\n\n${stepContext}`,
+            };
+            post({ type: 'planProgress', step: nextStep, remaining });
+            logInfo(`[multi-plan] Advancing to step: ${nextStep.relPath}, ${remaining} remaining`);
+        } else if (isMultiFeatureRequest) {
+            const plan = this.generateMultiFilePlan(userMessage);
+            if (plan.length >= 2) {
+                const planText = plan.map((p, i) =>
+                    `${i + 1}. ${p.action === 'create' ? '✚' : '~'} \`${p.relPath}\` — ${p.description}`
+                ).join('\n');
+                post({ type: 'planCard', plan, planText });
+                const confirmed = await this.requestConfirmation(
+                    'multi_file_plan',
+                    `Proceed with creating/modifying ${plan.length} files?`,
+                    `multi_plan_${Date.now()}`
+                );
+                if (!confirmed) {
+                    post({ type: 'streamStart' });
+                    const msg = 'Plan cancelled. Let me know what you\'d like to change.';
+                    for (const ch of msg) { post({ type: 'token', text: ch }); }
+                    post({ type: 'streamEnd' });
+                    this.history.push({ role: 'assistant', content: msg });
+                    return;
+                }
+                // Queue all steps except the first (which runs now)
+                const [firstStep, ...rest] = plan;
+                this._pendingPlanSteps = rest;
+                this._lastPlanStepOutput = '';
+                const planContext = [
+                    `[MULTI-FILE PLAN — confirmed by user, step 1 of ${plan.length}]`,
+                    `Implement these files in order. Start with the first file only.`,
+                    planText,
+                    ``,
+                    `Now implement step 1: \`${firstStep.relPath}\` — ${firstStep.description}`,
+                    `Follow the patterns in the existing codebase. Use only models from app/models/.`,
+                ].join('\n');
+                this.history[this.history.length - 1] = {
+                    role: 'user',
+                    content: `${userMessage}\n\n${planContext}`,
+                };
+                logInfo(`[multi-plan] Confirmed — step 1/${plan.length}: ${firstStep.relPath}, queued ${rest.length} more`);
+            }
+        }
+
         const cfg = getConfig();
         const baseSystemContent = cfg.systemPrompt.trim()
             || (this._isSmallModel
@@ -2093,6 +2385,7 @@ export class Agent {
                 if (memoryContext) {
                     logInfo(`[agent] Loaded relevant memory context: ${Math.ceil(memoryContext.length / 4)} tokens`);
                 }
+                this._lastMemoryContext = memoryContext;
             } catch (error) {
                 logError(`[agent] Failed to load memory context: ${toErrorMessage(error)}`);
             }
@@ -2113,7 +2406,18 @@ export class Agent {
             }
         }
 
-        const MAX_TURNS = this._isSmallModel ? 8 : 25;
+        const isSweepTask = /\b(all|every|each|any)\b.{0,40}\b(route|function|endpoint|def)\b/i.test(userMessage)
+            || /\b(missing|without|lacks?)\b.{0,50}\b(error|exception|try|handl)/i.test(userMessage)
+            || /\b(no\s+error|no\s+try)\b/i.test(userMessage)
+            || /\b(add|fix).{0,30}\b(all|every|each|any)\b/i.test(userMessage);
+        this._isSweepTask = isSweepTask;
+        // Sweep tasks need a clean slate — prior history from failed/partial sweeps confuses the model
+        // into thinking the work is already done (hallucinating completion) or repeating bad strategies.
+        if (isSweepTask && this.history.length > 2) {
+            logInfo(`[agent] Sweep task with ${this.history.length} prior messages — clearing history for a fresh start`);
+            this.history = [];
+        }
+        const MAX_TURNS = isSweepTask ? 50 : (this._isSmallModel ? 8 : 25);
         this.modeSwitchRetries = 0;
         let loopExhausted = true;
 
@@ -2128,7 +2432,11 @@ export class Agent {
 ## Your Persistent Memory
 ${memoryContext}
 
-IMPORTANT: Only critical infrastructure is shown above. You have MORE memories stored across tiers 1-5. Before answering questions about project setup, conventions, frameworks, past decisions, or known issues, call memory_search("<topic>") or memory_tier_list to retrieve relevant context. Do NOT assume you have no memory — check first.`;
+IMPORTANT: Only critical infrastructure is shown above. You have MORE memories stored across tiers 1-5.
+- Before answering questions about project setup, conventions, frameworks, past decisions, or known issues → call memory_search("<topic>")
+- Before implementing ANY feature request or code change → call memory_search("<feature area>") to check existing patterns
+- When given a vague business requirement (e.g. "allow decimals for X on the Y page") → call memory_search("<X>") and memory_search("<Y page>") FIRST before looking at files
+Do NOT assume you have no memory — check first.`;
         }
 
         // Cache system content per toolMode to avoid rebuilding every turn
@@ -2152,6 +2460,7 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                     systemContent = baseSystemWithMemory;
                 }
                 lastToolMode = this.toolMode;
+                this._lastSystemContent = systemContent;
             }
             
             // ── Context Monitoring ────────────────────────────────────────────
@@ -2259,10 +2568,10 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                 if (err instanceof ToolsNotSupportedError && this.toolMode === 'native') {
                     this.toolMode = 'text';
                     Agent.textModeModels.add(model);
-                    logInfo(`Model ${model} → switching to text-mode tool calling (remembered for future sessions)`);
-                    // Clean up the empty streaming bubble that was already opened
+                    logInfo(`Model ${model} → switching to text-mode (will be remembered)`);
                     post({ type: 'streamEnd' });
                     post({ type: 'removeLastAssistant' });
+                    // Only show notice on first discovery — future sessions skip detection entirely
                     post({ type: 'modeSwitch', mode: 'text', model });
                     if (++this.modeSwitchRetries <= this.MAX_MODE_SWITCH_RETRIES) {
                         turn--; // retry this turn in text mode
@@ -2370,20 +2679,46 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                     const isQuestion = /\?/.test(userMessage) || /^\s*(what|why|how|can you|could you|would you|do you|is|are|explain|describe|show me|tell me|what is|what are)\b/i.test(userMessage);
                     const userWantsAction = !isQuestion && !isExplainQuery && /\b(find|search|look|locate|show|implement|apply|execute|move|rename|reorganize|restructure|create|build|migrate|edit|update|fix|modify|refactor|rewrite|convert|transform|add|remove|delete|deploy|install|split|separate|extract|merge|run the|do the|do it|make the)\b/.test(lastMsg);
                     const hasCodeBlockButNoTool = /```/.test(resp) && !toolCalls.length;
-                    // Don't treat a correct answer to a read/explain task as a "verbose plan dump"
-                    const isVerbosePlanDump = !toolCalls.length && userWantsAction && !isExplainQuery
+                    // Detect validation stops: model reviewed the code and decided not to act
+                    const isValidationStop = this._editContextInjected && !toolCalls.length
+                        && /already (exists?|present|there|defined|implemented)|redundant|duplicate|doesn't exist|does not exist|no mention|unresolved|missing model|can't find|cannot find|stop here|won't (proceed|make|add)|will stop|should stop|no need to add|there is no need|provide more details/i.test(resp);
+                    // Don't treat a correct answer to a read/explain task as a "verbose plan dump".
+                    // Only fire on turn 0 — after the model has called tools and is giving a final answer,
+                    // a text-only response is the conclusion, not a plan dump.
+                    const isVerbosePlanDump = !toolCalls.length && userWantsAction && !isExplainQuery && !isValidationStop
+                        && turn === 0
                         && (resp.length > 400 || hasCodeBlockButNoTool);
                     // Model asked user to provide file/content instead of reading it itself
-                    const isAskingUserToProvide = /please provide|provide the (contents|file|code|text)|share the (contents|file|code)|paste the|send me the|provide me with/i.test(resp);
+                    // But NOT when it's a validation stop asking for clarification on what to change
+                    const isAskingUserToProvide = !isValidationStop && /please provide|provide the (contents|file|code|text)|share the (contents|file|code)|paste the|send me the|provide me with/i.test(resp);
 
-                    if (isAskingPermission && userWantsAction) {
+                    // Sweep task: model gave a no-tool completion summary (hallucinated from history)
+                    // Detect: sweep task + no tools called + response looks like a prior-session summary
+                    const isSweepHallucination = isSweepTask && !toolCalls.length && turn === 0
+                        && /updated\s+\d+\s+routes?|added\s+error\s+handling|routes?:\s*\[/i.test(resp);
+                    if (isSweepHallucination) {
+                        this.autoRetryCount++;
+                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: sweep task hallucinated completion from history — forcing fresh file read`);
+                        this.history.pop();
+                        this.history.push({
+                            role: 'user',
+                            content: `[SYSTEM: You reported completing the task but you have NOT called any tools in this session. You must actually READ the file and make the edits. Start by calling shell_read to read the current state of the file NOW. Do not rely on prior conversation history — the file may have changed.]`
+                        });
+                        post({ type: 'removeLastAssistant' });
+                        continue;
+                    }
+
+                    // Fire on: (1) action query asking permission, or (2) model already called tools (turn>0) and now stalls with a question
+                    if (isAskingPermission && (userWantsAction || turn > 0)) {
                         this.autoRetryCount++;
                         logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model asked for permission instead of acting (turn ${turn})`);
                         // Replace the assistant's response with a nudge
                         this.history.pop(); // remove the assistant message we just pushed
                         this.history.push({
                             role: 'user',
-                            content: '[SYSTEM: You asked for permission but the user already told you to do it. Do NOT ask — start calling tools NOW. Call the first tool immediately.]'
+                            content: turn > 0
+                                ? `[SYSTEM: You already read the file(s). Do NOT ask the user a follow-up question — just answer using the information you already have. If you need to check more files, call shell_read now. Original question: "${userMessage}"]`
+                                : '[SYSTEM: You asked for permission but the user already told you to do it. Do NOT ask — start calling tools NOW. Call the first tool immediately.]'
                         });
                         post({ type: 'removeLastAssistant' });
                         continue; // retry this turn
@@ -2411,24 +2746,65 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                     // instead of continuing to answer (applies regardless of userWantsAction — explain/show/how queries too)
                     const isOfferingHelp = /\b(is there anything (else|more)|anything else i can|feel free to ask|let me know if|how can i (further )?help|do you (have|want|need)|would you like|shall i|next steps?)\b/i.test(resp);
                     // Model described what it would do instead of doing it (planning dump after reading a file)
-                    const isPlanningInsteadOfDoing = userWantsAction && turn > 0 && !toolCalls.length && resp.length > 300
-                        && /\b(you would|you could|you can|you need to|would need to|to (split|refactor|separate|reorganize|restructure|move|create|migrate))\b/i.test(resp);
+                    // Does NOT require userWantsAction — even for "which X has Y?" queries, planning instead of checking is wrong
+                    const isPlanningInsteadOfDoing = turn > 0 && !toolCalls.length && resp.length > 300
+                        && /\b(you would|you could|you can|you need to|would need to|we would need to|to (split|refactor|separate|reorganize|restructure|move|create|migrate)|to (find|check|inspect|verify|look at) (which|each|every|all))\b/i.test(resp);
                     // Don't retry explain/read tasks that already received tool results and produced a substantive answer.
                     // "read X and tell me Y" tasks are done once the model answers after reading — no further tools needed.
                     const modelAlreadyAnswered = isExplainQuery && turn > 0 && toolCalls.length === 0
                         && resp.length > 400;
-                    const isSummaryWithQuestion = !isAskingPermission && !toolCalls.length
+                    // Detect hedging answers that reference files without reading them
+                    const isHedgingWithoutReading = !toolCalls.length && !modelAlreadyAnswered
+                        && turn > 0 && turn < 4
+                        && /\b(likely (contains?|defines?|handles?|has|includes?)|probably (defines?|contains?|handles?)|may (contain|exist|include|define)|likely defined in|implied by|details aren't visible|schema details|exact.*not visible|check the code in)\b/i.test(resp)
+                        && /`[^`]+\.py`/.test(resp); // mentions a .py file in backticks
+                    const isSummaryWithQuestion = !toolCalls.length
                         && !modelAlreadyAnswered
+                        && !isHedgingWithoutReading
                         && turn > 0 && resp.length > 100
                         && (isOfferingHelp || isPlanningInsteadOfDoing || (/\b(here are|the (?:search|results?|output|matches)|found \d+|instances?|occurrences?)\b/i.test(resp)
                         && /\b(would you|shall i|do you want|like me to|specific file|which file|what file|have another|next step)\b/i.test(resp)));
+                    if (isHedgingWithoutReading) {
+                        this.autoRetryCount++;
+                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model gave hedged answer without reading referenced files (turn ${turn})`);
+                        this.history.pop();
+                        this.history.push({
+                            role: 'user',
+                            content: `[SYSTEM: Your answer used words like "likely" or "probably" about files you haven't read yet. You MUST read the actual files to give a definitive answer. Use shell_read to read the specific .py files you mentioned and confirm the exact table names and schema. Call the tool NOW.]`
+                        });
+                        post({ type: 'removeLastAssistant' });
+                        continue;
+                    }
                     if (isSummaryWithQuestion) {
                         this.autoRetryCount++;
                         logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model summarized results and asked/offered help instead of answering (turn ${turn})`);
                         this.history.pop();
+                        // On repeated stalls, give a concrete grep command to unblock the model
+                        const retryNudge = this.autoRetryCount >= 2
+                            ? `[SYSTEM: STOP describing what you would do. You MUST call shell_read RIGHT NOW with a grep command. Example: shell_read with command="Get-ChildItem -Path 'c:/Users/david/Documents/source/scrapyard_new_ai/app/routes' -Recurse -Filter '*.py' | ForEach-Object { $f=$_.FullName; $m=Select-String -Path $f -Pattern 'try:' -Quiet; if (-not $m) { $f } }". This will list files with no try: blocks. Call it NOW — do not explain, do not ask, just call the tool.]`
+                            : `[SYSTEM: You summarized a tool result and asked the user a follow-up question or offered help. Do NOT ask — just answer. The user's original question was: "${userMessage}". Use what you already found to answer it directly. If you need more detail, use shell_read to read the relevant files NOW. Do NOT ask the user anything — call a tool immediately.]`;
                         this.history.push({
                             role: 'user',
-                            content: `[SYSTEM: You summarized a tool result and asked the user a follow-up question or offered help. Do NOT ask — just answer. The user's original question was: "${userMessage}". Use what you already found to answer it directly. If you need more detail, use shell_read with cat/grep on the most relevant file. Do NOT ask the user anything.]`
+                            content: retryNudge
+                        });
+                        post({ type: 'removeLastAssistant' });
+                        continue;
+                    }
+
+                    // Sweep task: model declared completion mid-sweep without having edited all items.
+                    // Detect: sweep task + turn > 0 + no tools + "all routes ... done / no further" language
+                    // Only treat as premature-done if model hasn't made any edits yet this run.
+                    // If edits were made and model says done, trust it — don't force re-reads.
+                    const isSweepPrematureDone = isSweepTask && !toolCalls.length && turn > 0
+                        && this._editsThisRun === 0
+                        && /\b(all routes?|no further|already (have|has)|complete[d]?|nothing (else|more)|no (more|additional)|updated all)\b/i.test(resp);
+                    if (isSweepPrematureDone) {
+                        this.autoRetryCount++;
+                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: sweep task declared completion with 0 edits (turn ${turn}) — forcing re-read to verify`);
+                        this.history.pop();
+                        this.history.push({
+                            role: 'user',
+                            content: `[SYSTEM: You said all routes are done, but you have not made any edits yet this session. Please verify by re-reading the file with shell_read and check EVERY function. If any are missing try/except, edit them now.]`
                         });
                         post({ type: 'removeLastAssistant' });
                         continue;
@@ -2533,12 +2909,14 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
             // In text mode, execute only the FIRST tool call per turn.
             // Remaining calls are saved and re-injected as a reminder after the first
             // result so the model continues in order without rediscovering its own plan.
-            const callsToExecute = isTextMode && toolCalls.length > 1
-                ? [toolCalls[0]]
-                : toolCalls;
-            const deferredCalls = isTextMode && toolCalls.length > 1
-                ? toolCalls.slice(1)
-                : [];
+            // In text-mode, execute only the first tool call per turn — EXCEPT for sweep tasks where
+            // the model may emit all edits in one batch. For sweeps, execute all at once to avoid
+            // the model losing track of deferred calls and generating no-op verify edits.
+            // Always batch read-only tool calls (shell_read, memory_search) — deferral only needed for edit tools
+            const allReadOnly = toolCalls.every(tc => ['shell_read', 'memory_search', 'code_search'].includes(tc.function.name));
+            const executeBatch = this._isSweepTask || allReadOnly || !(isTextMode && toolCalls.length > 1);
+            const callsToExecute = executeBatch ? toolCalls : [toolCalls[0]];
+            const deferredCalls = executeBatch ? [] : toolCalls.slice(1);
             if (deferredCalls.length > 0) {
                 logInfo(`[agent] Text-mode: model emitted ${toolCalls.length} tool calls, executing first (${toolCalls[0].function.name}), deferring ${deferredCalls.length} remaining`);
             }
@@ -2602,7 +2980,10 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                 const sameToolLimit = ACTION_BATCH_TOOLS.has(name)
                     ? this.MAX_CONSECUTIVE_SAME_TOOL_ACTION
                     : this.MAX_CONSECUTIVE_SAME_TOOL_DEFAULT;
-                if (this.consecutiveSameToolCalls >= sameToolLimit) {
+                // Sweep tasks legitimately call edit_file many times in a row (once per route/function).
+                // Skip the same-tool consecutive limit for sweep tasks to avoid breaking mid-sweep.
+                const skipSameToolLimit = this._isSweepTask && (name === 'edit_file' || name === 'shell_read');
+                if (!skipSameToolLimit && this.consecutiveSameToolCalls >= sameToolLimit) {
                     logWarn(`[agent] Breaking same-tool loop: ${name} called ${this.consecutiveSameToolCalls} times consecutively (limit: ${sameToolLimit})`);
                     // Tell the model to try a different approach — not just summarize and give up
                     const hint = `You have called ${name} ${this.consecutiveSameToolCalls} times in a row. Try a different approach — use a different tool or different arguments.`;
@@ -2622,7 +3003,7 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                 // When context was pre-injected by preProcessEditTask(), the model
                 // already has the file content.  Prevent it from wasting turns on
                 // shell exploration by short-circuiting shell_read calls.
-                if (name === 'shell_read' && this._isSmallModel && this._editContextInjected) {
+                if (name === 'shell_read' && this._isSmallModel && this._editContextInjected && !isSweepTask) {
                     const blockedResult = '[SYSTEM: File content has already been provided in the [PRE-LOADED CONTEXT] section. Do NOT search again. Use edit_file with old_string copied verbatim from that content.]';
                     post({ type: 'toolCall', id: toolId, name, args });
                     post({ type: 'toolResult', id: toolId, name, success: true, preview: blockedResult });
@@ -2635,15 +3016,61 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                     continue;
                 }
 
+                const isSweepMessage = /\b(all|every|each|any)\b.{0,40}\b(route|function|endpoint|def)\b/i.test(this._currentTaskMessage)
+                    || /\b(missing|without|lacks?)\b.{0,50}\b(error|exception|try|handl)/i.test(this._currentTaskMessage)
+                    || /\b(no\s+error|no\s+try)\b/i.test(this._currentTaskMessage)
+                    || /\b(add|fix).{0,30}\b(all|every|each|any)\b/i.test(this._currentTaskMessage);
                 let toolResult: string;
                 try {
                     toolResult = await this.executeTool(name, args, toolId);
                     logInfo(`Tool ${name} OK — ${toolResult.length} chars`);
+                    // Auto-fix: if model used `cat` on Windows and got "not recognized" error,
+                    // silently retry with Get-Content so the model gets real file content.
+                    if (name === 'shell_read'
+                        && /is not recognized|Cannot find path|is not a valid/i.test(toolResult)
+                        && /^\s*cat\s/i.test(String(args.command ?? ''))) {
+                        const catCmd = String(args.command ?? '');
+                        // Replace leading `cat ` with `Get-Content `, preserve the path argument
+                        const gcCmd = catCmd.replace(/^\s*cat\s+/i, 'Get-Content ');
+                        logInfo(`[agent] cat failed on Windows — retrying with Get-Content: ${gcCmd}`);
+                        const retryId = `t_gc_${Date.now()}`;
+                        post({ type: 'toolCall', id: retryId, name: 'shell_read', args: { command: gcCmd } });
+                        try {
+                            const gcResult = await this.runShellRead(gcCmd, this.workspaceRoot, retryId);
+                            post({ type: 'toolResult', id: retryId, name: 'shell_read', success: true, preview: gcResult.slice(0, 150) });
+                            if (gcResult && gcResult.length > toolResult.length) {
+                                logInfo(`[agent] Get-Content retry succeeded — ${gcResult.length} chars`);
+                                toolResult = gcResult;
+                                // Update args so downstream interceptors see the corrected command
+                                (args as Record<string, unknown>).command = gcCmd;
+                            }
+                        } catch (e) {
+                            post({ type: 'toolResult', id: retryId, name: 'shell_read', success: false, preview: String(e) });
+                        }
+                    }
                     // Intercept large file reads when user wants an edit: replace with focused grep
-                    // so the model never sees 16000-char file content that floods context.
+                    // For sweep edit tasks: if Get-Content hit the 16K limit, re-read with a higher cap (32K)
+                    // Only applies to edit tasks — read-only analysis queries don't need the full file content
+                    if (name === 'shell_read' && isSweepMessage && this._isEditTask && toolResult.length >= 15_900
+                        && /Get-Content|cat\s/i.test(String(args.command ?? ''))) {
+                        logInfo(`[agent] Sweep task — toolResult hit 16K limit, re-reading with 32K limit`);
+                        try {
+                            const sweepCmd = String(args.command ?? '');
+                            const fuller = await this.runShellRead(sweepCmd, this.workspaceRoot, toolId + '_sweep', 32_000);
+                            if (fuller.length > toolResult.length) {
+                                toolResult = fuller;
+                                logInfo(`[agent] Sweep re-read: ${toolResult.length} chars`);
+                            }
+                        } catch { /* keep original */ }
+                        if (toolResult.length >= 31_900) {
+                            toolResult += `\n\n[FILE TRUNCATED] More content follows. After editing routes visible above, call shell_read with: Get-Content "<path>" | Select-Object -Skip 400 to see the rest.`;
+                        }
+                    }
                     if (name === 'shell_read' && toolResult.length > 3000
                         && /Get-Content|cat\s/i.test(String(args.command ?? ''))
-                        && /\b(apply|implement|update|edit|modify|fix|refactor|improve|change|add|append|write|create|replace)\b/i.test(this._currentTaskMessage)) {
+                        && /\b(apply|implement|update|edit|modify|fix|refactor|improve|change|add|append|write|replace)\b/i.test(this._currentTaskMessage)
+                        && !/\b(create|new file|new route|scaffold)\b/i.test(this._currentTaskMessage)
+                        && !isSweepMessage) {
                         const interceptCmd = String(args.command ?? '');
                         const interceptPathMatch = interceptCmd.match(/['"](.*?)['"]/);
                         const interceptPath = interceptPathMatch?.[1] ?? '';
@@ -2711,19 +3138,22 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
 
                     // Track edit_file failures per (path, old_string) to catch repeated identical failures.
                     if (name === 'edit_file') {
-                        const editSig = `${String(args.path ?? '')}::${String(args.old_string ?? '').slice(0, 120)}`;
+                        const editSig = `${String(args.path ?? '')}::${String(args.old_string ?? '').slice(0, 240)}`;
                         const editFailCount = (this._failedEditSignatures.get(editSig) ?? 0) + 1;
                         this._failedEditSignatures.set(editSig, editFailCount);
                         if (editFailCount >= this.MAX_SAME_EDIT_FAILURES) {
-                            const editHint = `You have tried to edit "${args.path}" with old_string "${String(args.old_string ?? '').slice(0, 80)}..." ${editFailCount} times and it keeps failing. The old_string does NOT exist in the file as written. Either:\n1. The string is not in this file at all (wrong file — skip it and move to the next one)\n2. The exact text differs (whitespace, quotes, etc.) — use shell_read with grep -n to get the EXACT content first\nDo NOT retry the same edit_file again. Move on to the next file.`;
-                            logWarn(`[agent] edit_file same-signature failure ${editFailCount}x on "${args.path}" — breaking loop`);
+                            const sweepHint = this._isSweepTask
+                                ? ` This is a sweep task — some blocks you are trying to edit may ALREADY have been updated in a previous turn. Use shell_read with Select-String to find lines that are STILL missing the change (e.g. "Select-String -NotMatch 'logger.error'" or search for the original text), rather than retrying blocks you may have already edited.`
+                                : '';
+                            const editHint = `You have tried to edit "${args.path}" with the same old_string ${editFailCount} times and it keeps failing — that exact text does NOT exist in the file. STOP retrying. Use shell_read to read the current file content and find the exact text before attempting another edit. Do NOT guess or reconstruct from memory.${sweepHint}`;
+                            logWarn(`[agent] edit_file same-signature failure ${editFailCount}x on "${args.path}" — forcing re-read`);
                             if (isTextMode) {
                                 this.history.push({ role: 'user', content: `Tool ${name} returned:\n${toolResult}\n---\n[SYSTEM: ${editHint}]` });
                             } else {
                                 this.history.push({ role: 'tool', content: `${toolResult}\n\n${editHint}` });
                             }
                             this.consecutiveFailures = 0;
-                            break;
+                            continue; // Give model a chance to re-read, but stop the grep recovery below
                         }
                     }
 
@@ -2731,7 +3161,8 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                     // in the error ("First line found at line N") and inject with line numbers so the
                     // model can construct a precise old_string with correct indentation.
                     // Skip if focused grep was already injected this turn (auto-read pipeline already ran).
-                    if (name === 'edit_file' && /old_string not found|matches \d+ locations/i.test(toolResult) && !this._focusedGrepInjectedThisTurn) {
+                    if (name === 'edit_file' && /old_string not found|matches \d+ locations/i.test(toolResult) && !this._focusedGrepInjectedThisTurn
+                        && !String(args.path ?? '').endsWith('.ollamapilot-plan.md')) {
                         const failedPath = String(args.path ?? '');
                         if (failedPath) {
                             const envFail = detectShellEnvironment();
@@ -2777,6 +3208,7 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                             }
                             if (failGrepContent && failGrepContent.trim().length > 50) {
                                 const relFailPath = path.relative(this.workspaceRoot, absFailPath).replace(/\\/g, '/');
+
                                 const failReason = /matches \d+ locations/i.test(toolResult)
                                     ? 'Your old_string is too short and matches multiple places — add MORE surrounding context lines to make it unique.'
                                     : `Your old_string did NOT match — wrong indentation or whitespace. The exact lines from line ${lineNum > 0 ? lineNum - 3 : '?'} are shown below.`;
@@ -2785,9 +3217,9 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                                 const lineNote = lineNum > 0
                                     ? `Lines are shown as "NNNN: content" — the "NNNN: " prefix is NOT part of the file. Use only the content after the colon+space in old_string.`
                                     : '';
-                                const injectMsg = `[FILE CONTENT: ${relFailPath} lines ~${lineNum > 0 ? lineNum - 3 : '?'}-${lineNum > 0 ? lineNum + 16 : '?'}]\n${failGrepClean}\n\n${lineNote} ${failReason} Copy the EXACT content (preserving all leading spaces) into old_string and retry edit_file with path="${relFailPath}". If the logging is already present, say so and stop.`;
+                                const injectMsg = `[FILE CONTENT: ${relFailPath} lines ~${lineNum > 0 ? lineNum - 3 : '?'}-${lineNum > 0 ? lineNum + 16 : '?'}]\n${failGrepClean}\n\n${lineNote} ${failReason} Copy the EXACT content (preserving all leading spaces) into old_string and retry edit_file with path="${relFailPath}". If the content is already correct, say so and stop.`;
                                 if (isTextMode) {
-                                    this.history.push({ role: 'user', content: `Tool ${name} returned:\n${toolResult}\n---\n[SYSTEM: ${injectMsg}]` });
+                                    this.history.push({ role: 'user', content: `Tool ${name} returned:\n${toolResult}\n---\n${injectMsg}` });
                                 } else {
                                     this.history.push({ role: 'tool', content: `${toolResult}\n\n${injectMsg}` });
                                 }
@@ -2854,7 +3286,8 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                             && /\b(edit|update|change|fix|modify|point|adjust|rewrite)\b/i.test(lastUserMsg);
                         const wantsAction = /\b(move|rename|reorganize|restructure|migrate|run|execute|do\s+(it|them|that|those|this|the)|go\s+ahead|make\s+it|mkdir|delete|remove|copy)\b/.test(lastUserMsg)
                             || (/\b(implement|apply)\b/.test(lastUserMsg) && /\b(organiz|restructur|folder|director|migrat|move|layout|recommend)/.test(lastUserMsg));
-                        const wantsEdit = /\b(apply|implement|rewrite|update|edit|modify|fix|refactor|improve|change|add|append|write|create|replace|overhaul|rework|redo|revise|optimize|clean\s*up)\b/.test(lastUserMsg);
+                        const wantsEdit = /\b(apply|implement|rewrite|update|edit|modify|fix|refactor|improve|change|add|append|write|create|replace|overhaul|rework|redo|revise|optimize|clean\s*up)\b/.test(lastUserMsg)
+                            && !/\b(create|new file|new route|scaffold)\b/i.test(lastUserMsg);
                         // Detect PowerShell/shell errors that mean the path doesn't exist
                         const isShellError = /Cannot find path|does not exist|ItemNotFoundException|PathNotFound|No such file|not recognized as|is not recognized/i.test(toolResult);
                         // Detect empty file searches: explicit "not found" messages OR PowerShell
@@ -2888,11 +3321,15 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                             // Programmatically read the most relevant file and inject content so
                             // the model doesn't loop trying to re-search.
                             // Pick the most relevant path: prefer .py service files, skip __pycache__
-                            const relevantPath = contentLines
-                                .filter(l => !/__pycache__|\.pyc$|htmlcov/.test(l))
-                                .find(l => /service/i.test(l) && /\.py$/i.test(l))
-                                ?? contentLines.filter(l => !/__pycache__|\.pyc$|htmlcov/.test(l)).find(l => /\.py$/i.test(l))
-                                ?? contentLines.filter(l => !/__pycache__|\.pyc$|htmlcov/.test(l))[0]
+                            const cleanPaths = contentLines.filter(l => !/__pycache__|\.pyc$|htmlcov/.test(l));
+                            // Extract the filename the user mentioned (e.g. "fleet.py" from "in fleet.py")
+                            const mentionedFile = (lastUserMsg.match(/\b([\w.-]+\.py)\b/i) ?? [])[1]?.toLowerCase() ?? '';
+                            // Prefer: path whose parent folder matches the mentioned filename (e.g. fleet/fleet.py)
+                            const stem = mentionedFile.replace(/\.py$/i, '');
+                            const relevantPath = cleanPaths.find(l => new RegExp(`[/\\\\]${stem}[/\\\\]${stem}\\.py$`, 'i').test(l))
+                                ?? cleanPaths.find(l => /service/i.test(l) && /\.py$/i.test(l))
+                                ?? cleanPaths.find(l => /\.py$/i.test(l))
+                                ?? cleanPaths[0]
                                 ?? contentLines[0];
                             // Skip auto-read if we already injected content for this file this run
                             if (this._filesAutoReadThisRun.has(relevantPath)) {
@@ -2921,11 +3358,23 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                             const catCmd = env2.os === 'windows'
                                 ? `Get-Content "${pathForCmd}"`
                                 : `cat "${pathForCmd}"`;
-                            logInfo(`[agent] Auto-reading file (focused grep) after path search: ${grepCmd}`);
                             const autoReadId = `t_autoread_${Date.now()}`;
-                            post({ type: 'toolCall', id: autoReadId, name: 'shell_read', args: { command: grepCmd } });
                             let fileContent = '';
                             let usedFullRead = false;
+                            // Sweep tasks need the full file — skip focused grep entirely
+                            if (isSweepMessage) {
+                                logInfo(`[agent] Sweep task auto-read — using full file read: ${catCmd}`);
+                                post({ type: 'toolCall', id: autoReadId, name: 'shell_read', args: { command: catCmd } });
+                                try {
+                                    fileContent = await this.runShellRead(catCmd, this.workspaceRoot, autoReadId, 32_000);
+                                    post({ type: 'toolResult', id: autoReadId, name: 'shell_read', success: true, preview: fileContent.slice(0, 150) });
+                                    usedFullRead = true;
+                                } catch (e) {
+                                    post({ type: 'toolResult', id: autoReadId, name: 'shell_read', success: false, preview: String(e) });
+                                }
+                            } else {
+                            logInfo(`[agent] Auto-reading file (focused grep) after path search: ${grepCmd}`);
+                            post({ type: 'toolCall', id: autoReadId, name: 'shell_read', args: { command: grepCmd } });
                             try {
                                 fileContent = await this.runShellRead(grepCmd, this.workspaceRoot, autoReadId);
                                 // If grep returned almost nothing, fall back to full file read
@@ -2947,15 +3396,31 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                             } catch (e) {
                                 post({ type: 'toolResult', id: autoReadId, name: 'shell_read', success: false, preview: String(e) });
                             }
+                            } // end non-sweep branch
                             if (fileContent && fileContent.length > 100) {
                                 const relPath = path.relative(this.workspaceRoot, relevantPath.replace(/\//g, path.sep)).replace(/\\/g, '/');
                                 const readNote = usedFullRead
                                     ? 'The FULL file content is shown above.'
                                     : 'Relevant sections of the file are shown above (lines matching the task keywords + context).';
                                 // Strip PowerShell "> " prefixes and cap at 2000 chars
-                                const fileContentClean = usedFullRead ? fileContent : stripSelectStringPrefixes(fileContent);
-                                const fileContentTrunc = fileContentClean.length > 2000 ? fileContentClean.slice(0, 2000) + '\n...(truncated)' : fileContentClean;
-                                nudge = `[AUTO-READ: ${relPath}]\n${fileContentTrunc}\n\n${readNote} Now apply the user's requested change using edit_file with path="${relPath}" and EXACT strings copied from the content above. Do NOT use absolute paths. Do NOT search again. If the change is ALREADY present in the file, say so and stop.`;
+                                let fileContentClean = usedFullRead ? fileContent : stripSelectStringPrefixes(fileContent);
+                                // For full reads, add line numbers so model can use edit_file_at_line
+                                if (usedFullRead) {
+                                    const numbered = fileContentClean.split('\n')
+                                        .map((l, i) => `${String(i + 1).padStart(4, ' ')}: ${l}`)
+                                        .join('\n');
+                                    fileContentClean = numbered;
+                                }
+                                // Sweep tasks get a larger window but not unbounded
+                                const truncLimit = isSweepMessage ? 16000 : 8000;
+                                const fileContentTrunc = fileContentClean.length > truncLimit ? fileContentClean.slice(0, truncLimit) + '\n...(truncated)' : fileContentClean;
+                                const planPath = relPath.replace(/[^/]+$/, '.ollamapilot-plan.md');
+                                const editInstruction = usedFullRead && isSweepMessage
+                                    ? `[SWEEP TASK]\nReview every function/route in the file above. For each one MISSING the requested change, call edit_file with:\n- path="${relPath}"\n- old_string: the EXACT current function body copied verbatim from the file above\n- new_string: the updated function body with the change applied\nDo NOT use edit_file_at_line — line numbers shift after each edit and will cause corruption. Use edit_file with exact string matching only. Edit one function per call, then continue to the next.`
+                                    : usedFullRead
+                                    ? `Use edit_file with path="${relPath}" and EXACT strings copied from the content above.`
+                                    : `Use edit_file with path="${relPath}" and EXACT strings copied from the content above.`;
+                                nudge = `[AUTO-READ: ${relPath}]\n${fileContentTrunc}\n\n${readNote} ${editInstruction} Do NOT use absolute paths. Do NOT search again. If the change is ALREADY present in the file, say so and stop.`;
                                 this._focusedGrepInjectedThisTurn = true;
                                 this._filesAutoReadThisRun.add(relevantPath);
                             } else {
@@ -3011,8 +3476,9 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                             } else {
                                 nudge = `The file you tried to read returned almost no content (${toolResult.length} chars) — it may be at the wrong path. Use shell_read with Get-ChildItem -Recurse -Filter to find the correct absolute path first.`;
                             }
-                        } else if (wantsEdit && /Get-Content|cat\s/i.test(String(args.command ?? '')) && toolResult.length > 2000) {
+                        } else if (wantsEdit && /Get-Content|cat\s/i.test(String(args.command ?? '')) && toolResult.length > 2000 && !isSweepMessage) {
                             // Model read a large file — extract focused section to help it find the right old_string.
+                            // (Skipped for sweep tasks — they need the full numbered file content)
                             const cmdStr2 = String(args.command ?? '');
                             const pathMatch2 = cmdStr2.match(/['"](.*?)['"]/);
                             const largePath = pathMatch2?.[1] ?? '';
@@ -3103,6 +3569,37 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
             logWarn(`[agent] Loop exhausted after ${MAX_TURNS} turns without a final response`);
             post({ type: 'error', text: `Agent stopped after ${MAX_TURNS} tool rounds without a final answer. Try rephrasing your request or start a new chat.` });
         }
+
+        // ── Sequential multi-file plan: auto-advance to next step ────────────────
+        // If there are pending plan steps and this run completed cleanly, kick off the
+        // next step immediately. Capture the last assistant message as step output
+        // so the next step can see what was just written.
+        if (!this.stopRef.stop && !loopExhausted && this._pendingPlanSteps.length > 0) {
+            // Capture the final assistant message as context for the next step
+            const lastMsg = [...this.history].reverse().find(m => m.role === 'assistant');
+            if (lastMsg) {
+                this._lastPlanStepOutput = typeof lastMsg.content === 'string'
+                    ? lastMsg.content.slice(0, 600)
+                    : '';
+            }
+            const nextStep = this._pendingPlanSteps[0];
+            const remaining = this._pendingPlanSteps.length;
+            logInfo(`[multi-plan] Step complete — auto-advancing to next: ${nextStep.relPath} (${remaining} remaining)`);
+            post({ type: 'planProgress', step: nextStep, remaining });
+            // Enqueue the next run as a microtask so the current call stack unwinds first
+            const stepMessage = `Continue multi-file plan — implement ${nextStep.relPath}`;
+            const stepModel = getConfig().model;
+            setImmediate(() => {
+                this.run(stepMessage, stepModel, post).catch(e => {
+                    logWarn(`[multi-plan] Step failed: ${toErrorMessage(e)}`);
+                });
+            });
+        } else if (!this.stopRef.stop && !loopExhausted && this._pendingPlanSteps.length === 0 && this._lastPlanStepOutput) {
+            // All plan steps done — reset state and notify
+            this._lastPlanStepOutput = '';
+            post({ type: 'planComplete' });
+            logInfo('[multi-plan] All steps complete');
+        }
     }
 
     // ── Tool executor ─────────────────────────────────────────────────────────
@@ -3163,10 +3660,47 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                 const newString = String(args.new_string ?? '');
 
                 if (!rel)       { throw new Error('path is required'); }
-                if (!oldString) { throw new Error('old_string is required'); }
+
+                // Guard: block accidental deletions — new_string empty with non-empty old_string almost
+                // always means the model hallucinated a "remove this block" intent. Real deletions are rare.
+                if (oldString && !newString.trim()) {
+                    throw new Error(`edit_file: new_string is empty — this would delete the matched block entirely. If you intend to delete code, explicitly include a comment explaining why, or use a minimal replacement. If this is a mistake, re-read the file and try again.`);
+                }
 
                 const full = this.safePath(root, rel);
+
+                // Validate imports before writing anything
+                const importErr = this.validateNewContent(newString);
+                if (importErr) { throw new Error(importErr); }
+
+                // Auto-create: if old_string is empty and the file doesn't exist (or is empty), write it
+                if (!oldString) {
+                    const isEmpty = !fs.existsSync(full) || fs.statSync(full).size === 0;
+                    if (isEmpty) {
+                        fs.mkdirSync(path.dirname(full), { recursive: true });
+                        fs.writeFileSync(full, newString, 'utf8');
+                        return `Created new file: ${rel} (${newString.split('\n').length} lines)`;
+                    }
+                    throw new Error(`File "${rel}" already exists. Use get_file to read it first, then call edit_file with old_string set to the exact text you want to replace.`);
+                }
+
                 const original = fs.readFileSync(full, 'utf8');
+
+                // Guard: block whole-file rewrites disguised as edit_file.
+                // If new_string is much larger than old_string and the result would be a near-complete
+                // replacement of the file, the model is hallucinating the file contents rather than
+                // making a targeted edit. This is especially dangerous for sweep tasks where it would
+                // produce a completely different file from what's actually on disk.
+                const oldLineCount = oldString.split('\n').length;
+                const newLineCount = newString.split('\n').length;
+                const fileLineCount = original.split('\n').length;
+                if (newLineCount > oldLineCount * 3 && newLineCount > fileLineCount * 0.5 && oldLineCount < 15) {
+                    throw new Error(
+                        `edit_file: new_string (${newLineCount} lines) is much larger than old_string (${oldLineCount} lines) ` +
+                        `and would replace most of the file. This looks like a whole-file rewrite attempt, which is not allowed. ` +
+                        `Make targeted edits — use old_string with the exact current function body and new_string with just that function updated.`
+                    );
+                }
 
                 if (!original.includes(oldString)) {
                     // ── Fuzzy indentation recovery ─────────────────────────────
@@ -3215,6 +3749,7 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                                     if (!accepted2) { return 'Edit cancelled by user.'; }
                                     fs.writeFileSync(full, newContent2, 'utf8');
                                     this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
+                                    this._editsThisRun++;
                                     this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
                                     const editResult2 = `Edited: ${rel} — ${oldLines.length} line(s) replaced (indentation auto-corrected)`;
                                     const editDiags2 = this.getDiagnostics(root, rel);
@@ -3258,22 +3793,54 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
 
                 fs.writeFileSync(full, newContent, 'utf8');
                 this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
+                this._editsThisRun++;
                 this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
                 const editResult = `Edited: ${rel} — ${oldString.split('\n').length} line(s) replaced with ${newString.split('\n').length} line(s)`;
-                // Auto-check diagnostics after edit
-                const editDiags = this.getDiagnostics(root, rel);
-                if (editDiags !== 'No errors or warnings found.') {
-                    return `${editResult}\n\nDiagnostics after edit:\n${editDiags}`;
+                // Auto-check: use py_compile for Python (Pylance diagnostics are stale/unreliable post-edit),
+                // use VSCode diagnostics for TypeScript/JS only
+                const isPyFile = path.extname(full).toLowerCase() === '.py';
+                if (!isPyFile) {
+                    const editDiags = this.getDiagnostics(root, rel);
+                    if (editDiags !== 'No errors or warnings found.') {
+                        return `${editResult}\n\nDiagnostics after edit:\n${editDiags}`;
+                    }
+                }
+                const syntaxErr = this.syntaxCheck(full);
+                if (syntaxErr) {
+                    logWarn(`[syntax-check] ${rel}: ${syntaxErr.slice(0, 100)}`);
+                    return `${editResult}\n\n⚠ Syntax error detected after edit:\n${syntaxErr}\n\nFix this by calling edit_file again with corrected code.`;
+                }
+                if (this.shouldRunTests()) {
+                    const testFile = this.findTestFile(full);
+                    if (testFile) {
+                        const relTest = path.relative(root, testFile).replace(/\\/g, '/');
+                        logInfo(`[test-runner] Running ${relTest}`);
+                        const { passed, output } = this.runTestFile(testFile);
+                        const icon = passed ? '✅' : '❌';
+                        return `${editResult}\n\n${icon} Tests (${relTest}):\n${output}`;
+                    }
                 }
                 return editResult;
             }
 
             // ── edit_file_at_line ──────────────────────────────────────────
             case 'edit_file_at_line': {
+                // Sweep tasks must use edit_file (exact string matching) — line numbers shift after each edit
+                // and cause corruption. Redirect to a helpful error so the model falls back to edit_file.
+                if (this._isSweepTask) {
+                    // If edit_file_at_line was auto-approved, carry that approval over to edit_file
+                    // so the user doesn't have to re-approve every edit when they clicked "Accept All"
+                    if (this._autoApprovedTools.has('edit_file_at_line')) {
+                        this._autoApprovedTools.add('edit_file');
+                    }
+                    return `edit_file_at_line is disabled for sweep tasks because line numbers shift after each edit and cause file corruption. Use edit_file with old_string/new_string instead — copy the exact current function body from the file as old_string.`;
+                }
+
                 const rel2       = String(args.path ?? '');
                 const startLine  = Math.round(Number(args.start_line ?? 0));
                 const endLine    = Math.round(Number(args.end_line ?? 0));
-                const newContent = String(args.new_content ?? '');
+                // Accept new_string as an alias for new_content (models sometimes confuse the param name)
+                const newContent = String(args.new_content ?? args.new_string ?? '');
 
                 if (!rel2)        { throw new Error('path is required'); }
                 if (!startLine)   { throw new Error('start_line is required'); }
@@ -3288,11 +3855,34 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                     throw new Error(`start_line ${startLine} is out of range (file has ${totalLines} lines)`);
                 }
 
+                // Validate imports in new content before touching the file
+                const importErr2 = this.validateNewContent(newContent);
+                if (importErr2) { throw new Error(importErr2); }
+
                 // Build new file: lines before start, new_content, lines after end
                 const before  = lines2.slice(0, startLine - 1);
                 const after   = endLine >= startLine ? lines2.slice(endLine) : lines2.slice(startLine - 1);
-                const newLines = newContent === '' ? [] : newContent.split('\n');
+                let newLines = newContent === '' ? [] : newContent.split('\n');
+                // Auto-dedent: if every non-empty line in new_content has leading spaces but the
+                // start_line in the file is at col 0 (top-level def/decorator), strip the common indent.
+                // This prevents models from nesting functions by accidentally adding 4-space padding.
+                if (newLines.length > 0) {
+                    const targetLineIndent = (lines2[startLine - 1] ?? '').match(/^(\s*)/)?.[1]?.length ?? 0;
+                    const nonEmpty = newLines.filter(l => l.trim().length > 0);
+                    if (nonEmpty.length > 0) {
+                        const minIndent = Math.min(...nonEmpty.map(l => l.match(/^(\s*)/)?.[1]?.length ?? 0));
+                        if (minIndent > targetLineIndent) {
+                            const strip = minIndent - targetLineIndent;
+                            newLines = newLines.map(l => l.length >= strip && l.slice(0, strip).trim() === '' ? l.slice(strip) : l);
+                        }
+                    }
+                }
                 const newFile  = [...before, ...newLines, ...after].join('\n');
+
+                // If the file wouldn't change, the edit is already done — skip and say so
+                if (newFile === original2) {
+                    return `Already done: lines ${startLine}-${endLine} in ${rel2} already contain the requested content. Mark this item [x] in your plan and move to the next unchecked item.`;
+                }
 
                 const replacedCount = endLine >= startLine ? endLine - startLine + 1 : 0;
                 const action = replacedCount === 0 ? 'insert' : 'replace';
@@ -3314,9 +3904,41 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                 const editResult3 = action === 'insert'
                     ? `Inserted ${newLines.length} line(s) at line ${startLine} in ${rel2}`
                     : `Replaced lines ${startLine}-${endLine} with ${newLines.length} line(s) in ${rel2}`;
-                const editDiags3 = this.getDiagnostics(root, rel2);
-                if (editDiags3 !== 'No errors or warnings found.') {
-                    return `${editResult3}\n\nDiagnostics after edit:\n${editDiags3}`;
+                const isPyFile3 = path.extname(full2).toLowerCase() === '.py';
+                if (!isPyFile3) {
+                    const editDiags3 = this.getDiagnostics(root, rel2);
+                    if (editDiags3 !== 'No errors or warnings found.') {
+                        return `${editResult3}\n\nDiagnostics after edit:\n${editDiags3}`;
+                    }
+                }
+                const syntaxErr3 = this.syntaxCheck(full2);
+                if (syntaxErr3) {
+                    logWarn(`[syntax-check] ${rel2}: ${syntaxErr3.slice(0, 100)}`);
+                    return `${editResult3}\n\n⚠ Syntax error detected after edit:\n${syntaxErr3}\n\nFix this by calling edit_file again with corrected code.`;
+                }
+                if (this.shouldRunTests()) {
+                    const testFile2 = this.findTestFile(full2);
+                    if (testFile2) {
+                        const relTest2 = path.relative(root, testFile2).replace(/\\/g, '/');
+                        logInfo(`[test-runner] Running ${relTest2}`);
+                        const { passed: passed2, output: output2 } = this.runTestFile(testFile2);
+                        const icon2 = passed2 ? '✅' : '❌';
+                        return `${editResult3}\n\n${icon2} Tests (${relTest2}):\n${output2}`;
+                    }
+                }
+                // For sweep tasks: append fresh numbered file content so model has
+                // current line numbers for the next edit without needing to re-read.
+                if (this._currentTaskMessage && (
+                    /\b(all|every|each|any)\b.{0,40}\b(route|function|endpoint|def)\b/i.test(this._currentTaskMessage)
+                    || /\b(missing|without|lacks?|no\s+error|no\s+try)\b/i.test(this._currentTaskMessage)
+                    || /\b(add|fix).{0,30}\b(all|every|each|any)\b/i.test(this._currentTaskMessage)
+                )) {
+                    const updatedContent = fs.readFileSync(full2, 'utf8');
+                    const numberedLines = updatedContent.split('\n')
+                        .map((l, i) => `${String(i + 1).padStart(4, ' ')}: ${l}`)
+                        .join('\n');
+                    const planPath2 = rel2.replace(/[^/]+$/, '.ollamapilot-plan.md');
+                    return `${editResult3}\n\n[UPDATED FILE - fresh line numbers]\n${numberedLines}\n\n[SWEEP TASK] Next steps:\n1. Update the plan file "${planPath2}": mark the item you just finished as done (change "- [ ]" to "- [x]").\n2. Look at the updated file above. Find the NEXT unchecked route/function from your plan that is missing the change.\n3. Call edit_file_at_line for that function — use start_line (the def line) through end_line (last line of function). Replace the ENTIRE function. Keep indentation at top level (no leading spaces on def/decorators).\n4. Repeat until all items in the plan are checked off.`;
                 }
                 return editResult3;
             }
@@ -3376,7 +3998,40 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                     }
                 }
 
-                return this.runShellRead(cmd, root, _toolId);
+                const shellResult = await this.runShellRead(cmd, root, _toolId);
+
+                // ── Doc verification: when reading a .md file, extract verifiable
+                // claims and append grep commands the model should run to cross-check them.
+                const isMarkdownRead = /\.(md|rst|txt)\b/i.test(cmd) &&
+                    /\bGet-Content\b|\bcat\b|\btype\b/i.test(cmd);
+                if (isMarkdownRead && typeof shellResult === 'string') {
+                    // Detect truncated reads (piped through Select-Object, head, etc.)
+                    const isTruncated = /Select-Object\s+-First|\bhead\s+-n|\bhead\s+-\d+|\|\s*head\b/i.test(cmd);
+                    if (isTruncated) {
+                        // Force full read — the model must not answer from a partial doc
+                        const fullCmd = cmd.replace(/\s*\|\s*Select-Object\s+-First\s+\d+/i, '')
+                                          .replace(/\s*\|\s*head\s+(-n\s+)?\d+/i, '');
+                        return shellResult + '\n\n---\n' +
+                            '[WARNING: TRUNCATED DOC READ] You only read part of this documentation file. ' +
+                            `You MUST read the full file before cross-checking claims. Run: shell_read Get-Content '${fullCmd.match(/'([^']+\.md[^']*)'|"([^"]+\.md[^"]*)"/i)?.[1] ?? 'the file'}'`;
+                    }
+
+                    const hints = extractDocVerificationHints(shellResult);
+                    if (hints.length > 0) {
+                        return shellResult + '\n\n---\n' +
+                            '[DOC VERIFICATION REQUIRED] This documentation file makes specific claims that may be out of date. ' +
+                            'You MUST verify the following claims against the actual source code using shell_read/grep BEFORE presenting this information. ' +
+                            'For each discrepancy found, flag it with ⚠️ and ask the user if they want you to update the doc.\n\n' +
+                            'Claims to verify:\n' + hints.join('\n');
+                    } else if (shellResult.length > 100) {
+                        // Even if no specific claims extracted, still remind to cross-check
+                        return shellResult + '\n\n---\n' +
+                            '[DOC NOTE] This is documentation — verify any specific claims (numbers, class names, file paths) ' +
+                            'against the actual source code before presenting as fact.';
+                    }
+                }
+
+                return shellResult;
             }
 
             // ── run_command ────────────────────────────────────────────────
@@ -3482,7 +4137,9 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
                 const query = String(args.query ?? '');
                 if (!query.trim()) { throw new Error('query is required'); }
                 
-                const tier = args.tier !== undefined ? Number(args.tier) : undefined;
+                // Accept single tier number; ignore comma-separated strings (search all tiers)
+                const tierRaw = args.tier !== undefined ? Number(args.tier) : undefined;
+                const tier = (tierRaw !== undefined && !isNaN(tierRaw)) ? tierRaw : undefined;
                 const limit = args.limit !== undefined ? Number(args.limit) : undefined;
                 
                 const results = await this.memory.searchMemory(query, tier, limit);
@@ -3730,7 +4387,7 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
 
     // ── Read-only shell execution (no confirmation) ──────────────────────────
 
-    private runShellRead(cmd: string, cwd: string, cmdId: string): Promise<string> {
+    private runShellRead(cmd: string, cwd: string, cmdId: string, limit?: number): Promise<string> {
         return new Promise((resolve) => {
             const post = this.postFn;
             post({ type: 'commandStart', id: cmdId, cmd });
@@ -3747,7 +4404,7 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
 
             let output = '';
             let finished = false;
-            const LIMIT = 16_000; // Higher limit for read-only — no risk
+            const LIMIT = limit ?? 16_000; // Higher limit for read-only — no risk
 
             child.stdout?.on('data', (data: Buffer) => {
                 const text = data.toString();
@@ -3868,6 +4525,399 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
         }
 
         return lines.length ? lines.join('\n') : 'No errors or warnings found.';
+    }
+
+    /**
+     * For Python edits: check that any "from app.X import Y" references resolve to
+     * actual files on disk. Returns an error string if any module is missing, null otherwise.
+     */
+    /**
+     * Generate a structured file plan for multi-component requests.
+     * Purely heuristic — no model call. Returns empty array if plan is too uncertain.
+     */
+    private generateMultiFilePlan(userMessage: string): FilePlan[] {
+        const plan: FilePlan[] = [];
+        const msg = userMessage.toLowerCase();
+
+        // Extract the primary name (the thing being created)
+        // e.g. "add a Vehicle model" → "vehicle", "create a payment feature" → "payment"
+        const nameMatch = userMessage.match(
+            /\b(?:add|create|implement|build|scaffold)\b\s+(?:a\s+)?(?:new\s+)?(\w+)\s+(?:model|feature|blueprint|endpoint|module|service)/i
+        ) ?? userMessage.match(/\bnew\s+(\w+)\s+(?:model|feature|blueprint|endpoint|module|service)/i);
+
+        if (!nameMatch) { return []; }
+        const name = nameMatch[1].toLowerCase();
+        if (name.length < 3 || /^(the|new|my|our|this|that|some|any)$/.test(name)) { return []; }
+
+        const root = this.workspaceRoot;
+        if (!root) { return []; }
+
+        // Detect project type
+        const hasPy = fs.existsSync(path.join(root, 'requirements.txt')) || fs.existsSync(path.join(root, 'pyproject.toml'));
+        const hasTs = fs.existsSync(path.join(root, 'package.json')) || fs.existsSync(path.join(root, 'tsconfig.json'));
+
+        if (hasPy) {
+            // Python/Flask patterns
+            if (/\bmodel\b/.test(msg)) {
+                plan.push({ relPath: `app/models/${name}.py`, action: 'create', description: `SQLAlchemy model class for ${name}` });
+            }
+            if (/\b(route|endpoint|blueprint|api)\b/.test(msg)) {
+                // Try to detect target routes directory
+                const routesDir = fs.existsSync(path.join(root, 'app', 'routes')) ? 'app/routes' : 'app';
+                plan.push({ relPath: `${routesDir}/${name}.py`, action: 'create', description: `Blueprint with CRUD routes for ${name}` });
+            }
+            if (/\bservice\b/.test(msg)) {
+                plan.push({ relPath: `app/services/${name}_service.py`, action: 'create', description: `Service layer for ${name} business logic` });
+            }
+            if (/\b(test|spec)\b/.test(msg)) {
+                const testsDir = fs.existsSync(path.join(root, 'tests')) ? 'tests' : 'test';
+                plan.push({ relPath: `${testsDir}/test_${name}.py`, action: 'create', description: `pytest test suite for ${name}` });
+            }
+            if (/\bmigration\b/.test(msg)) {
+                const ts = new Date().toISOString().replace(/[-T:.Z]/g, '').slice(0, 14);
+                plan.push({ relPath: `migrations/versions/${ts}_add_${name}.py`, action: 'create', description: `Alembic migration for ${name} table` });
+            }
+            // Always flag __init__.py if registering a new blueprint
+            if (/\b(blueprint|route)\b/.test(msg) && fs.existsSync(path.join(root, 'app', '__init__.py'))) {
+                plan.push({ relPath: 'app/__init__.py', action: 'modify', description: `Register new ${name} blueprint` });
+            }
+        } else if (hasTs) {
+            if (/\b(type|interface|model|schema)\b/.test(msg)) {
+                plan.push({ relPath: `src/types/${name}.ts`, action: 'create', description: `TypeScript interface/type for ${name}` });
+            }
+            if (/\b(route|endpoint|controller|handler)\b/.test(msg)) {
+                plan.push({ relPath: `src/routes/${name}.ts`, action: 'create', description: `Route handler for ${name}` });
+            }
+            if (/\b(service|util)\b/.test(msg)) {
+                plan.push({ relPath: `src/services/${name}Service.ts`, action: 'create', description: `Service for ${name}` });
+            }
+            if (/\b(test|spec)\b/.test(msg)) {
+                plan.push({ relPath: `src/test/${name}.test.ts`, action: 'create', description: `Test suite for ${name}` });
+            }
+        }
+
+        return plan;
+    }
+
+    /**
+     * Quick syntax check after a file edit.
+     * Python: runs py_compile. Returns error string or null.
+     * TypeScript/JS: skipped (VSCode diagnostics handle it).
+     */
+    private syntaxCheck(absPath: string): string | null {
+        const ext = path.extname(absPath).toLowerCase();
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { execSync: execSyncFn } = require('child_process') as typeof import('child_process');
+
+        if (ext === '.py') {
+            try {
+                const pythonCmd = process.platform === 'win32' ? 'py' : 'python3';
+                try {
+                    execSyncFn(`${pythonCmd} -m py_compile "${absPath}"`, {
+                        timeout: 5000, stdio: 'pipe', encoding: 'utf8'
+                    });
+                } catch (e1) {
+                    try {
+                        execSyncFn(`python -m py_compile "${absPath}"`, {
+                            timeout: 5000, stdio: 'pipe', encoding: 'utf8'
+                        });
+                    } catch (e2: any) {
+                        const stderr = (e2.stderr as string | undefined) ?? String(e2);
+                        const lines = stderr.split('\n').filter((l: string) => l.trim() && !l.startsWith('Traceback'));
+                        return lines.slice(0, 4).join('\n');
+                    }
+                }
+                return null;
+            } catch {
+                return null;
+            }
+        }
+
+        if (ext === '.ts' || ext === '.tsx') {
+            // Run tsc --noEmit scoped to just this file using the project tsconfig if present
+            const root = this.workspaceRoot;
+            if (!root) { return null; }
+            const tsconfigPath = path.join(root, 'tsconfig.json');
+            if (!fs.existsSync(tsconfigPath)) { return null; }
+            try {
+                execSyncFn(`npx tsc --noEmit --skipLibCheck 2>&1`, {
+                    cwd: root, timeout: 15000, stdio: 'pipe', encoding: 'utf8'
+                });
+                return null;
+            } catch (e: any) {
+                const out = ((e.stdout ?? '') + (e.stderr ?? '')).trim();
+                if (!out) { return null; }
+                // Filter to only errors that mention this specific file
+                const relFile = path.relative(root, absPath).replace(/\\/g, '/');
+                const relevantLines = out.split('\n')
+                    .filter((l: string) => l.includes(relFile) || l.match(/error TS/))
+                    .slice(0, 5);
+                return relevantLines.length > 0 ? relevantLines.join('\n') : null;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Find the test file corresponding to a source file.
+     * Checks common test naming conventions and test directories.
+     * Returns absolute path if found, null otherwise.
+     */
+    private findTestFile(absSourcePath: string): string | null {
+        const root = this.workspaceRoot;
+        if (!root) { return null; }
+
+        const ext = path.extname(absSourcePath);
+        const base = path.basename(absSourcePath, ext);
+        const dir  = path.dirname(absSourcePath);
+        const relDir = path.relative(root, dir).replace(/\\/g, '/');
+
+        const candidates: string[] = [];
+
+        if (ext === '.py') {
+            // Same directory: test_<name>.py or <name>_test.py
+            candidates.push(path.join(dir, `test_${base}.py`));
+            candidates.push(path.join(dir, `${base}_test.py`));
+
+            // tests/ sibling at project root
+            const rootTests = path.join(root, 'tests', `test_${base}.py`);
+            candidates.push(rootTests);
+            candidates.push(path.join(root, 'tests', `${base}_test.py`));
+
+            // tests/ sibling relative to file's directory
+            const siblingTests = path.join(dir, '..', 'tests', `test_${base}.py`);
+            candidates.push(siblingTests);
+
+            // Mirror path under tests/ at project root
+            const mirrorPath = path.join(root, 'tests', relDir, `test_${base}.py`);
+            candidates.push(mirrorPath);
+        } else if (ext === '.ts' || ext === '.js') {
+            // <name>.test.ts / <name>.spec.ts in same dir
+            candidates.push(path.join(dir, `${base}.test${ext}`));
+            candidates.push(path.join(dir, `${base}.spec${ext}`));
+            // __tests__ sibling
+            candidates.push(path.join(dir, '__tests__', `${base}.test${ext}`));
+            candidates.push(path.join(dir, '__tests__', `${base}.spec${ext}`));
+        }
+
+        for (const c of candidates) {
+            try {
+                if (fs.existsSync(c)) { return c; }
+            } catch { /* skip */ }
+        }
+        return null;
+    }
+
+    /**
+     * Run a test file and return {passed, output}.
+     * Python: pytest or unittest. JS/TS: npm test (scoped).
+     */
+    private runTestFile(absTestPath: string): { passed: boolean; output: string } {
+        const root = this.workspaceRoot ?? path.dirname(absTestPath);
+        const ext  = path.extname(absTestPath).toLowerCase();
+        const relTest = path.relative(root, absTestPath).replace(/\\/g, '/');
+
+        try {
+            const { execSync: execSyncFn } = require('child_process') as typeof import('child_process');
+
+            if (ext === '.py') {
+                // Try pytest first, fall back to unittest
+                const pythonCmd = process.platform === 'win32' ? 'py' : 'python3';
+                const cmds = [
+                    `pytest "${absTestPath}" -q --tb=short 2>&1`,
+                    `${pythonCmd} -m pytest "${absTestPath}" -q --tb=short 2>&1`,
+                    `python -m pytest "${absTestPath}" -q --tb=short 2>&1`,
+                    `${pythonCmd} -m unittest "${relTest.replace(/\//g, '.').replace(/\.py$/, '')}" 2>&1`,
+                ];
+                for (const cmd of cmds) {
+                    try {
+                        const out = execSyncFn(cmd, { cwd: root, timeout: 30000, encoding: 'utf8' }) as string;
+                        return { passed: true, output: out.trim().slice(0, 800) };
+                    } catch (e: any) {
+                        const out = ((e.stdout ?? '') + (e.stderr ?? '')).trim();
+                        if (out && (out.includes('passed') || out.includes('failed') || out.includes('error'))) {
+                            const passed = /\d+ passed/.test(out) && !/\d+ failed/.test(out) && !/\d+ error/.test(out);
+                            return { passed, output: out.slice(0, 800) };
+                        }
+                        // If it's a "command not found" style error, try next
+                        if (out.includes('not found') || out.includes('No such file') || out.includes('is not recognized')) {
+                            continue;
+                        }
+                        return { passed: false, output: out.slice(0, 800) };
+                    }
+                }
+                return { passed: false, output: 'Could not find pytest or python to run tests.' };
+            }
+
+            // JS/TS: not auto-run (expensive, project-specific setup)
+            return { passed: false, output: 'JS/TS test auto-run not supported. Run manually.' };
+        } catch {
+            return { passed: false, output: 'Test runner failed to execute.' };
+        }
+    }
+
+    /** Returns true if autoRunTests is enabled in settings. */
+    private shouldRunTests(): boolean {
+        try {
+            const vscode = require('vscode') as typeof import('vscode');
+            return vscode.workspace.getConfiguration('ollamaAgent').get<boolean>('autoRunTests', false);
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Scan app/models/ for SQLAlchemy ForeignKey and relationship() declarations.
+     * Returns a map of className → human-readable relation strings.
+     * e.g. User → ["Profile (1:1 via profile)", "Orders (1:many via orders)"]
+     */
+    private buildModelRelationshipMap(root: string): Array<{ className: string; relations: string[] }> {
+        const result: Array<{ className: string; relations: string[] }> = [];
+        const modelsDir = path.join(root, 'app', 'models');
+        if (!fs.existsSync(modelsDir)) { return result; }
+
+        try {
+            const files = fs.readdirSync(modelsDir).filter(f => f.endsWith('.py') && f !== '__init__.py');
+            for (const f of files) {
+                const content = fs.readFileSync(path.join(modelsDir, f), 'utf8');
+                const lines = content.split('\n');
+
+                let currentClass = '';
+                const classRelations = new Map<string, string[]>();
+
+                for (const line of lines) {
+                    // Track current class
+                    const classMatch = line.match(/^class\s+(\w+)\s*[\(:]/);
+                    if (classMatch) {
+                        currentClass = classMatch[1];
+                        if (!classRelations.has(currentClass)) { classRelations.set(currentClass, []); }
+                        continue;
+                    }
+                    if (!currentClass) { continue; }
+
+                    const rels = classRelations.get(currentClass)!;
+
+                    // db.relationship('OtherModel', ...) or relationship('OtherModel', ...)
+                    const relMatch = line.match(/(?:db\.)?relationship\(\s*['"](\w+)['"]/);
+                    if (relMatch) {
+                        const target = relMatch[1];
+                        const attrMatch = line.match(/^\s+(\w+)\s*=/);
+                        const attr = attrMatch ? attrMatch[1] : '';
+                        const uselist = /uselist\s*=\s*False/i.test(line) ? '1:1' : '1:many';
+                        rels.push(`${target} (${uselist}${attr ? ' via ' + attr : ''})`);
+                        continue;
+                    }
+
+                    // db.ForeignKey('table.col') — infer the referenced table
+                    const fkMatch = line.match(/(?:db\.)?ForeignKey\(\s*['"](\w+)\./);
+                    if (fkMatch) {
+                        const table = fkMatch[1];
+                        const attrMatch = line.match(/^\s+(\w+)\s*=/);
+                        const attr = attrMatch ? attrMatch[1] : '';
+                        rels.push(`→ ${table}${attr ? ' (' + attr + ')' : ''} [FK]`);
+                    }
+                }
+
+                for (const [cls, rels] of classRelations) {
+                    if (rels.length > 0) { result.push({ className: cls, relations: rels }); }
+                }
+            }
+        } catch { /* skip */ }
+
+        return result;
+    }
+
+    /**
+     * Walk the call graph outward from `seedFn` up to `maxHops` hops.
+     * At each hop, greps for callers of each function found in the previous hop.
+     * Returns deduplicated reference lines and the deepest hop reached.
+     *
+     * Example: get_user → check_permissions (hop 1) → 15 routes (hop 2)
+     * Inject: "get_user affects 16 locations across 2 hops"
+     */
+    private walkCallGraph(
+        seedFn: string,
+        excludeRelPath: string,
+        root: string,
+        maxHops: number,
+        maxNodes: number
+    ): { lines: string[]; maxHop: number } {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { execSync } = require('child_process') as typeof import('child_process');
+        const isWin = process.platform === 'win32';
+        const rootNorm = root.replace(/\\/g, '/');
+        const excludeNorm = excludeRelPath.replace(/\\/g, '/');
+
+        // Map from function name → calling locations (relPath:line)
+        const allLines = new Set<string>();
+        // Functions found at the current frontier
+        let frontier = new Set<string>([seedFn]);
+        let maxHop = 0;
+
+        for (let hop = 1; hop <= maxHops && frontier.size > 0 && allLines.size < maxNodes; hop++) {
+            const nextFrontier = new Set<string>();
+
+            for (const fn of frontier) {
+                if (allLines.size >= maxNodes) { break; }
+                try {
+                    const searchDir = fs.existsSync(path.join(root, 'app'))
+                        ? path.join(root, 'app')
+                        : root;
+                    const grepCmd = isWin
+                        ? `findstr /s /n "${fn}" "${searchDir}\\*.py" 2>nul`
+                        : `grep -rn --include="*.py" "\\b${fn}\\b" "${searchDir}" 2>/dev/null`;
+                    const raw = execSync(grepCmd, { timeout: 3000, encoding: 'utf8' }).toString();
+
+                    const callerLines = raw.split('\n')
+                        .filter(l => l.trim())
+                        .filter(l => !l.includes(`def ${fn}`))
+                        .filter(l => !l.replace(/\\/g, '/').includes(excludeNorm))
+                        .slice(0, Math.min(8, maxNodes - allLines.size));
+
+                    for (const l of callerLines) {
+                        const parts = l.split(':');
+                        if (parts.length < 2) { continue; }
+                        const filePart = parts[0].replace(/\\/g, '/').replace(rootNorm + '/', '');
+                        const normalized = `  ${filePart}:${parts[1].trim()}  (via \`${fn}\`)`;
+                        if (!allLines.has(normalized)) {
+                            allLines.add(normalized);
+                            // Extract the enclosing function name from this caller line
+                            // so we can continue the graph walk at the next hop
+                            const callerFnMatch = l.match(/def\s+(\w+)\s*\(/) ?? l.match(/function\s+(\w+)\s*\(/);
+                            if (callerFnMatch && callerFnMatch[1] !== fn && callerFnMatch[1].length > 3) {
+                                nextFrontier.add(callerFnMatch[1]);
+                            }
+                        }
+                    }
+                    if (callerLines.length > 0) { maxHop = hop; }
+                } catch { /* grep unavailable or timed out — stop this branch */ }
+            }
+
+            frontier = nextFrontier;
+        }
+
+        return { lines: [...allLines], maxHop };
+    }
+
+    private validateNewContent(newContent: string): string | null {
+        const root = this.workspaceRoot;
+        if (!root) { return null; }
+        const importRe = /from\s+(app\.[\w.]+)\s+import\s+([\w,\s]+)/g;
+        const missing: string[] = [];
+        let match: RegExpExecArray | null;
+        while ((match = importRe.exec(newContent)) !== null) {
+            const modPath = match[1].replace(/\./g, '/');
+            const candidates = [
+                path.join(root, modPath + '.py'),
+                path.join(root, modPath, '__init__.py'),
+            ];
+            if (!candidates.some(c => fs.existsSync(c))) {
+                missing.push(match[1]);
+            }
+        }
+        if (missing.length === 0) { return null; }
+        return `Edit blocked: the following module(s) do not exist on disk:\n${missing.map(m => `  - ${m}`).join('\n')}\nVerify the correct import path before proceeding.`;
     }
 
     private safePath(root: string, rel: string): string {
@@ -4076,9 +5126,10 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
      */
     private async preProcessPathUpdate(userMessage: string, post: PostFn): Promise<string> {
         const msg = userMessage.toLowerCase();
-        const hasPathKeyword = /\b(point|location|path|import|reference|reorganiz|moved|new folder|new director)\b/i.test(msg);
-        const hasEditKeyword = /\b(edit|update|change|fix|modify|point|adjust|rewrite)\b/i.test(msg);
-        if (!hasPathKeyword || !hasEditKeyword) { return ''; }
+        // Must specifically be about import paths / file locations — not general code edits
+        const hasPathKeyword = /\b(import path|import location|module path|reorganiz|moved|new folder|new director)\b/i.test(msg)
+            || (/\b(path|import|reference)\b/i.test(msg) && /\b(update|fix|point|adjust|rewrite)\b/i.test(msg));
+        if (!hasPathKeyword) { return ''; }
 
         const root = this.workspaceRoot;
         if (!root) { return ''; }
@@ -4459,6 +5510,27 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
         return false; // unknown → treat as large (conservative)
     }
 
+    /** Find first file in the workspace whose basename matches the given filename exactly. */
+    private findFileByName(filename: string, root: string): string | null {
+        const target = filename.toLowerCase();
+        const walk = (dir: string): string | null => {
+            let entries: fs.Dirent[];
+            try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+            for (const e of entries) {
+                if (SKIP_DIRS.has(e.name)) { continue; }
+                const full = path.join(dir, e.name);
+                if (e.isDirectory()) {
+                    const found = walk(full);
+                    if (found) { return found; }
+                } else if (e.name.toLowerCase() === target) {
+                    return full;
+                }
+            }
+            return null;
+        };
+        return walk(root);
+    }
+
     /**
      * Walk the workspace and find files whose names match the given keywords.
      * Returns candidates scored by filename relevance, sorted descending.
@@ -4520,174 +5592,685 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
      * context block to inject into the user message before calling the model.
      * Returns '' if no relevant file is found (fall through to normal loop).
      */
-    private async preProcessEditTask(userMessage: string, post: PostFn): Promise<string> {
+
+    /**
+     * Programmatically wrap Python route functions that lack try/except error handling.
+     * Operates directly on the file — no model involvement for the wrapping logic.
+     * Returns true if it handled the task (caller should skip the model loop).
+     */
+    private async sweepAddErrorHandling(userMessage: string, post: PostFn): Promise<boolean> {
+        const root = this.workspaceRoot;
+        if (!root) { logInfo('[error-sweep] no workspaceRoot — skipping'); return false; }
+
+        // Resolve target file from explicit path in message
+        const fileMatch = userMessage.match(/\b([\w./\\-]+\.py)\b/i);
+        if (!fileMatch) { logInfo('[error-sweep] no .py file found in message — skipping'); return false; }
+
+        const relPath = fileMatch[1].replace(/\\/g, '/');
+        const absPath = path.resolve(root, relPath);
+        logInfo(`[error-sweep] target: ${relPath} → ${absPath} (exists: ${fs.existsSync(absPath)})`);
+        if (!fs.existsSync(absPath)) { return false; }
+
+        const originalContent = fs.readFileSync(absPath, 'utf8');
+        const lines = originalContent.split('\n');
+
+        // ── Parse route functions ────────────────────────────────────────────
+        // Find each def that is part of a route (has @*.route decorator above it).
+        // For each, find its body extent and check if already wrapped in try/except.
+        interface RouteFunc {
+            defLine: number;       // 0-based index of "def ..." line
+            bodyStart: number;     // 0-based index of first body line
+            bodyEnd: number;       // 0-based index of last body line (inclusive)
+            indent: string;        // indentation of the def line
+            hasErrorHandling: boolean;
+        }
+
+        const routeFuncs: RouteFunc[] = [];
+
+        for (let i = 0; i < lines.length; i++) {
+            const defMatch = lines[i].match(/^(\s*)def\s+\w+\s*\(/);
+            if (!defMatch) { continue; }
+
+            // Check if preceded by a @*.route decorator (within 5 lines)
+            let isRoute = false;
+            for (let k = Math.max(0, i - 5); k < i; k++) {
+                if (/^\s*@\w+\.route\(/.test(lines[k])) { isRoute = true; break; }
+            }
+            if (!isRoute) { continue; }
+
+            const indent = defMatch[1];
+            const bodyIndent = indent + '    ';
+
+            // Find body start — first non-blank, non-docstring line after def
+            let bodyStart = i + 1;
+            // Skip docstring if present
+            if (lines[bodyStart]?.trim().startsWith('"""') || lines[bodyStart]?.trim().startsWith("'''")) {
+                const quote = lines[bodyStart].trim().startsWith('"""') ? '"""' : "'''";
+                if ((lines[bodyStart].match(new RegExp(quote, 'g')) ?? []).length >= 2) {
+                    bodyStart++; // single-line docstring
+                } else {
+                    bodyStart++;
+                    while (bodyStart < lines.length && !lines[bodyStart].includes(quote)) { bodyStart++; }
+                    bodyStart++; // past closing triple-quote
+                }
+            }
+
+            // Find body end — last line before next def/decorator at same or lesser indent
+            let bodyEnd = bodyStart;
+            for (let j = bodyStart; j < lines.length; j++) {
+                const trimmed = lines[j].trim();
+                if (trimmed === '') { continue; }
+                // Next function/class at same indent level = end of this function
+                if (/^(@|\bdef\b|\bclass\b)/.test(trimmed) && !lines[j].startsWith(bodyIndent)) { break; }
+                bodyEnd = j;
+            }
+
+            // Check if body is already wrapped in try/except
+            const hasErrorHandling = /^\s*try\s*:/.test(lines[bodyStart] ?? '');
+
+            routeFuncs.push({ defLine: i, bodyStart, bodyEnd, indent, hasErrorHandling });
+        }
+
+        const toWrap = routeFuncs.filter(f => !f.hasErrorHandling);
+        if (toWrap.length === 0) {
+            // All routes already have error handling — tell the user
+            post({ type: 'streamStart' });
+            const msg = `All ${routeFuncs.length} route(s) in \`${relPath}\` already have error handling. No changes needed.`;
+            for (const ch of msg) { post({ type: 'token', text: ch }); }
+            post({ type: 'streamEnd' });
+            this.history.push({ role: 'assistant', content: msg });
+            return true;
+        }
+
+        logInfo(`[error-sweep] ${relPath}: ${routeFuncs.length} routes, ${toWrap.length} need wrapping`);
+
+        // Post a visible context read
+        const readId = `sweep_read_${Date.now()}`;
+        post({ type: 'toolCall', id: readId, name: 'shell_read', args: { command: `cat "${relPath}"` } });
+        post({ type: 'toolResult', id: readId, name: 'shell_read', success: true, preview: `${lines.length} lines, ${toWrap.length} routes need error handling` });
+
+        // ── Apply wraps bottom-up (so line indices stay valid) ───────────────
+        const newLines = [...lines];
+        const wrapped: string[] = [];
+
+        for (const fn of [...toWrap].reverse()) {
+            const bodyIndent = fn.indent + '    ';
+            const bodyLines = newLines.slice(fn.bodyStart, fn.bodyEnd + 1);
+
+            // Indent each body line by 4 more spaces
+            const indentedBody = bodyLines.map(l => l === '' ? l : '    ' + l);
+
+            // Build replacement: try: + indented body + except clause
+            const tryBlock = [
+                `${bodyIndent}try:`,
+                ...indentedBody,
+                `${bodyIndent}except Exception as e:`,
+                `${bodyIndent}    return jsonify({'error': str(e)}), 500`,
+            ];
+
+            // Get the function name for reporting
+            const fnName = newLines[fn.defLine].match(/def\s+(\w+)/)?.[1] ?? '?';
+            wrapped.unshift(fnName); // unshift because we're iterating reversed
+
+            // Replace body lines with wrapped version
+            newLines.splice(fn.bodyStart, fn.bodyEnd - fn.bodyStart + 1, ...tryBlock);
+
+            // Post each edit as a visible tool call
+            const editId = `sweep_edit_${Date.now()}_${fnName}`;
+            post({
+                type: 'toolCall', id: editId, name: 'edit_file_at_line',
+                args: { path: relPath, start_line: fn.bodyStart + 1, end_line: fn.bodyEnd + 1 }
+            });
+            post({ type: 'toolResult', id: editId, name: 'edit_file_at_line', success: true, preview: `Wrapped ${fnName} in try/except` });
+        }
+
+        // Write the modified file
+        fs.writeFileSync(absPath, newLines.join('\n'), 'utf8');
+        logInfo(`[error-sweep] Wrote ${newLines.length} lines to ${relPath}`);
+
+        // Summary message
+        const summary = `Added error handling to **${wrapped.length}** route(s) in \`${relPath}\`:\n${wrapped.map(n => `- \`${n}\``).join('\n')}\n\n${routeFuncs.length - toWrap.length > 0 ? `${routeFuncs.length - toWrap.length} route(s) already had try/except and were left unchanged.` : ''}`.trim();
+        post({ type: 'streamStart' });
+        for (const ch of summary) { post({ type: 'token', text: ch }); }
+        post({ type: 'streamEnd' });
+        this.history.push({ role: 'assistant', content: summary });
+        return true;
+    }
+
+    private async preProcessEditTask(userMessage: string, post: PostFn): Promise<{ injection: string; blocked: string | null }> {
         const root = this.workspaceRoot;
 
         // ── 1. Extract keywords ──────────────────────────────────────────────
-        // Priority: explicit service/module name > file path mention > content words
         const filenameKeywords: string[] = [];
 
-        // "the thermal receipt service" → "thermal_receipt"
-        // "the drivers_license_ocr service" → "drivers_license_ocr"
-        // Captures multi-word names (spaces or underscores/hyphens) before the role word
         const serviceMatch = userMessage.match(
             /\b(?:the\s+)?(\w+(?:[\s_-]\w+)*?)\s+(?:service|module|handler|controller|view|model|util|helper|component|route|router|api)\b/i
         );
         if (serviceMatch) {
-            // Normalise spaces to underscores: "thermal receipt" → "thermal_receipt"
             const svc = serviceMatch[1].toLowerCase().replace(/\s+/g, '_');
             filenameKeywords.push(svc);
-            // Also push individual words for fallback scoring
             svc.split(/[_-]/).filter(w => w.length > 2).forEach(w => filenameKeywords.push(w));
         }
 
-        // Explicit file path: "in auth.py", "look at routes/user.ts"
         const fileMatch = userMessage.match(/\b([\w./\\-]+\.(?:py|ts|js|go|java|rs|rb|php|c|cpp|cs))\b/i);
-        if (fileMatch) { filenameKeywords.push(path.basename(fileMatch[1]).replace(/\.\w+$/, '').toLowerCase()); }
+        if (fileMatch) {
+            filenameKeywords.push(path.basename(fileMatch[1]).replace(/\.\w+$/, '').toLowerCase());
+        }
 
-        // Content-keyword fallback
         const STOP = new Set(['add','insert','fix','update','change','modify','implement',
             'the','a','an','to','in','on','of','for','whenever','when','every','time',
             'that','this','so','and','or','with','by','from','at','into','should',
             'would','could','will','can','all','any','some','statement','log','logging',
-            'make','sure','please','just','need','want','also']);
+            'make','sure','please','just','need','want','also','route','returns','return',
+            'list','json','endpoint','function','method']);
         const contentKws = userMessage.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !STOP.has(w)).slice(0, 5);
         if (filenameKeywords.length === 0) { filenameKeywords.push(...contentKws); }
 
-        // ── 2. Detect file extensions from project type ──────────────────────
-        // Default to common code extensions; prefer Python if workspace has .py files
+        // ── 2. Detect project type ───────────────────────────────────────────
         const hasTs = fs.existsSync(path.join(root, 'tsconfig.json')) || fs.existsSync(path.join(root, 'package.json'));
         const hasPy = fs.existsSync(path.join(root, 'pyproject.toml')) || fs.existsSync(path.join(root, 'requirements.txt')) || fs.existsSync(path.join(root, 'setup.py'));
         const extensions = hasPy ? ['.py'] : hasTs ? ['.ts', '.js', '.tsx', '.jsx'] : ['.py', '.ts', '.js', '.go', '.java', '.rs'];
 
-        if (filenameKeywords.length === 0) { return ''; }
+        if (filenameKeywords.length === 0) { return { injection: '', blocked: null }; }
 
-        // Full service name for exact-match boosting (e.g. "thermal_receipt" from "thermal receipt service")
         const fullServiceName = serviceMatch ? serviceMatch[1].toLowerCase() : undefined;
 
-        logInfo(`[pre-edit] Searching for edit candidates — keywords: [${filenameKeywords.join(', ')}], fullService: ${fullServiceName ?? '(none)'}, exts: [${extensions.join(', ')}]`);
+        // ── 3. Resolve target file ───────────────────────────────────────────
+        // Explicit path beats everything — resolve directly and skip semantic search
+        let targetRelPath: string | null = null;
+        let targetContent: string | null = null;
 
-        // ── 3. Find candidate files — semantic search via code index, fallback to keyword ──
-        let candidates: Array<{ relPath: string; absPath: string; score: number }>;
-        if (this.codeIndex) {
-            const indexResults = await this.codeIndex.findRelevantFiles(userMessage, 5);
-            candidates = indexResults.map(r => ({ relPath: r.relPath, absPath: r.absPath, score: Math.round(r.score * 100) }));
-            logInfo(`[pre-edit] Code index returned ${candidates.length} result(s) for: "${userMessage.slice(0, 60)}" (ready=${this.codeIndex.isReady})`);
-            // Fall back to keyword search if index returned nothing (not ready yet, or no matches)
-            if (candidates.length === 0) {
+        if (fileMatch) {
+            const explicitRel = fileMatch[1].replace(/\\/g, '/');
+            const explicitAbs = path.resolve(root, explicitRel);
+            if (fs.existsSync(explicitAbs) && fs.statSync(explicitAbs).size <= 150_000) {
+                targetRelPath = explicitRel;
+                targetContent = fs.readFileSync(explicitAbs, 'utf8');
+                logInfo(`[pre-edit] Explicit file: ${explicitRel} (${targetContent.split('\n').length} lines)`);
+            } else if (!explicitRel.includes('/') && !explicitRel.includes('\\')) {
+                // Bare filename (e.g. "user.py") — search the workspace for it
+                const found = this.findFileByName(explicitRel, root);
+                if (found) {
+                    try {
+                        const stat = fs.statSync(found);
+                        if (stat.size <= 150_000) {
+                            targetContent = fs.readFileSync(found, 'utf8');
+                            targetRelPath = path.relative(root, found).replace(/\\/g, '/');
+                            logInfo(`[pre-edit] Bare filename resolved: ${targetRelPath}`);
+                        }
+                    } catch { /* skip */ }
+                }
+            }
+        }
+
+        if (!targetRelPath) {
+            // Semantic/keyword search
+            logInfo(`[pre-edit] Searching — keywords: [${filenameKeywords.join(', ')}], exts: [${extensions.join(', ')}]`);
+            let candidates: Array<{ relPath: string; absPath: string; score: number }>;
+            if (this.codeIndex) {
+                const indexResults = await this.codeIndex.findRelevantFiles(userMessage, 5);
+                candidates = indexResults.map(r => ({ relPath: r.relPath, absPath: r.absPath, score: Math.round(r.score * 100) }));
+                if (candidates.length === 0) {
+                    candidates = this.findEditCandidates(filenameKeywords, extensions, fullServiceName);
+                }
+            } else {
                 candidates = this.findEditCandidates(filenameKeywords, extensions, fullServiceName);
-                if (candidates.length > 0) {
-                    logInfo(`[pre-edit] Code index empty — using keyword fallback: ${candidates.slice(0, 3).map(c => c.relPath).join(', ')}`);
+            }
+
+            if (candidates.length === 0) {
+                logInfo('[pre-edit] No candidates found — falling through');
+                return { injection: '', blocked: null };
+            }
+
+            // Re-rank: if any candidate's basename exactly matches a filename keyword,
+            // always prefer it — semantic index may rank semantically similar files higher
+            // than the exact filename match (e.g. device.py ranked above user.py for "User model")
+            const exactMatch = candidates.find(c => {
+                const base = path.basename(c.relPath, path.extname(c.relPath)).toLowerCase();
+                return filenameKeywords.some(kw => base === kw);
+            });
+            if (exactMatch) {
+                candidates = [exactMatch, ...candidates.filter(c => c !== exactMatch)];
+            }
+
+            // Read top candidates, pick highest content-keyword score
+            for (const c of candidates.slice(0, 3)) {
+                try {
+                    const stat = fs.statSync(c.absPath);
+                    if (stat.size > 150_000) { continue; }
+                    const content = fs.readFileSync(c.absPath, 'utf8');
+                    const lower = content.toLowerCase();
+                    const hits = contentKws.reduce((acc, w) => {
+                        let n = 0, pos = 0;
+                        while ((pos = lower.indexOf(w, pos)) !== -1) { n++; pos++; }
+                        return acc + n;
+                    }, 0);
+                    if (!targetRelPath || hits > 0) {
+                        targetRelPath = c.relPath;
+                        targetContent = content;
+                        if (hits > 0) { break; } // good enough
+                    }
+                } catch { /* skip */ }
+            }
+        }
+
+        if (!targetRelPath || !targetContent) {
+            logInfo('[pre-edit] Could not read target file — falling through');
+            return { injection: '', blocked: null };
+        }
+
+        // ── 4. Research phase — gather grounded context ──────────────────────
+        // 4a. Models inventory (Python only): scan app/models/ for real class names
+        const modelsInventory: Array<{ className: string; relPath: string }> = [];
+        if (hasPy) {
+            const modelsDir = path.join(root, 'app', 'models');
+            if (fs.existsSync(modelsDir)) {
+                try {
+                    const modelFiles = fs.readdirSync(modelsDir)
+                        .filter(f => f.endsWith('.py') && f !== '__init__.py');
+                    for (const mf of modelFiles) {
+                        try {
+                            const mContent = fs.readFileSync(path.join(modelsDir, mf), 'utf8');
+                            const classMatches = [...mContent.matchAll(/^class\s+(\w+)\s*[\(:]/gm)];
+                            for (const cm of classMatches) {
+                                modelsInventory.push({
+                                    className: cm[1],
+                                    relPath: `app/models/${mf}`,
+                                });
+                            }
+                        } catch { /* skip unreadable */ }
+                    }
+                } catch { /* skip unreadable dir */ }
+                logInfo(`[pre-edit] Models inventory: ${modelsInventory.length} classes from app/models/`);
+            }
+        } else if (hasTs) {
+            // TypeScript inventory: scan src/types/, src/models/, src/interfaces/ for exported interfaces/enums/classes
+            const tsDirs = ['src/types', 'src/models', 'src/interfaces', 'types', 'models'].map(d => path.join(root, d));
+            for (const tsDir of tsDirs) {
+                if (!fs.existsSync(tsDir)) { continue; }
+                try {
+                    const tsFiles = fs.readdirSync(tsDir).filter(f => f.endsWith('.ts') && !f.endsWith('.d.ts'));
+                    for (const tf of tsFiles) {
+                        try {
+                            const tContent = fs.readFileSync(path.join(tsDir, tf), 'utf8');
+                            const re = /^export\s+(?:interface|type|enum|class)\s+(\w+)/gm;
+                            const tRelPath = path.relative(root, path.join(tsDir, tf)).replace(/\\/g, '/');
+                            for (const m of tContent.matchAll(re)) {
+                                modelsInventory.push({ className: m[1], relPath: tRelPath });
+                            }
+                        } catch { /* skip */ }
+                    }
+                } catch { /* skip */ }
+            }
+            logInfo(`[pre-edit] TS types inventory: ${modelsInventory.length} exported types`);
+        }
+
+        // 4a-ii. Data model relationship map (Python only, when editing a models file)
+        // Scans app/models/ for SQLAlchemy relationships and ForeignKeys.
+        // Injected when the target file is inside app/models/ or the user message
+        // references a model that has relationships.
+        let modelRelMap: Array<{ className: string; relations: string[] }> = [];
+        const isModelEdit = targetRelPath.includes('models/') || /\b(model|schema|migration|foreign.?key|relationship)\b/i.test(userMessage);
+        if (hasPy && isModelEdit && modelsInventory.length > 0) {
+            modelRelMap = this.buildModelRelationshipMap(root);
+            logInfo(`[pre-edit] Model relationship map: ${modelRelMap.length} models with relations`);
+        }
+
+        // 4b. Route/function/field inventory from the target file itself
+        const targetLines = targetContent.split('\n');
+        const definedRoutes: string[] = [];   // "@bp.route('/path', ...)"
+        const definedFunctions: string[] = []; // "def func_name"
+        const definedFields: string[] = [];    // "field = db.Column(...)" / "field: Type"
+        const importedNames: string[] = [];    // "from X import Y, Z" → Y, Z
+
+        for (const line of targetLines) {
+            // Python Flask route
+            const routeMatch = line.match(/^\s*@\w+\.route\(['"]([^'"]+)['"]/);
+            if (routeMatch) { definedRoutes.push(routeMatch[1]); }
+
+            // Express: router.get('/path', ...) / app.post('/path', ...)
+            const expressMatch = line.match(/(?:router|app)\.\s*(?:get|post|put|patch|delete|all)\s*\(\s*['"`]([^'"`]+)['"`]/);
+            if (expressMatch) { definedRoutes.push(expressMatch[1]); }
+
+            // Next.js App Router: export async function GET / POST / PUT / DELETE / PATCH
+            const nextMatch = line.match(/^export\s+(?:async\s+)?function\s+(GET|POST|PUT|DELETE|PATCH|HEAD)\s*\(/);
+            if (nextMatch) { definedRoutes.push(`[${nextMatch[1]}] (Next.js handler)`); }
+
+            const defMatch = line.match(/^\s*(?:async\s+)?def\s+(\w+)\s*\(/);
+            if (defMatch && !defMatch[1].startsWith('_')) { definedFunctions.push(defMatch[1]); }
+
+            // TypeScript: export function / export const foo = / class Foo
+            const tsFnMatch = line.match(/(?:export\s+)?(?:async\s+)?function\s+(\w+)|(?:export\s+)?(?:const|let)\s+(\w+)\s*=\s*(?:async\s*)?\(/);
+            if (tsFnMatch) { definedFunctions.push(tsFnMatch[1] || tsFnMatch[2]); }
+
+            // Python SQLAlchemy column: "    field_name = db.Column(...)"
+            const pyColMatch = line.match(/^\s{4,}(\w+)\s*=\s*(?:db\.|sa\.)?Column\s*\(/);
+            if (pyColMatch) { definedFields.push(pyColMatch[1]); }
+
+            // Python SQLAlchemy relationship: "    field_name = db.relationship(...)"
+            const pyRelMatch = line.match(/^\s{4,}(\w+)\s*=\s*(?:db\.|sa\.)?relationship\s*\(/);
+            if (pyRelMatch) { definedFields.push(pyRelMatch[1]); }
+
+            // TypeScript class property: "  fieldName: Type" or "  fieldName = value"
+            const tsPropMatch = line.match(/^\s{2,4}(\w+)\s*[=:]/);
+            if (tsPropMatch && !tsFnMatch && !line.trim().startsWith('//')) {
+                definedFields.push(tsPropMatch[1]);
+            }
+
+            const importMatch = line.match(/^(?:from\s+\S+\s+import\s+(.+)|import\s+\{([^}]+)\})/);
+            if (importMatch) {
+                const names = (importMatch[1] || importMatch[2] || '')
+                    .split(',').map(s => s.trim().replace(/\s+as\s+\w+/, '').trim()).filter(Boolean);
+                importedNames.push(...names);
+            }
+        }
+
+        // ── 4e. Caller/reference impact analysis (transitive, up to 3 hops) ────────
+        // Check if user is modifying a specific named function that already exists.
+        // Walk the call graph outward: direct callers → callers of callers → one more hop.
+        // Cap at 3 hops, 20 total nodes to avoid context explosion.
+        const callerReport: Array<{ funcName: string; callers: string[]; hopCount: number }> = [];
+
+        if (definedFunctions.length > 0 && root) {
+            const isModifyTask = /\b(modify|update|change|refactor|rename|fix|edit|improve|rewrite)\b/i.test(userMessage);
+            if (isModifyTask) {
+                const mentionedFuncs = definedFunctions.filter(fn =>
+                    fn.length > 3 && userMessage.toLowerCase().includes(fn.toLowerCase())
+                ).slice(0, 2);
+
+                for (const fn of mentionedFuncs) {
+                    const transitiveCallers = this.walkCallGraph(fn, targetRelPath, root, 3, 20);
+                    if (transitiveCallers.lines.length > 0) {
+                        callerReport.push({
+                            funcName: fn,
+                            callers: transitiveCallers.lines,
+                            hopCount: transitiveCallers.maxHop,
+                        });
+                        logInfo(`[pre-edit] Caller graph: ${fn} → ${transitiveCallers.lines.length} refs across ${transitiveCallers.maxHop} hop(s)`);
+                    }
                 }
             }
+        }
+
+        // 4c. Pattern example — find a short representative route/function from the target file
+        // Look for a route that returns JSON or a list — closest to what the user likely wants
+        let patternExample = '';
+        const patternKws = userMessage.toLowerCase();
+        const isJsonTask = /json|api|list|return/.test(patternKws);
+
+        if (hasPy && definedRoutes.length > 0) {
+            // Find a route block: from @bp.route to the end of that function
+            let bestStart = -1;
+            for (let i = 0; i < targetLines.length; i++) {
+                const l = targetLines[i];
+                if (!l.match(/^\s*@\w+\.route\(/)) { continue; }
+                // Prefer JSON-returning routes when user wants JSON
+                if (isJsonTask) {
+                    const block = targetLines.slice(i, Math.min(i + 30, targetLines.length)).join('\n');
+                    if (/jsonify|\.json\(|json\.dumps/.test(block)) { bestStart = i; break; }
+                }
+                if (bestStart === -1) { bestStart = i; } // fallback: first route
+            }
+            if (bestStart >= 0) {
+                // Capture from @decorator to end of function (next blank line after def + indent reset)
+                const blockLines: string[] = [];
+                let inFunc = false;
+                let funcIndent = '';
+                for (let i = bestStart; i < Math.min(bestStart + 40, targetLines.length); i++) {
+                    const l = targetLines[i];
+                    blockLines.push(l);
+                    if (!inFunc && l.match(/^\s*def\s+/)) {
+                        inFunc = true;
+                        funcIndent = l.match(/^(\s*)/)?.[1] ?? '';
+                        continue;
+                    }
+                    if (inFunc && i > bestStart + 2) {
+                        // End when we're back at function indentation level with content (next def or decorator)
+                        if (l.trim() && !l.startsWith(funcIndent + ' ') && l.startsWith(funcIndent) && l !== funcIndent) {
+                            blockLines.pop(); break;
+                        }
+                    }
+                }
+                patternExample = blockLines.join('\n');
+            }
+        }
+
+        // 4d. Pre-validate: does the user's request reference a model name that doesn't exist?
+        const preValidationWarnings: string[] = [];
+        if (modelsInventory.length > 0) {
+            // Extract capitalised words from the user message (likely model names)
+            const mentionedModels = [...userMessage.matchAll(/\b([A-Z][a-zA-Z]{2,})\b/g)].map(m => m[1]);
+            for (const name of mentionedModels) {
+                // Skip common non-model words
+                if (/^(GET|POST|PUT|DELETE|JSON|HTTP|API|URL|SQL|UUID|ID|True|False|None|Flask|Blueprint|Login|User|Admin|Error|Exception|Response|Request|Session)$/.test(name)) { continue; }
+                const exists = modelsInventory.some(m => m.className === name);
+                if (!exists) {
+                    preValidationWarnings.push(
+                        `⚠ "${name}" is not a known model in app/models/. ` +
+                        `Available models: ${modelsInventory.slice(0, 8).map(m => m.className).join(', ')}${modelsInventory.length > 8 ? '…' : ''}.`
+                    );
+                }
+            }
+        }
+
+        // ── 5. Build numbered file content with window ───────────────────────
+        const FILE_LINE_LIMIT = 600;
+        let startIdx = 0;
+        let endIdx = targetLines.length;
+
+        if (targetLines.length > FILE_LINE_LIMIT) {
+            const kwsForWindow = [...filenameKeywords, ...contentKws].filter(w => w.length > 3);
+            const relevantIdxs = targetLines
+                .map((l, i) => ({ i, hit: kwsForWindow.some(w => l.toLowerCase().includes(w)) }))
+                .filter(x => x.hit).map(x => x.i);
+            if (relevantIdxs.length > 0) {
+                startIdx = Math.max(0, relevantIdxs[0] - 20);
+                endIdx   = Math.min(targetLines.length, relevantIdxs[relevantIdxs.length - 1] + 80);
+            } else {
+                endIdx = Math.min(targetLines.length, FILE_LINE_LIMIT);
+            }
+        }
+
+        const numberedLines = targetLines.slice(startIdx, endIdx)
+            .map((l, i) => `${String(startIdx + i + 1).padStart(4, ' ')}: ${l}`)
+            .join('\n');
+
+        const ext = path.extname(targetRelPath).slice(1) || 'text';
+        const windowNote = (startIdx > 0 || endIdx < targetLines.length)
+            ? ` [showing lines ${startIdx + 1}–${endIdx} of ${targetLines.length}]`
+            : ` [${targetLines.length} lines]`;
+
+        // Post visible tool call for the user
+        const preReadId = `pre_edit_read_${Date.now()}`;
+        post({ type: 'toolCall', id: preReadId, name: 'shell_read', args: { command: `cat "${targetRelPath}"` } });
+        post({ type: 'toolResult', id: preReadId, name: 'shell_read', success: true, preview: `${targetLines.length} lines` });
+
+        // ── 5b. Programmatic duplicate pre-check (fires before model is called) ─
+        // Extract the "thing being added" from the user message and check it against
+        // already-defined fields/functions/routes.  If found, block immediately —
+        // don't rely on the model to self-police.
+        const isAddTask = /\badd\b/i.test(userMessage) && !/\b(update|modify|change|refactor|rename|fix|edit|improve|rewrite|extend|remove.*from)\b/i.test(userMessage);
+        if (isAddTask && (definedFields.length > 0 || definedFunctions.length > 0 || definedRoutes.length > 0)) {
+            // Pull candidate "thing name" from the message:
+            // "add a phone_number field" → ["phone_number", "phone", "number"]
+            // "add phone number column" → ["phone", "number"]
+            const addMatch = userMessage.match(/\badd\s+(?:a\s+|an\s+)?(?:new\s+)?([a-z_][a-z0-9_]*(?:\s+[a-z_][a-z0-9_]*){0,3})/i);
+            if (addMatch) {
+                const rawTokens = addMatch[1].toLowerCase()
+                    .replace(/\s+(field|column|property|attribute|relationship|method|function|route|endpoint)\b/gi, '')
+                    .trim()
+                    .split(/[\s_]+/)
+                    .filter(t => t.length > 1);
+
+                // Build candidate names: snake_case joined, and individual tokens
+                const snakeJoined = rawTokens.join('_');
+                const candidates = [snakeJoined, ...rawTokens];
+
+                const allDefined = [...definedFields, ...definedFunctions, ...definedRoutes];
+                const hit = candidates.find(c => allDefined.some(d => d.toLowerCase() === c.toLowerCase()
+                    || d.toLowerCase().replace(/_/g, '') === c.toLowerCase().replace(/_/g, '')));
+
+                if (hit) {
+                    const matchedDef = allDefined.find(d => d.toLowerCase() === hit.toLowerCase()
+                        || d.toLowerCase().replace(/_/g, '') === hit.toLowerCase().replace(/_/g, ''));
+                    const msg = `Already exists: \`${matchedDef ?? hit}\` is already defined in \`${targetRelPath}\`. No change needed.`;
+                    logInfo(`[pre-edit] Programmatic duplicate block: ${msg}`);
+                    return { injection: '', blocked: msg };
+                }
+            }
+        }
+
+        // ── 6. Assemble the injection ────────────────────────────────────────
+        const sections: string[] = [];
+
+        sections.push(`[PRE-LOADED CONTEXT for your task]`);
+        sections.push(`Line numbers are for edit_file_at_line only — they are NOT part of the file.\n`);
+
+        // Models inventory FIRST — model must see what's available before reading the file
+        if (modelsInventory.length > 0) {
+            sections.push(`## RULE: You may only import models from this list (scanned from app/models/ on disk)`);
+            sections.push(`Do NOT invent or guess model names. If no model here fits the task, stop and explain.`);
+            sections.push(modelsInventory.map(m => `  ${m.className}  (${m.relPath})`).join('\n'));
+            sections.push('');
+        }
+
+        // What already exists in the file
+        if (definedRoutes.length > 0 || definedFunctions.length > 0 || definedFields.length > 0) {
+            sections.push(`## Already defined in this file — check for duplicates before adding`);
+            if (definedRoutes.length > 0) {
+                sections.push(`Routes: ${definedRoutes.map(r => `\`${r}\``).join(', ')}`);
+            }
+            if (definedFunctions.length > 0) {
+                sections.push(`Functions: ${definedFunctions.map(f => `\`${f}\``).join(', ')}`);
+            }
+            if (definedFields.length > 0) {
+                sections.push(`Fields/columns: ${definedFields.map(f => `\`${f}\``).join(', ')}`);
+            }
+            if (importedNames.length > 0) {
+                sections.push(`Currently imported: ${importedNames.slice(0, 20).map(n => `\`${n}\``).join(', ')}`);
+            }
+            sections.push('');
+        }
+
+        // Data model relationship map (when editing models)
+        if (modelRelMap.length > 0) {
+            sections.push(`\n## Model relationships (from app/models/ scan)`);
+            sections.push(`Review before changing model fields — downstream associations may require migrations or form updates.`);
+            for (const { className, relations } of modelRelMap) {
+                sections.push(`  ${className}: ${relations.join(' | ')}`);
+            }
+            sections.push('');
+        }
+
+        // Caller impact analysis (transitive)
+        if (callerReport.length > 0) {
+            sections.push(`\n## Caller impact — backward compatibility required`);
+            for (const { funcName, callers, hopCount } of callerReport) {
+                const hopNote = hopCount > 1 ? ` (${hopCount}-hop transitive graph)` : '';
+                sections.push(`\`${funcName}\` is referenced from ${callers.length} location(s)${hopNote}:`);
+                sections.push(callers.join('\n'));
+                sections.push(`Your change must remain compatible with these call sites, or update them in the same session.`);
+            }
+        }
+
+        // Pattern example
+        if (patternExample) {
+            sections.push(`## Pattern to follow exactly (copy this structure)`);
+            sections.push(`\`\`\`${ext}\n${patternExample}\n\`\`\``);
+            sections.push('');
+        }
+
+        // Target file
+        sections.push(`## Target file: ${targetRelPath}${windowNote}`);
+        sections.push(`\`\`\`${ext}\n${numberedLines}\n\`\`\``);
+
+        // Pre-validation warnings
+        if (preValidationWarnings.length > 0) {
+            sections.push(`\n## ⚠ Pre-validation warnings — resolve before writing code`);
+            sections.push(preValidationWarnings.join('\n'));
+        }
+
+        // Detect sweep tasks — "add error handling to all routes", "fix all X missing Y"
+        const isSweepTask = /\b(all|every|each|any)\b.{0,40}\b(route|function|endpoint|def)\b/i.test(userMessage)
+            || /\b(missing|without|lacks?)\b.{0,50}\b(error|exception|try|handl)/i.test(userMessage)
+            || /\b(no\s+error|no\s+try)\b/i.test(userMessage)
+            || /\b(add|fix).{0,30}\b(all|every|each|any)\b/i.test(userMessage);
+
+        // Instructions
+        sections.push(`\n## Your task`);
+        if (isSweepTask) {
+            sections.push([
+                `This is a SWEEP task — you need to update every route/function in the file that is missing the requested change.`,
+                ``,
+                `Strategy (IMPORTANT — follow this exactly):`,
+                `1. Read the file with shell_read to get the current content.`,
+                `2. Find the FIRST route/function that still needs the change (not already updated).`,
+                `3. Call edit_file ONCE for that route, using EXACT text copied from the current file (correct indentation).`,
+                `4. After it succeeds, go back to step 2 and find the next one.`,
+                `5. When no more remain, output a brief summary: "Updated N routes: [list of function names]."`,
+                ``,
+                `Rules:`,
+                `- Use edit_file (NOT edit_file_at_line) — line numbers shift after each edit.`,
+                `- Copy old_string VERBATIM from the file — preserve ALL leading spaces/indentation.`,
+                `- Do NOT batch all edits from the initial read — the file changes after each edit.`,
+                `- Do NOT stop after the first edit — keep going until all are updated.`,
+                `- No \`pass\` or \`# TODO\` — complete working code only.`,
+                `- Match the style already present in the file.`,
+            ].join('\n'));
         } else {
-            candidates = this.findEditCandidates(filenameKeywords, extensions, fullServiceName);
-        }
-
-        if (candidates.length === 0) {
-            logInfo('[pre-edit] No candidate files found — falling through to normal loop');
-            return '';
-        }
-
-        logInfo(`[pre-edit] Found ${candidates.length} candidate(s): ${candidates.slice(0, 5).map(c => `${c.relPath}(${c.score})`).join(', ')}`);
-
-        // ── 4. Read top candidates and score by content keyword hits ─────────
-        const isMultiFile = /\b(all|every|each)\b.*\b(service|route|model|file|handler|view|controller)s?\b/i.test(userMessage);
-        const maxFiles = isMultiFile ? 2 : 1;
-        const top = candidates.slice(0, Math.min(3, candidates.length));
-
-        interface ReadResult { relPath: string; absPath: string; content: string; lineCount: number; hits: number; }
-        const readResults: ReadResult[] = [];
-
-        for (const c of top) {
-            try {
-                const stat = fs.statSync(c.absPath);
-                if (stat.size > 100_000) {
-                    logInfo(`[pre-edit] Skipping ${c.relPath} — too large (${stat.size} bytes)`);
-                    continue;
-                }
-                const content = fs.readFileSync(c.absPath, 'utf8');
-                const lineCount = content.split('\n').length;
-                const lower = content.toLowerCase();
-                // Score by content keyword hits (minimum across all keywords for coverage)
-                const hitsPerKw = contentKws.map(w => {
-                    let count = 0, pos = 0;
-                    while ((pos = lower.indexOf(w, pos)) !== -1) { count++; pos++; }
-                    return count;
-                });
-                const minHits = contentKws.length > 0 ? Math.min(...hitsPerKw) : 1;
-                const totalHits = hitsPerKw.reduce((a, b) => a + b, 0);
-                readResults.push({ relPath: c.relPath, absPath: c.absPath, content, lineCount, hits: minHits * 10000 + totalHits + c.score * 100 });
-                logInfo(`[pre-edit] Read ${c.relPath} (${lineCount} lines, score=${c.score}, hits=${minHits}/${totalHits})`);
-            } catch (e) {
-                logWarn(`[pre-edit] Failed to read ${c.relPath}: ${toErrorMessage(e as Error)}`);
+            const isModifyTask = /\b(update|modify|change|refactor|rename|fix|edit|improve|rewrite|extend|add.*to|remove.*from)\b/i.test(userMessage);
+            if (isModifyTask) {
+                sections.push([
+                    `This is a MODIFY task — you are changing existing code, not adding new code.`,
+                    ``,
+                    `Run these checks silently, then act:`,
+                    `- If the thing to modify does NOT exist in the file → "Cannot find [name] in ${targetRelPath}. No change made."`,
+                    `- If all checks pass → call edit_file_at_line with path="${targetRelPath}" immediately. No explanation needed.`,
+                    ``,
+                    `Rules:`,
+                    `- Do NOT use the duplicate check — the item already exists by definition.`,
+                    `- MODEL: If adding a new field that references another model, it must be in the RULE list above.`,
+                    `- Use start_line/end_line from the line numbers shown.`,
+                    `- Match surrounding indentation exactly.`,
+                    `- No shell_read — all context is above.`,
+                    `- No \`pass\` or \`# TODO\` — complete working code only.`,
+                ].join('\n'));
+            } else {
+                sections.push([
+                    `Run all validation checks silently (do not narrate them), then:`,
+                    `- If a check fails → output one sentence explaining why, then stop.`,
+                    `- If all pass → call edit_file_at_line with path="${targetRelPath}" immediately. No explanation needed.`,
+                    ``,
+                    `Checks (run silently):`,
+                    `1. DUPLICATE: Is what the user asked already in "Already defined"? If yes → "Already exists: [name]. No change needed."`,
+                    `2. MODEL: Need a DB model? Must be in the RULE list above. If missing → "Cannot proceed: [Name] not found in app/models/."`,
+                    `3. PATTERN: Use same blueprint, decorators, imports as the pattern example.`,
+                    `4. FIT: Does this belong in ${targetRelPath}?`,
+                    ``,
+                    `When editing:`,
+                    `  - Use start_line/end_line from the line numbers shown`,
+                    `  - Match surrounding indentation`,
+                    `  - No shell_read — all context is above`,
+                    `  - No \`pass\` or \`# TODO\` — complete working code only`,
+                ].join('\n'));
             }
         }
 
-        if (readResults.length === 0) { return ''; }
-        readResults.sort((a, b) => b.hits - a.hits);
-        const selected = readResults.slice(0, maxFiles);
+        // Post reasoning card to UI
+        post({
+            type: 'reasoningCard',
+            targetFile: targetRelPath,
+            routes: definedRoutes,
+            functions: definedFunctions,
+            fields: definedFields,
+            modelCount: modelsInventory.length,
+            warnings: preValidationWarnings,
+            hasPattern: !!patternExample,
+            isSweep: isSweepTask,
+        });
 
-        // ── 5. Build the context injection string ────────────────────────────
-        const FILE_LINE_LIMIT = 600; // inject full file up to this length
-        const contextBlocks: string[] = [];
-
-        for (const r of selected) {
-            // Post a visible tool call so the user sees what we're doing
-            const preReadId = `pre_edit_read_${Date.now()}`;
-            post({ type: 'toolCall', id: preReadId, name: 'shell_read', args: { command: `cat "${r.relPath}"` } });
-            post({ type: 'toolResult', id: preReadId, name: 'shell_read', success: true, preview: `${r.lineCount} lines` });
-
-            const lines = r.content.split('\n');
-            let startIdx = 0;
-            let endIdx   = lines.length;
-
-            if (r.lineCount > FILE_LINE_LIMIT) {
-                // Focused window around keyword-matching lines
-                const kwsForWindow = [...filenameKeywords, ...contentKws].filter(w => w.length > 3);
-                const relevantIdxs = lines
-                    .map((l, i) => ({ i, hit: kwsForWindow.some(w => l.toLowerCase().includes(w)) }))
-                    .filter(x => x.hit).map(x => x.i);
-                if (relevantIdxs.length > 0) {
-                    startIdx = Math.max(0, relevantIdxs[0] - 20);
-                    endIdx   = Math.min(lines.length, relevantIdxs[relevantIdxs.length - 1] + 80);
-                    logInfo(`[pre-edit] Focused window lines ${startIdx + 1}-${endIdx} of ${r.relPath}`);
-                } else {
-                    endIdx = Math.min(lines.length, FILE_LINE_LIMIT);
-                }
-            }
-
-            // Line-numbered content — model reads line numbers, uses edit_file_at_line
-            const numberedLines = lines.slice(startIdx, endIdx)
-                .map((l, i) => `${String(startIdx + i + 1).padStart(4, ' ')}: ${l}`)
-                .join('\n');
-
-            const ext = path.extname(r.relPath).slice(1) || 'text';
-            const windowNote = (startIdx > 0 || endIdx < lines.length)
-                ? ` [showing lines ${startIdx + 1}-${endIdx} of ${r.lineCount}]`
-                : ` [${r.lineCount} lines]`;
-            contextBlocks.push(
-                `[FILE: ${r.relPath}${windowNote}]\n` +
-                `\`\`\`${ext}\n${numberedLines}\n\`\`\``
-            );
-        }
-
-        const pathList = selected.map(r => `"${r.relPath}"`).join(', ');
-        const injection = [
-            `[PRE-LOADED CONTEXT for your task]`,
-            `The file(s) below are shown with line numbers (format: "  42: code"). Line numbers are for edit_file_at_line only — they are NOT part of the file.`,
-            ``,
-            contextBlocks.join('\n\n---\n\n'),
-            ``,
-            `INSTRUCTIONS:`,
-            `- Use edit_file_at_line with path=${pathList}`,
-            `- Specify start_line and end_line from the numbers shown above`,
-            `- Write new_content with the same indentation style as the surrounding code`,
-            `- Do NOT call shell_read — the file content is already above`,
-            `- If the change is already present, say so and stop`,
-        ].join('\n');
-
-        logInfo(`[pre-edit] Injected ${injection.length} chars of pre-loaded context for ${selected.map(r => r.relPath).join(', ')}`);
-        return injection;
+        const injection = sections.join('\n');
+        logInfo(`[pre-edit] Injected ${injection.length} chars — file: ${targetRelPath}, models: ${modelsInventory.length}, routes: ${definedRoutes.length}, callers: ${callerReport.reduce((a, c) => a + c.callers.length, 0)} (${callerReport.reduce((a, c) => Math.max(a, c.hopCount), 0)} hops), warnings: ${preValidationWarnings.length}`);
+        return { injection, blocked: null };
     }
 }

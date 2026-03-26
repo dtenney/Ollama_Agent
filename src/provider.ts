@@ -350,12 +350,17 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
                     // Wrap post() to capture streamed tokens → save assistant message
                     let assistantBuf = '';
+                    (this as any)._inThinking = false;
                     const isFirstExchange = this.currentSession.messages.filter(m => m.role === 'assistant').length === 0;
                     const trackedPost: PostFn = (m: object) => {
                         post(m);
                         const pm = m as { type: string; text?: string };
                         if (pm.type === 'token') {
-                            assistantBuf += pm.text ?? '';
+                            const tok = pm.text ?? '';
+                            // Strip thinking sentinels and thinking content from session buffer
+                            if (tok === '\x01THINK_START\x01') { (this as any)._inThinking = true; }
+                            else if (tok === '\x01THINK_END\x01') { (this as any)._inThinking = false; }
+                            else if (!(this as any)._inThinking) { assistantBuf += tok; }
                         } else if (pm.type === 'streamEnd') {
                             if (assistantBuf.trim()) {
                                 const clean = stripToolBlocksFromText(assistantBuf)
@@ -380,6 +385,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                                 }
                             }
                             assistantBuf = '';
+                            (this as any)._inThinking = false;
                             this.persistSession();
                         } else if (pm.type === 'error') {
                             const errText = (m as { type: string; text: string }).text;
@@ -603,7 +609,10 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         post({ type: 'error', text: 'Cannot compact while a response is in progress.' });
                         break;
                     }
-                    const result = await this._agent!.compactContext(50);
+                    post({ type: 'compactingStarted' });
+                    const result = await this._agent!.compactContext(25, (token) => {
+                        post({ type: 'compactSummaryToken', token });
+                    });
                     post({
                         type: 'contextCompacted',
                         messagesRemoved: result.removed,

@@ -44,12 +44,14 @@
   "scripts": {
     "vendor": "node scripts/vendor-hljs.js",
     "compile": "npm run vendor && tsc",
+    "deploy": "npm run compile && node -e \"const fs=require('fs'),path=require('path');const extRoot=process.env.USERPROFILE+'/.vscode/extensions/dtenney.ollamapilot-0.4.0';const ext=extRoot+'/dist';const files=['agent','provider','main','memoryCore','contextCalculator','ollamaClient','config'];files.forEach(f=>{const src='dist/'+f+'.js';const dst=ext+'/'+f+'.js';if(fs.existsSync(src)){fs.copyFileSync(src,dst);console.log('Deployed '+f+'.js');}});const wv=extRoot+'/webview/webview.js';fs.copyFileSync('webview/webview.js',wv);console.log('Deployed webview.js');fs.copyFileSync('package.json',extRoot+'/package.json');console.log('Deployed package.json');\"",
     "bundle": "npm run vendor && node esbuild.js",
     "bundle:prod": "npm run vendor && node esbuild.js --production",
     "build": "npm run compile",
-    "vscode:prepublish": "npm run bundle:prod",
+    "vscode:prepublish": "npx tsc",
     "test": "npm run compile && vscode-test",
     "test:unit": "npm run compile && mocha dist/test/unit/**/*.test.js",
+    "test:harness": "npm run compile && mocha --require dist/test/vscode-mock.js --timeout 30000 dist/test/unit/agentHarness.test.js",
     "test:coverage": "npm run compile && nyc mocha dist/test/unit/**/*.test.js"
   },
   "devDependencies": {
@@ -329,6 +331,11 @@
           "default": false,
           "markdownDescription": "When enabled, injects a concise `git diff` of your uncommitted changes into every message. Helps the agent understand what you're currently working on. Only works in git repositories."
         },
+        "ollamaAgent.autoRunTests": {
+          "type": "boolean",
+          "default": false,
+          "description": "When enabled, automatically run the corresponding test file after a successful edit. Results are shown in the chat. Only runs if a matching test file is found."
+        },
         "ollamaAgent.mcpServers": {
           "type": "array",
           "default": [],
@@ -444,6 +451,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Automatically compact conversation history when context reaches 99% of model's limit. You'll be alerted at 70% usage and reminded until 99%, then auto-compact will trigger if enabled."
+        },
+        "ollamaAgent.enableThinking": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Enable chain-of-thought reasoning for models that support it (e.g. qwen3, deepseek-r1). The model will reason internally before responding — slower but more accurate for complex tasks like code verification, debugging, and doc cross-checking. Requires a compatible Ollama model."
         },
         "ollamaAgent.codeLens.enabled": {
           "type": "boolean",

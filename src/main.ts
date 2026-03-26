@@ -128,7 +128,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 dispose: () => memoryManager?.dispose()
             });
             
-            // Run initial maintenance on startup
+            // Run initial maintenance and project seeding on startup
             setTimeout(async () => {
                 try {
                     if (memoryManager) {
@@ -136,6 +136,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                         await memoryManager.demoteStaleEntries();
                         await memoryManager.promoteFrequentEntries();
                         await memoryManager.archiveOldEntries();
+                        // Seed project memory from workspace files (runs once per workspace)
+                        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                        if (root) {
+                            await memoryManager.seedProjectMemory(root);
+                        }
                     }
                 } catch (err) {
                     logError(`[memory] Initial maintenance failed: ${toErrorMessage(err)}`);

@@ -85,13 +85,14 @@ export function streamChatRequest(
         };
         // Only include tools if non-empty (some models reject the field when empty)
         if (tools.length) { payload.tools = tools; }
-        // Only include options if temperature is non-default
-        if (cfg.temperature !== 0.7) {
-            payload.options = { temperature: cfg.temperature };
-        }
+        // Build options — temperature (if non-default) and thinking mode
+        const opts: Record<string, unknown> = {};
+        if (cfg.temperature !== 0.7) { opts.temperature = cfg.temperature; }
+        if (cfg.enableThinking) { opts.think = true; }
+        if (Object.keys(opts).length > 0) { payload.options = opts; }
 
         const body = JSON.stringify(payload);
-        logInfo(`POST /api/chat  model=${model}  msgs=${messages.length}`);
+        logInfo(`POST /api/chat  model=${model}  msgs=${messages.length}  think=${cfg.enableThinking}`);
 
         const req = makeRequest(
             {
@@ -118,9 +119,11 @@ export function streamChatRequest(
                 }
 
                 let fullContent = '';
+                let fullThinking = '';
                 let toolCalls: OllamaToolCall[] = [];
                 let buf = '';
                 let resolved = false;
+                let thinkingStarted = false;
 
                 res.on('data', (chunk: Buffer) => {
                     if (stopRef.stop) { req.destroy(); return; }
@@ -132,7 +135,20 @@ export function streamChatRequest(
                         if (!line.trim()) { continue; }
                         try {
                             const p = JSON.parse(line);
+                            if (p.message?.thinking) {
+                                if (!thinkingStarted) {
+                                    thinkingStarted = true;
+                                    onToken('\x01THINK_START\x01');
+                                }
+                                fullThinking += p.message.thinking;
+                                onToken(p.message.thinking);
+                            }
                             if (p.message?.content) {
+                                if (thinkingStarted && !fullContent) {
+                                    // thinking finished, content starting
+                                    onToken('\x01THINK_END\x01');
+                                    thinkingStarted = false;
+                                }
                                 fullContent += p.message.content;
                                 onToken(p.message.content);
                             }
@@ -140,7 +156,9 @@ export function streamChatRequest(
                                 toolCalls = p.message.tool_calls;
                             }
                             if (p.done && !resolved) {
+                                if (thinkingStarted) { onToken('\x01THINK_END\x01'); }
                                 resolved = true;
+                                if (fullThinking) { logInfo(`[think] ${fullThinking.length} thinking chars`); }
                                 logInfo(`Stream done — ${fullContent.length} chars, ${toolCalls.length} tool calls`);
                                 resolve({ content: fullContent, toolCalls });
                             }

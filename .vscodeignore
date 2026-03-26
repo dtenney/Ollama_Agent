@@ -1,6 +1,4 @@
-# ── Everything bundled into dist/main.js — exclude the rest ───────────────────
-
-# Source & build tooling
+# ── Source & build tooling (never ship) ──────────────────────────────────────
 src/**
 **/*.ts
 tsconfig.json
@@ -9,12 +7,42 @@ esbuild.js
 .github/**
 scripts/**
 
-# ALL node_modules (bundled by esbuild)
+# node_modules — exclude most, but keep runtime third-party deps
+# (axios, @modelcontextprotocol/sdk are required at runtime by dist/ files)
 node_modules/**
+!node_modules/axios/**
+!node_modules/axios-retry/**
+!node_modules/follow-redirects/**
+!node_modules/form-data/**
+!node_modules/combined-stream/**
+!node_modules/delayed-stream/**
+!node_modules/mime-types/**
+!node_modules/mime-db/**
+!node_modules/proxy-from-env/**
+!node_modules/@modelcontextprotocol/**
+!node_modules/zod/**
+!node_modules/zod-to-json-schema/**
+!node_modules/eventsource-parser/**
+!node_modules/content-type/**
+!node_modules/is-stream/**
+!node_modules/cross-spawn/**
+!node_modules/shebang-command/**
+!node_modules/shebang-regex/**
+!node_modules/which/**
+!node_modules/path-key/**
+!node_modules/ajv/**
+!node_modules/ajv-formats/**
+!node_modules/fast-deep-equal/**
+!node_modules/fast-uri/**
+!node_modules/json-schema-traverse/**
+!node_modules/require-from-string/**
+!node_modules/eventsource/**
+!node_modules/json-schema-typed/**
+!node_modules/jose/**
+!node_modules/pkce-challenge/**
 
-# Individual tsc output (only dist/main.js is needed)
-dist/**
-!dist/main.js
+# dist/ — include ALL tsc-compiled files (tsc produces one file per module)
+# (previously only dist/main.js was needed when esbuild produced a single bundle)
 
 # Dev docs
 IMPLEMENTATION_PLAN.md
@@ -30,6 +58,8 @@ GAP_ANALYSIS.md
 MANUAL_TESTS.md
 MEMORY_IMPROVEMENTS.md
 .ollamapilot/**
+DESIGN_VISION.md
+PROJECT_STATUS.md
 
 # Build artefacts
 *.vsix
@@ -54,7 +84,7 @@ vsce_ls.txt
 Thumbs.db
 
 # ── Keep in VSIX ─────────────────────────────────────────────────────────────
-# dist/main.js     ← single bundled extension file
+# dist/**           ← tsc-compiled extension files
 # webview/**        ← chat UI (HTML + JS + vendor hljs)
 # images/**         ← logo, banner, sidebar icon, demo gif
 # package.json      ← manifest

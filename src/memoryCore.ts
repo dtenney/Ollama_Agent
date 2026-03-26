@@ -565,12 +565,12 @@ export class TieredMemoryManager {
             logError('[memory] Search query cannot be empty');
             return [];
         }
-        
+
         const searchLimit = Math.min(Math.max(1, limit ?? this.config.semanticSearchLimit), 50);
-        
+
         if (!this.qdrantClient || !this.embeddingService) {
-            logError('[memory] Semantic search unavailable: Qdrant or embedding service not initialized');
-            return [];
+            // Local keyword fallback — search tiers 0-3 by keyword matching
+            return this.searchLocal(query, tier, searchLimit);
         }
 
         try {
@@ -706,17 +706,31 @@ export class TieredMemoryManager {
             }
         }
 
+        // Inject auto-seeded Tier 1 entries (project info, tech stack, structure) — always small
+        const seededEntries = core.tier_1_essential.filter(e => e.tags?.includes('auto-seeded'));
+        if (seededEntries.length > 0) {
+            context += '\n### Project Context (auto-seeded)\n';
+            estimatedTokens += 5;
+            for (const entry of seededEntries) {
+                const line = `- ${entry.content}\n`;
+                const tokens = Math.ceil(line.length / 4);
+                if (estimatedTokens + tokens > tokenLimit) { break; }
+                context += line;
+                estimatedTokens += tokens;
+            }
+        }
+
         // Add a summary of what's available (not the content itself)
         const stats = this.getStats();
         const totalEntries = stats.reduce((s, t) => s + t.count, 0);
-        const nonCriticalEntries = totalEntries - (core.tier_0_critical?.length || 0);
+        const nonCriticalEntries = totalEntries - (core.tier_0_critical?.length || 0) - seededEntries.length;
         if (nonCriticalEntries > 0) {
             const tierSummary = stats
                 .filter(s => s.tier > 0 && s.count > 0)
                 .map(s => `T${s.tier}(${s.name}): ${s.count}`)
                 .join(', ');
-            context += `\n### Memory Available (use memory_search or memory_tier_list to access)\n`;
-            context += `${nonCriticalEntries} entries across tiers: ${tierSummary}\n`;
+            context += `\n### More Memory Available (use memory_search or memory_tier_list to access)\n`;
+            context += `${nonCriticalEntries} additional entries across tiers: ${tierSummary}\n`;
             context += `Call memory_search("<topic>") to find relevant memories before answering project-specific questions.\n`;
         }
 
@@ -991,5 +1005,194 @@ export class TieredMemoryManager {
         }
         
         return stats;
+    }
+
+    /**
+     * Local keyword search across tiers 0-3 (fallback when Qdrant unavailable).
+     * Scores entries by how many query words appear in the content.
+     */
+    private searchLocal(query: string, tier?: number, limit: number = 5): MemoryEntry[] {
+        const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+        if (words.length === 0) { return []; }
+
+        const core = this.getCoreReadonly();
+        const tiersToSearch: Array<keyof MemoryCore> = tier !== undefined
+            ? [`tier_${tier}_${this.getTierName(tier as 0|1|2|3|4|5)}` as keyof MemoryCore]
+            : ['tier_0_critical', 'tier_1_essential', 'tier_2_operational', 'tier_3_collaboration'];
+
+        const scored: Array<{ entry: MemoryEntry; score: number }> = [];
+        for (const key of tiersToSearch) {
+            const entries = core[key] as MemoryEntry[];
+            for (const entry of entries) {
+                const text = entry.content.toLowerCase();
+                const matches = words.filter(w => text.includes(w)).length;
+                if (matches > 0) {
+                    scored.push({ entry: { ...entry, relevanceScore: matches / words.length }, score: matches });
+                }
+            }
+        }
+
+        scored.sort((a, b) => b.score - a.score);
+        logInfo(`[memory] Local keyword search for "${query}" returned ${scored.length} results`);
+        return scored.slice(0, limit).map(s => s.entry);
+    }
+
+    /**
+     * Seed project memory from the workspace on first activation.
+     * Scans key files to extract tech stack, entry points, and structure.
+     * Only runs once per workspace (tracked via a seeded flag in Tier 0 tags).
+     * Seeds go to Tier 1 (essential) — NOT injected into the system prompt automatically.
+     */
+    async seedProjectMemory(workspaceRoot: string): Promise<void> {
+        // Check if already seeded — read from JSON file directly to avoid stale workspaceState
+        const filePath = this.getMemoryFilePath();
+        let alreadySeeded = false;
+        if (filePath && fs.existsSync(filePath)) {
+            try {
+                const raw = fs.readFileSync(filePath, 'utf8');
+                const data = JSON.parse(raw) as MemoryFileFormat;
+                alreadySeeded = (data.tiers?.tier_1_essential || []).some(e => e.tags?.includes('auto-seeded'));
+            } catch { /* ignore parse errors — will re-seed */ }
+        }
+        if (alreadySeeded) {
+            logInfo('[memory] Project memory already seeded — skipping');
+            return;
+        }
+
+        logInfo('[memory] Seeding project memory from workspace...');
+        const seeds: Array<{ content: string; tags: string[] }> = [];
+
+        const tryRead = (rel: string): string | null => {
+            try {
+                const p = path.join(workspaceRoot, rel);
+                if (fs.existsSync(p)) { return fs.readFileSync(p, 'utf8').slice(0, 8000); }
+            } catch { /* ignore */ }
+            return null;
+        };
+
+        // ── Tech stack from package.json ────────────────────────────────────
+        const pkg = tryRead('package.json');
+        if (pkg) {
+            try {
+                const parsed = JSON.parse(pkg);
+                const deps = Object.keys({ ...parsed.dependencies, ...parsed.devDependencies });
+                const frameworks = deps.filter(d =>
+                    /flask|django|express|fastapi|react|vue|angular|next|nest|spring|rails|laravel/i.test(d)
+                ).slice(0, 10);
+                if (frameworks.length) {
+                    seeds.push({ content: `JS/TS frameworks and libraries: ${frameworks.join(', ')}`, tags: ['auto-seeded', 'tech-stack'] });
+                }
+                if (parsed.name) {
+                    seeds.push({ content: `Project name: ${parsed.name}${parsed.description ? `. ${parsed.description}` : ''}`, tags: ['auto-seeded', 'project-info'] });
+                }
+            } catch { /* ignore */ }
+        }
+
+        // ── Tech stack from requirements.txt / pyproject.toml ───────────────
+        const reqs = tryRead('requirements.txt') || tryRead('requirements/base.txt');
+        if (reqs) {
+            const pyDeps = reqs.split('\n')
+                .map(l => l.split(/[=<>!~]/)[0].trim().toLowerCase())
+                .filter(l => l && !l.startsWith('#') && l.length > 1)
+                .slice(0, 30);
+            const frameworks = pyDeps.filter(d =>
+                /flask|django|fastapi|sqlalchemy|celery|redis|postgres|pymongo|pydantic|aiohttp/i.test(d)
+            );
+            if (frameworks.length) {
+                seeds.push({ content: `Python frameworks and libraries: ${frameworks.join(', ')}`, tags: ['auto-seeded', 'tech-stack'] });
+            }
+            if (pyDeps.length) {
+                seeds.push({ content: `Python dependencies (${pyDeps.length} total): ${pyDeps.slice(0, 15).join(', ')}`, tags: ['auto-seeded', 'dependencies'] });
+            }
+        }
+
+        // ── Project structure from README ────────────────────────────────────
+        const readme = tryRead('README.md') || tryRead('README.rst');
+        if (readme) {
+            const firstPara = readme.split(/\n\n/)[0].replace(/[#*`]/g, '').trim().slice(0, 300);
+            if (firstPara.length > 30) {
+                seeds.push({ content: `Project description (from README): ${firstPara}`, tags: ['auto-seeded', 'project-info'] });
+            }
+        }
+
+        // ── Entry points from common patterns ───────────────────────────────
+        const entryPoints: string[] = [];
+        for (const candidate of ['app.py', 'main.py', 'run.py', 'server.py', 'wsgi.py', 'manage.py', 'index.ts', 'index.js', 'src/main.ts', 'src/index.ts']) {
+            if (fs.existsSync(path.join(workspaceRoot, candidate))) {
+                entryPoints.push(candidate);
+            }
+        }
+        if (entryPoints.length) {
+            seeds.push({ content: `Entry points: ${entryPoints.join(', ')}`, tags: ['auto-seeded', 'structure'] });
+        }
+
+        // ── App structure (top-level dirs) ───────────────────────────────────
+        try {
+            const topDirs = fs.readdirSync(workspaceRoot, { withFileTypes: true })
+                .filter(d => d.isDirectory() && !d.name.startsWith('.') && !['node_modules', '__pycache__', 'dist', 'build', 'venv', '.venv'].includes(d.name))
+                .map(d => d.name)
+                .slice(0, 12);
+            if (topDirs.length) {
+                seeds.push({ content: `Top-level directories: ${topDirs.join(', ')}`, tags: ['auto-seeded', 'structure'] });
+            }
+        } catch { /* ignore */ }
+
+        // ── Config / environment hints ───────────────────────────────────────
+        const configFile = tryRead('config/settings.py') || tryRead('config.py') || tryRead('.env.example');
+        if (configFile) {
+            const dbLine = configFile.match(/(?:DATABASE_URL|SQLALCHEMY_DATABASE_URI|DB_HOST)\s*[=:]\s*([^\n]{0,80})/)?.[1]?.trim();
+            if (dbLine && !dbLine.includes('secret') && !dbLine.includes('password')) {
+                seeds.push({ content: `Database config hint: ${dbLine}`, tags: ['auto-seeded', 'config'] });
+            }
+        }
+
+        // ── Security / PII utilities ─────────────────────────────────────────
+        const securityFiles: string[] = [];
+        const securityPatterns = [
+            'app/utils/pii_encryption.py', 'app/utils/secure_photo_storage.py',
+            'app/utils/log_sanitizer.py', 'app/utils/security.py',
+            'app/utils/compliance_validator.py', 'app/utils/secure_file_helper.py',
+            'app/services/nj_compliance_service.py', 'app/routes/pii_admin.py',
+            'app/utils/encryption.py', 'app/utils/pii_audit.py',
+        ];
+        for (const f of securityPatterns) {
+            if (fs.existsSync(path.join(workspaceRoot, f))) { securityFiles.push(f); }
+        }
+        if (securityFiles.length) {
+            seeds.push({ content: `Security/PII utility files: ${securityFiles.join(', ')}`, tags: ['auto-seeded', 'security'] });
+        }
+
+        // ── Key model files ──────────────────────────────────────────────────
+        const modelFiles: string[] = [];
+        for (const f of ['app/models/customer.py', 'app/models/transaction.py', 'app/models/user.py']) {
+            if (fs.existsSync(path.join(workspaceRoot, f))) { modelFiles.push(f); }
+        }
+        if (modelFiles.length) {
+            seeds.push({ content: `Key model files: ${modelFiles.join(', ')}`, tags: ['auto-seeded', 'structure'] });
+        }
+
+        // ── Docs available ───────────────────────────────────────────────────
+        const docsDir = path.join(workspaceRoot, 'docs');
+        if (fs.existsSync(docsDir)) {
+            try {
+                const docFiles = fs.readdirSync(docsDir)
+                    .filter(f => f.endsWith('.md') || f.endsWith('.rst'))
+                    .slice(0, 10);
+                if (docFiles.length) {
+                    seeds.push({ content: `Documentation files in docs/: ${docFiles.join(', ')}`, tags: ['auto-seeded', 'docs'] });
+                }
+            } catch { /* ignore */ }
+        }
+
+        // Write all seeds to Tier 1 (essential — available via memory_search, not auto-injected)
+        let saved = 0;
+        for (const seed of seeds) {
+            try {
+                await this.addEntry(1, seed.content, seed.tags);
+                saved++;
+            } catch { /* ignore individual failures */ }
+        }
+
+        logInfo(`[memory] Project seed complete — saved ${saved} entries to Tier 1`);
     }
 }

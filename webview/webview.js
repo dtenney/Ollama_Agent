@@ -62,6 +62,9 @@ let currentRaw = '';
 let streaming = false;
 /** True when the user has manually scrolled away from the bottom. */
 let userScrolledUp = false;
+/** Tracks whether we're currently inside a thinking block while streaming. */
+let inThinkingBlock = false;
+let thinkingBuf = '';
 
 /** Model presets configuration */
 const MODEL_PRESETS = {
@@ -257,10 +260,13 @@ function populateModels(models, connected, configuredModel) {
     // Apply default model from settings if available
     if (defaultModel && models.includes(defaultModel)) {
         modelSelect.value = defaultModel;
-    }
-
-    // Apply current preset if it exists and model is available (overrides default)
-    if (currentPreset && MODEL_PRESETS[currentPreset]) {
+        // If settings model doesn't match the active preset, switch to custom
+        if (currentPreset && MODEL_PRESETS[currentPreset] && MODEL_PRESETS[currentPreset].model !== defaultModel) {
+            currentPreset = '';
+            presetSelect.value = '';
+        }
+    } else if (currentPreset && MODEL_PRESETS[currentPreset]) {
+        // Only apply preset when settings didn't specify a different model
         const config = MODEL_PRESETS[currentPreset];
         if (models.includes(config.model)) {
             modelSelect.value = config.model;
@@ -656,6 +662,8 @@ function startAssistantMessage() {
     div.querySelector('.msg-header').appendChild(createPinBtn(div));
     currentMsgEl = div;
     currentRaw = '';
+    inThinkingBlock = false;
+    thinkingBuf = '';
     scrollBottom();
     return div;
 }
@@ -663,6 +671,45 @@ function startAssistantMessage() {
 /** @param {string} token */
 function appendToken(token) {
     if (!currentMsgEl) { return; }
+
+    // Handle thinking sentinels
+    if (token === '\x01THINK_START\x01') {
+        inThinkingBlock = true;
+        thinkingBuf = '';
+        // Create collapsible thinking block in the message
+        const content = currentMsgEl.querySelector('.msg-content');
+        if (content && !currentMsgEl.querySelector('.thinking-block')) {
+            const details = document.createElement('details');
+            details.className = 'thinking-block';
+            const summary = document.createElement('summary');
+            summary.textContent = '💭 Thinking…';
+            const pre = document.createElement('pre');
+            pre.className = 'thinking-content';
+            pre.style.cssText = 'font-size:0.78em;opacity:0.6;white-space:pre-wrap;margin:4px 0 0;';
+            details.appendChild(summary);
+            details.appendChild(pre);
+            content.before(details);
+        }
+        return;
+    }
+    if (token === '\x01THINK_END\x01') {
+        inThinkingBlock = false;
+        // Update summary to show it's done
+        const details = currentMsgEl?.querySelector('.thinking-block');
+        if (details) {
+            const summary = details.querySelector('summary');
+            if (summary) { summary.textContent = '💭 Thought process'; }
+        }
+        scrollBottom();
+        return;
+    }
+    if (inThinkingBlock) {
+        thinkingBuf += token;
+        const pre = currentMsgEl?.querySelector('.thinking-content');
+        if (pre) { pre.textContent = thinkingBuf; scrollBottom(); }
+        return;
+    }
+
     currentRaw += token;
     const content = currentMsgEl.querySelector('.msg-content');
     if (content) {
@@ -883,6 +930,76 @@ function addErrorMessage(text) {
     scrollBottom(true);
 }
 
+function addReasoningCard(msg) {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
+    const card = document.createElement('div');
+    card.className = 'reasoning-card';
+    const warnings = msg.warnings && msg.warnings.length > 0
+        ? `<div class="rc-warnings">${msg.warnings.map(w => `<span class="rc-warn">⚠ ${escHtml(w)}</span>`).join('')}</div>`
+        : '';
+    card.innerHTML = `
+        <div class="rc-header" onclick="this.parentElement.classList.toggle('rc-open')">
+            <span class="rc-icon">🔍</span>
+            <span class="rc-title">Research: <code>${escHtml(msg.targetFile)}</code></span>
+            <span class="rc-toggle">▸</span>
+        </div>
+        <div class="rc-body">
+            <div class="rc-row"><span class="rc-label">Routes found</span><span class="rc-value">${msg.routes ? msg.routes.length : 0}</span></div>
+            <div class="rc-row"><span class="rc-label">Functions found</span><span class="rc-value">${msg.functions ? msg.functions.length : 0}</span></div>
+            <div class="rc-row"><span class="rc-label">Models available</span><span class="rc-value">${msg.modelCount || 0}</span></div>
+            <div class="rc-row"><span class="rc-label">Pattern found</span><span class="rc-value">${msg.hasPattern ? '✓' : '—'}</span></div>
+            <div class="rc-row"><span class="rc-label">Task type</span><span class="rc-value">${msg.isSweep ? 'sweep' : 'single edit'}</span></div>
+            ${warnings}
+        </div>`;
+    container.appendChild(card);
+    scrollBottom();
+}
+
+function addPlanCard(msg) {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
+    const card = document.createElement('div');
+    card.className = 'plan-card';
+    const rows = (msg.plan || []).map(p =>
+        `<div class="pc-row">
+            <span class="pc-action ${p.action}">${p.action === 'create' ? '✚' : '~'}</span>
+            <code class="pc-path">${escHtml(p.relPath)}</code>
+            <span class="pc-desc">${escHtml(p.description)}</span>
+        </div>`
+    ).join('');
+    card.innerHTML = `
+        <div class="pc-header"><span class="pc-icon">📋</span><span class="pc-title">Multi-file plan</span></div>
+        <div class="pc-body">${rows}</div>`;
+    container.appendChild(card);
+    scrollBottom();
+}
+
+function addPlanProgress(msg) {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
+    const step = msg.step || {};
+    const remaining = msg.remaining ?? 0;
+    const el = document.createElement('div');
+    el.className = 'plan-progress';
+    el.innerHTML = `<span class="pp-icon">${step.action === 'create' ? '✚' : '~'}</span>` +
+        `<code class="pp-path">${escHtml(step.relPath || '')}</code>` +
+        `<span class="pp-desc">${escHtml(step.description || '')}</span>` +
+        (remaining > 0 ? `<span class="pp-remaining">(${remaining} more)</span>` : '');
+    container.appendChild(el);
+    scrollBottom();
+}
+
+function addPlanComplete() {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
+    const el = document.createElement('div');
+    el.className = 'plan-complete';
+    el.textContent = '✓ Multi-file plan complete';
+    container.appendChild(el);
+    scrollBottom();
+}
+
 function clearChat() {
     // Remove all message / tool-card children but keep #welcome, #scroll-btn, #pinned-section
     Array.from(messagesEl.childNodes).forEach((node) => {
@@ -909,6 +1026,7 @@ function clearChat() {
     currentRaw = '';
     userScrolledUp = false;
     scrollBtn.classList.remove('visible');
+    updateContextUsage(0, 0, 0);
 }
 
 // ── Retry via event delegation ────────────────────────────────────────────────
@@ -1267,7 +1385,6 @@ if (compactBtnFooter) {
         vscode.postMessage({ command: 'compactContext' });
         compactBtnFooter.textContent = 'Compacting…';
         compactBtnFooter.disabled = true;
-        setTimeout(() => { compactBtnFooter.textContent = '🗜️ Compact'; compactBtnFooter.disabled = false; }, 3000);
     });
 }
 
@@ -1286,8 +1403,8 @@ function addModeNotice(model) {
     div.className = 'file-toast';
     div.style.cssText = 'background:rgba(229,192,123,0.08);border-color:rgba(229,192,123,0.35);color:#e5c07b;';
     div.innerHTML =
-        `⚙️ <span><strong>${escHtml(model)}</strong> doesn't support native tool calling — ` +
-        `switched to text-mode automatically. Tools still work.</span>`;
+        `⚙️ <span><strong>${escHtml(model)}</strong> uses text-mode tool calling — ` +
+        `remembered for future sessions.</span>`;
     messagesEl.insertBefore(div, scrollBtn);
     scrollBottom(true);
 }
@@ -2062,6 +2179,22 @@ window.addEventListener('message', (event) => {
             finalizeCommandBlock(msg.id, msg.exitCode);
             break;
 
+        case 'reasoningCard':
+            addReasoningCard(msg);
+            break;
+
+        case 'planCard':
+            addPlanCard(msg);
+            break;
+
+        case 'planProgress':
+            addPlanProgress(msg);
+            break;
+
+        case 'planComplete':
+            addPlanComplete();
+            break;
+
         case 'fileChanged':
             addFileToast(msg.path, msg.action);
             break;
@@ -2106,18 +2239,21 @@ window.addEventListener('message', (event) => {
             break;
 
         case 'presetRestored':
-            // Restore preset selection from workspace state
+            // Restore preset selection from workspace state, but settings model takes priority
             if (msg.preset && MODEL_PRESETS[msg.preset]) {
-                currentPreset = msg.preset;
-                presetSelect.value = msg.preset;
                 const config = MODEL_PRESETS[msg.preset];
-                // Update model dropdown if it matches (only if models are loaded)
-                const modelExists = Array.from(modelSelect.options).some(opt => opt.value === config.model);
-                if (modelExists && (modelSelect.value === config.model || modelSelect.value === '')) {
-                    modelSelect.value = config.model;
-                } else if (!modelExists) {
-                    // Model not available yet - will be set when models load
-                    console.log(`[preset] Model ${config.model} not loaded yet, will apply when available`);
+                // Only restore preset if it doesn't conflict with the settings-configured model
+                if (!defaultModel || defaultModel === config.model) {
+                    currentPreset = msg.preset;
+                    presetSelect.value = msg.preset;
+                    const modelExists = Array.from(modelSelect.options).some(opt => opt.value === config.model);
+                    if (modelExists && (modelSelect.value === config.model || modelSelect.value === '')) {
+                        modelSelect.value = config.model;
+                    }
+                } else {
+                    // Settings model differs from preset — stay on custom
+                    currentPreset = '';
+                    presetSelect.value = '';
                 }
             }
             break;
@@ -2157,6 +2293,35 @@ window.addEventListener('message', (event) => {
             }
             break;
 
+        case 'compactingStarted': {
+            // Create a placeholder that summary tokens will stream into
+            const el = document.createElement('div');
+            el.id = 'compaction-in-progress';
+            el.className = 'msg system-msg compaction-summary';
+            const lbl = document.createElement('span');
+            lbl.className = 'system-label';
+            lbl.textContent = '📦 Compacting — generating summary…';
+            const body = document.createElement('div');
+            body.className = 'summary-body';
+            body.style.fontStyle = 'italic';
+            body.style.opacity = '0.7';
+            el.appendChild(lbl);
+            el.appendChild(body);
+            messagesEl.appendChild(el);
+            scrollBottom();
+            if (compactBtnFooter) { compactBtnFooter.textContent = 'Compacting…'; compactBtnFooter.disabled = true; }
+            break;
+        }
+
+        case 'compactSummaryToken': {
+            const el = document.getElementById('compaction-in-progress');
+            if (el) {
+                const body = el.querySelector('.summary-body');
+                if (body) { body.textContent += msg.token; scrollBottom(); }
+            }
+            break;
+        }
+
         case 'contextWarning':
             addContextToast('warning',
                 `Context at ${Math.round(msg.percentage)}% — consider starting a new chat or compacting`,
@@ -2169,10 +2334,26 @@ window.addEventListener('message', (event) => {
                 `Context compacted: removed ${msg.messagesRemoved} old message${msg.messagesRemoved !== 1 ? 's' : ''}`,
                 false);
             updateContextUsage(msg.newPercentage);
-            if (msg.summary) {
+            if (compactBtnFooter) { compactBtnFooter.textContent = '🗜️ Compact'; compactBtnFooter.disabled = false; }
+            // Finalize the streaming placeholder if present, otherwise create fresh
+            const existing = document.getElementById('compaction-in-progress');
+            if (existing) {
+                existing.removeAttribute('id');
+                const lbl = existing.querySelector('.system-label');
+                if (lbl) lbl.textContent = '📦 Context compacted — summary of earlier conversation:';
+                const body = existing.querySelector('.summary-body');
+                if (body) { body.style.fontStyle = ''; body.style.opacity = ''; }
+            } else if (msg.summary) {
                 const summaryEl = document.createElement('div');
                 summaryEl.className = 'msg system-msg compaction-summary';
-                summaryEl.innerHTML = `<span class="system-label">📦 Context compacted — summary of earlier conversation:</span><div class="summary-body">${escapeHtml(msg.summary)}</div>`;
+                const summaryLabel = document.createElement('span');
+                summaryLabel.className = 'system-label';
+                summaryLabel.textContent = '📦 Context compacted — summary of earlier conversation:';
+                const summaryBody = document.createElement('div');
+                summaryBody.className = 'summary-body';
+                summaryBody.textContent = msg.summary;
+                summaryEl.appendChild(summaryLabel);
+                summaryEl.appendChild(summaryBody);
                 messagesEl.appendChild(summaryEl);
                 scrollBottom();
             }

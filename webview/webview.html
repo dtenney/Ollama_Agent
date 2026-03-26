@@ -1098,6 +1098,33 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .plan-card { background: var(--vscode-editor-background); border: 1px solid rgba(100,220,100,0.25); border-left: 3px solid rgba(100,220,100,0.7); border-radius: 6px; margin: 4px 0; font-size: 12px; overflow: hidden; }
+    .plan-card .pc-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--vscode-descriptionForeground); font-weight: 500; }
+    .plan-card .pc-body { padding: 4px 10px 8px; }
+    .plan-card .pc-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; }
+    .plan-card .pc-action { font-size: 13px; min-width: 14px; }
+    .plan-card .pc-action.create { color: #4ec94e; }
+    .plan-card .pc-action.modify { color: #e9c46a; }
+    .plan-card .pc-path { font-size: 11px; color: var(--vscode-textLink-foreground); flex-shrink: 0; }
+    .plan-card .pc-desc { color: var(--vscode-descriptionForeground); font-size: 11px; }
+    .plan-progress { display: flex; align-items: center; gap: 8px; padding: 4px 10px; background: rgba(100,220,100,0.06); border-left: 2px solid rgba(100,220,100,0.5); border-radius: 4px; margin: 2px 0; font-size: 11px; }
+    .plan-progress .pp-icon { color: #4ec94e; font-size: 13px; min-width: 14px; }
+    .plan-progress .pp-path { color: var(--vscode-textLink-foreground); }
+    .plan-progress .pp-desc { color: var(--vscode-descriptionForeground); flex: 1; }
+    .plan-progress .pp-remaining { color: var(--vscode-descriptionForeground); opacity: 0.6; }
+    .plan-complete { padding: 4px 10px; font-size: 11px; color: #4ec94e; font-weight: 500; border-left: 2px solid #4ec94e; margin: 2px 0; }
+    .reasoning-card { background: var(--vscode-editor-background); border: 1px solid rgba(79,193,255,0.25); border-left: 3px solid rgba(79,193,255,0.7); border-radius: 6px; margin: 4px 0; font-size: 12px; overflow: hidden; }
+    .reasoning-card .rc-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; user-select: none; color: var(--vscode-descriptionForeground); }
+    .reasoning-card .rc-title { flex: 1; }
+    .reasoning-card .rc-toggle { transition: transform 0.15s; }
+    .reasoning-card.rc-open .rc-toggle { transform: rotate(90deg); }
+    .reasoning-card .rc-body { display: none; padding: 4px 10px 8px; border-top: 1px solid rgba(79,193,255,0.15); }
+    .reasoning-card.rc-open .rc-body { display: block; }
+    .reasoning-card .rc-row { display: flex; justify-content: space-between; padding: 2px 0; color: var(--vscode-foreground); }
+    .reasoning-card .rc-label { color: var(--vscode-descriptionForeground); }
+    .reasoning-card .rc-value { font-weight: 500; }
+    .reasoning-card .rc-warnings { margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(255,180,0,0.2); }
+    .reasoning-card .rc-warn { display: block; color: var(--vscode-editorWarning-foreground, #e9c46a); font-size: 11px; padding: 1px 0; }
   </style>
 </head>
 <body>

@@ -50,6 +50,8 @@ export interface OllamaConfig {
     autoSaveMemory: boolean;
     /** When true, automatically compact context when it reaches 99% of model's limit. */
     autoCompactContext: boolean;
+    /** When true, pass think:true to Ollama for models that support chain-of-thought reasoning (e.g. qwen3). */
+    enableThinking: boolean;
 }
 
 export function getConfig(): OllamaConfig {
@@ -73,6 +75,7 @@ export function getConfig(): OllamaConfig {
         injectGitDiff:        c.get<boolean>('injectGitDiff',        false),
         autoSaveMemory:       c.get<boolean>('memory.autoSave',      false),
         autoCompactContext:   c.get<boolean>('autoCompactContext',   true),
+        enableThinking:       c.get<boolean>('enableThinking',       false),
     };
 }
 
