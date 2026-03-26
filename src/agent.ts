@@ -1853,10 +1853,11 @@ export class Agent {
                 // almost certainly the dedicated file for that feature.
                 // We track the keyword that triggered the match so rarer keywords score higher.
                 const filenameMatched = new Map<string, string>(); // path → keyword
-                for (const m of searchResult.matchAll(/^([\w/\\.-]+\.py):1: \[filename match:(\w+)\]/gm)) {
+                // Matches both Unix paths (/foo/bar.py) and Windows absolute paths (C:/foo/bar.py or C:\foo\bar.py)
+                for (const m of searchResult.matchAll(/^([A-Za-z]:[/\\][\w/\\.-]+\.py|[\w/\\.-]+\.py):1: \[filename match:(\w+)\]/gm)) {
                     filenameMatched.set(m[1].replace(/\\/g, '/'), m[2]);
                 }
-                const fileMatches = [...searchResult.matchAll(/^([\w/\\.-]+\.py):\d+:/gm)]
+                const fileMatches = [...searchResult.matchAll(/^([A-Za-z]:[/\\][\w/\\.-]+\.py|[\w/\\.-]+\.py):\d+:/gm)]
                     .map(m => m[1].replace(/\\/g, '/'));
                 const seen = new Set<string>();
                 const candidates = fileMatches.filter(f => {
@@ -1966,6 +1967,7 @@ export class Agent {
                     content: userMessage + injection,
                 };
                 logInfo(`[pre-explain] Injected ${injection.length} chars of search+read context`);
+                this._editContextInjected = true; // suppress isGenericLongAnswer false positive
             }
         }
 
@@ -2020,7 +2022,7 @@ export class Agent {
             || /\b(create|generate|scaffold)\b.{0,50}\b(route\s+file|module|blueprint)\b/i.test(userMessage)
             || /\bnew\s+(route\s+file|module|blueprint)\b/i.test(userMessage);
         const isEditTask = /\b(add|insert|append|implement|fix|modify|update|change|remove|delete|refactor|rename|replace|wrap|extract|move|convert|migrate)\b/i.test(userMessage)
-            && !/\b(import|path)\b/i.test(userMessage)
+            && !/\b(import\s+\w+|from\s+\w+\s+import|path)\b/i.test(userMessage)
             && !isMultiFileRestructure
             && !isFindSimilar
             && !isExplainQuery
@@ -2751,13 +2753,16 @@ Do NOT assume you have no memory — check first.`;
                         && /\b(you would|you could|you can|you need to|would need to|we would need to|to (split|refactor|separate|reorganize|restructure|move|create|migrate)|to (find|check|inspect|verify|look at) (which|each|every|all))\b/i.test(resp);
                     // Don't retry explain/read tasks that already received tool results and produced a substantive answer.
                     // "read X and tell me Y" tasks are done once the model answers after reading — no further tools needed.
+                    // Exception: if the answer admits it didn't read the key implementation file, it's not truly done.
+                    const admitsIncomplete = /\b(not visible in this file|would reside in|is not visible|logic.*not.*visible|not.*shown here|implementation.*not.*available|actual.*logic.*in)\b/i.test(resp);
                     const modelAlreadyAnswered = isExplainQuery && turn > 0 && toolCalls.length === 0
-                        && resp.length > 400;
+                        && resp.length > 400
+                        && !admitsIncomplete;
                     // Detect hedging answers that reference files without reading them
                     const isHedgingWithoutReading = !toolCalls.length && !modelAlreadyAnswered
                         && turn > 0 && turn < 4
-                        && /\b(likely (contains?|defines?|handles?|has|includes?)|probably (defines?|contains?|handles?)|may (contain|exist|include|define)|likely defined in|implied by|details aren't visible|schema details|exact.*not visible|check the code in)\b/i.test(resp)
-                        && /`[^`]+\.py`/.test(resp); // mentions a .py file in backticks
+                        && /\b(likely (contains?|defines?|handles?|has|includes?)|probably (defines?|contains?|handles?)|may (contain|exist|include|define)|likely defined in|implied by|details aren't visible|schema details|exact.*not visible|check the code in|would reside in|not visible in this file|is not visible|logic.*not.*visible)\b/i.test(resp)
+                        && /`[^`]+\.(py|ts|js|rb|go|java)`/.test(resp); // mentions a source file in backticks
                     const isSummaryWithQuestion = !toolCalls.length
                         && !modelAlreadyAnswered
                         && !isHedgingWithoutReading
@@ -2770,7 +2775,7 @@ Do NOT assume you have no memory — check first.`;
                         this.history.pop();
                         this.history.push({
                             role: 'user',
-                            content: `[SYSTEM: Your answer used words like "likely" or "probably" about files you haven't read yet. You MUST read the actual files to give a definitive answer. Use shell_read to read the specific .py files you mentioned and confirm the exact table names and schema. Call the tool NOW.]`
+                            content: `[SYSTEM: Your answer referenced implementation details in files you haven't fully read yet (e.g. "would reside in", "not visible in this file", "likely", "probably"). You MUST read those source files now to give a complete, definitive answer. Use shell_read to read the specific files you mentioned. Call the tool NOW — do not summarize what you haven't read.]`
                         });
                         post({ type: 'removeLastAssistant' });
                         continue;
@@ -2835,7 +2840,7 @@ Do NOT assume you have no memory — check first.`;
                     // Hypothetical code blocks ("Example:", "hypothetical example", fake URLs) don't count.
                     const hasHypotheticalMarker = /hypothetical|example scenario|your-auth-server|your_server|example\.com|placeholder|simplified example|import nfc\b|import requests\b.*verify|if you were to implement|example implementation|example route|would typically involve|might look something like|example of how.*might be implemented|logic might be implemented|how.*might look|you would need to implement|you would need to create/i.test(resp);
                     const hasCodebaseRef = !hasHypotheticalMarker && /app\/|routes\/|services\/|\.py"|\.ts"|\.js"/i.test(resp);
-                    const isGenericLongAnswer = turn === 0 && !toolCalls.length && resp.length > 300 && !hasCodebaseRef;
+                    const isGenericLongAnswer = turn === 0 && !toolCalls.length && resp.length > 300 && !hasCodebaseRef && !this._editContextInjected;
                     const isVerboseTurn0 = turn === 0 && !toolCalls.length && resp.length > 200 && !respIsQuestion;
                     if (!toolCalls.length && turn === 0 && (isDeflecting || hasFencedToolCall || isOsAnswer || isAskingForContext || isGenericLongAnswer || (isVerboseTurn0 && userWantsAction))) {
                         this.autoRetryCount++;
