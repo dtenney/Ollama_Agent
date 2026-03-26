@@ -2325,14 +2325,19 @@ export class Agent {
                         post({ type: 'token', text: reportText + '\n\n---\n' });
                         post({ type: 'streamEnd' });
                         // Clusters are already sorted by avgSimilarity descending
-                        const topCluster = report.clusters[0];
                         const relDir = path.relative(this.workspaceRoot, scopeDir!).replace(/\\/g, '/');
-                        // Name the files explicitly so the model doesn't wander into wrong dirs
-                        const clusterFiles = topCluster.files.map(f => `\`${f.relPath}\``).join(' and ');
-                        const mergeInstruction = `The similarity analysis above found ${report.clusters.length} clusters in \`${relDir}\`. ` +
-                            `Start by merging the highest-confidence cluster (similarity ${topCluster.avgSimilarity.toFixed(2)}): ${clusterFiles}. ` +
-                            `Read both files, consolidate all unique logic into one file (keep the more complete one), then delete the duplicate. ` +
-                            `Only work on these two files. Do not navigate into subdirectories.`;
+                        // Build explicit cluster list so model doesn't need to re-list directory
+                        const highConfClusters = report.clusters.filter(c => c.avgSimilarity >= 0.90);
+                        const clusterList = highConfClusters.map((c, i) => {
+                            const files = c.files.map(f => `\`${f.relPath}\``).join(', ');
+                            return `  ${i + 1}. ${files} (similarity ${c.avgSimilarity.toFixed(2)})`;
+                        }).join('\n');
+                        const mergeInstruction = `The similarity analysis found ${highConfClusters.length} high-confidence clusters (≥0.90) in \`${relDir}\`:\n${clusterList}\n\n` +
+                            `Work through them in order. For each cluster:\n` +
+                            `1. Read both files with shell_read\n` +
+                            `2. Use edit_file to merge ALL unique logic from the smaller file into the larger/more complete file\n` +
+                            `3. ONLY AFTER the edit_file succeeds, delete the now-redundant file with run_command\n` +
+                            `IMPORTANT: Never delete a file without first using edit_file to merge its unique content. Do not list the directory between clusters — the file list above is complete. Do not navigate into subdirectories.`;
                         this._isEditTask = true;
                         await this.run(mergeInstruction, model, post);
                     } else {
