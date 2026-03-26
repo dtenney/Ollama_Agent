@@ -3070,7 +3070,8 @@ Do NOT assume you have no memory — check first.`;
                         && /Get-Content|cat\s/i.test(String(args.command ?? ''))
                         && /\b(apply|implement|update|edit|modify|fix|refactor|improve|change|add|append|write|replace)\b/i.test(this._currentTaskMessage)
                         && !/\b(create|new file|new route|scaffold)\b/i.test(this._currentTaskMessage)
-                        && !isSweepMessage) {
+                        && !isSweepMessage
+                        && !this._isEditTask) {
                         const interceptCmd = String(args.command ?? '');
                         const interceptPathMatch = interceptCmd.match(/['"](.*?)['"]/);
                         const interceptPath = interceptPathMatch?.[1] ?? '';
