@@ -2022,7 +2022,11 @@ export class Agent {
             && (/\b(find|show|list|are there)\b.{0,30}\b(similar|duplicate|overlap|redundant)\b/i.test(userMessage)
             || /\b(similar|duplicate|overlapping)\s+(files?|services?|modules?)\b/i.test(userMessage)
             || /what\s+files?\s+(overlap|duplicate|are similar)\b/i.test(userMessage)
-            || /\bfiles?\s+(that\s+)?(do\s+)?(similar|the same|overlap)\b/i.test(userMessage));
+            || /\bfiles?\s+(that\s+)?(do\s+)?(similar|the same|overlap)\b/i.test(userMessage)
+            || /\b(could be|should be|and)\s+merged?\b/i.test(userMessage)
+            || /\bdoing\s+similar\s+things\b/i.test(userMessage));
+        const isMergeIntent = isFindSimilar
+            && /\b(merge[d]?|consolidate[d]?|combine[d]?|could be merged|should be merged)\b/i.test(userMessage);
         const isNewFileTask = /\b(create|add|make|generate|scaffold)\b.{0,50}\bnew\s+(route\s+file|file|module|blueprint)\b/i.test(userMessage)
             || /\b(create|generate|scaffold)\b.{0,50}\b(route\s+file|module|blueprint)\b/i.test(userMessage)
             || /\bnew\s+(route\s+file|module|blueprint)\b/i.test(userMessage);
@@ -2314,7 +2318,26 @@ export class Agent {
                 } else {
                     logInfo(`[similarity] Directory mode: ${scopeDir}`);
                     const report = await findSimilarInDirectory(scopeDir!, this.workspaceRoot, this.codeIndex);
-                    emitAssistant(formatSimilarityReport(report));
+                    const reportText = formatSimilarityReport(report);
+                    if (isMergeIntent && report.clusters && report.clusters.length > 0) {
+                        // User wants to actually merge — show the report, then hand off to the model
+                        logInfo(`[similarity] Merge intent detected — ${report.clusters.length} clusters, handing to model`);
+                        post({ type: 'token', text: reportText + '\n\n---\n' });
+                        post({ type: 'streamEnd' });
+                        // Clusters are already sorted by avgSimilarity descending
+                        const topCluster = report.clusters[0];
+                        const relDir = path.relative(this.workspaceRoot, scopeDir!).replace(/\\/g, '/');
+                        // Name the files explicitly so the model doesn't wander into wrong dirs
+                        const clusterFiles = topCluster.files.map(f => `\`${f.relPath}\``).join(' and ');
+                        const mergeInstruction = `The similarity analysis above found ${report.clusters.length} clusters in \`${relDir}\`. ` +
+                            `Start by merging the highest-confidence cluster (similarity ${topCluster.avgSimilarity.toFixed(2)}): ${clusterFiles}. ` +
+                            `Read both files, consolidate all unique logic into one file (keep the more complete one), then delete the duplicate. ` +
+                            `Only work on these two files. Do not navigate into subdirectories.`;
+                        this._isEditTask = true;
+                        await this.run(mergeInstruction, model, post);
+                    } else {
+                        emitAssistant(reportText);
+                    }
                 }
             } catch (err) {
                 logError(`[similarity] Failed: ${toErrorMessage(err as Error)}`);
