@@ -1879,8 +1879,10 @@ export class Agent {
                     const isDedicatedFile = queryWords.some(w => w.length > 3 && basenameNoExt.startsWith(w));
                     // Extra bonus if the file name contains ALL query keywords (strongest signal)
                     const matchesAllKeywords = queryWords.every(w => basenameNoExt.includes(w));
-                    // Strong bonus if this file was found by filename search — its name IS the feature
-                    const filenameBonus = filenameMatched.has(f) ? 2 : 0;
+                    // Strong bonus if this file was found by filename search — its name IS the feature.
+                    // Use a large bonus (10) so a dedicated filename match always outranks generic files
+                    // with high content-hit counts (e.g. void_refund_api.py vs transactions.py for "void").
+                    const filenameBonus = filenameMatched.has(f) ? 10 : 0;
                     const nameScore = nameMatchCount * 3 + (isDedicatedFile ? 2 : 0) + (matchesAllKeywords && queryWords.length > 1 ? 3 : 0) + filenameBonus;
                     // typeScore: only reward route/service bonus if the file also matches a query keyword.
                     // Routes score equal to services — a dedicated route file is just as authoritative.
@@ -1900,8 +1902,13 @@ export class Agent {
                 // This breaks ties when multiple files score equally — the file that actually
                 // CONTAINS the queried logic (e.g. "void") wins over a file that just shares
                 // a naming pattern (e.g. "transaction_validators.py").
+                // Build effective search terms: query words + the filename-match keywords (e.g. "void")
+                // so that void_refund_api.py scores high for "voided transaction" even though the
+                // query word is "voided" not "void".
+                const filenameKeywordSet = new Set([...filenameMatched.values()]);
+                const effectiveSearchTerms = [...new Set([...queryWords, ...filenameKeywordSet])];
                 const readResults: Array<{ f: string; content: string; hits: number }> = [];
-                for (const { f } of scored.slice(0, 3)) {
+                for (const { f } of scored.slice(0, 4)) {
                     const readId = `t_pre_read_${Date.now()}`;
                     const catCmd = isWin ? `Get-Content "${f}"` : `cat "${f}"`;
                     post({ type: 'toolCall', id: readId, name: 'shell_read', args: { command: catCmd } });
@@ -1910,16 +1917,14 @@ export class Agent {
                         post({ type: 'toolResult', id: readId, name: 'shell_read', success: true, preview: content.slice(0, 150) });
                         if (content.length > 200) {
                             const lower = content.toLowerCase();
-                            // Count hits per keyword, then score by the MINIMUM hits across all keywords.
-                            // This ensures we pick the file that contains ALL keywords (e.g. both "void"
-                            // and "transact"), not a file that has 1000× "transact" but zero "void".
-                            const hitsPerKw = queryWords.map(w => {
+                            // Count hits using effectiveSearchTerms (includes filename-search keywords like "void")
+                            // Primary sort: minimum hits across terms (file must contain all terms)
+                            // Secondary sort: total hits (prefer more comprehensive coverage)
+                            const hitsPerKw = effectiveSearchTerms.map(w => {
                                 let count = 0, pos = 0;
                                 while ((pos = lower.indexOf(w, pos)) !== -1) { count++; pos++; }
                                 return count;
                             });
-                            // Primary sort: minimum hits across keywords (file must contain all terms)
-                            // Secondary sort: total hits (prefer more comprehensive coverage)
                             const minHits = Math.min(...hitsPerKw);
                             const totalHits = hitsPerKw.reduce((a, b) => a + b, 0);
                             readResults.push({ f, content, hits: minHits * 10000 + totalHits });
@@ -2763,6 +2768,12 @@ Do NOT assume you have no memory — check first.`;
                         && turn > 0 && turn < 4
                         && /\b(likely (contains?|defines?|handles?|has|includes?)|probably (defines?|contains?|handles?)|may (contain|exist|include|define)|likely defined in|implied by|details aren't visible|schema details|exact.*not visible|check the code in|would reside in|not visible in this file|is not visible|logic.*not.*visible)\b/i.test(resp)
                         && /`[^`]+\.(py|ts|js|rb|go|java)`/.test(resp); // mentions a source file in backticks
+                    // Detect "wrong file" responses: model read a file but it didn't contain the requested logic,
+                    // and the response is short/dismissive. Force it to read the correct file from prior search results.
+                    const isWrongFileResponse = !toolCalls.length && !modelAlreadyAnswered
+                        && turn > 0 && turn < 4 && resp.length < 1200
+                        && /\b(does not (show|contain|include|have)|no (specific|direct|explicit)|not (shown|visible|found|included|present)|snippet does not|code (does|did) not (show|include|contain)|no implementation)\b/i.test(resp)
+                        && isExplainQuery;
                     const isSummaryWithQuestion = !toolCalls.length
                         && !modelAlreadyAnswered
                         && !isHedgingWithoutReading
@@ -2776,6 +2787,17 @@ Do NOT assume you have no memory — check first.`;
                         this.history.push({
                             role: 'user',
                             content: `[SYSTEM: Your answer referenced implementation details in files you haven't fully read yet (e.g. "would reside in", "not visible in this file", "likely", "probably"). You MUST read those source files now to give a complete, definitive answer. Use shell_read to read the specific files you mentioned. Call the tool NOW — do not summarize what you haven't read.]`
+                        });
+                        post({ type: 'removeLastAssistant' });
+                        continue;
+                    }
+                    if (isWrongFileResponse) {
+                        this.autoRetryCount++;
+                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model read wrong file and gave dismissive response (turn ${turn}, ${resp.length} chars)`);
+                        this.history.pop();
+                        this.history.push({
+                            role: 'user',
+                            content: `[SYSTEM: The file you just read did not contain the requested logic. Your prior search results showed other files that likely contain it. Look at the search results above and read the correct file — e.g. a file whose name matches the topic (like "void_refund_api.py" for void operations). Use shell_read with Get-Content on that file NOW. Do not explain — just call the tool.]`
                         });
                         post({ type: 'removeLastAssistant' });
                         continue;
