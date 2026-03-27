@@ -3127,9 +3127,7 @@ Do NOT assume you have no memory — check first.`;
                         this._mergeEditedSinceLastDelete = false; // reset after each delete
                     }
                 }
-                if (this._mergeMode && name === 'edit_file') {
-                    this._mergeEditedSinceLastDelete = true;
-                }
+                // _mergeEditedSinceLastDelete is set after a SUCCESSFUL edit_file (see below)
 
                 let toolResult: string;
                 try {
@@ -3391,7 +3389,17 @@ Do NOT assume you have no memory — check first.`;
                             nudge = 'Command completed. Continue with the next step.';
                         }
                     } else if (name === 'edit_file') {
-                        nudge = 'If you have MORE edits to make, call the next edit_file NOW. Do NOT show changes as a code block — CALL THE TOOL. Only respond with text once ALL edits are complete.';
+                        const editFailed = toolResult.toLowerCase().includes('not found') || toolResult.toLowerCase().includes('error') || toolResult.toLowerCase().includes('failed');
+                        if (this._mergeMode) {
+                            if (!editFailed) {
+                                this._mergeEditedSinceLastDelete = true;
+                                nudge = 'Edit succeeded. Now delete the redundant file with run_command Remove-Item.';
+                            } else {
+                                nudge = 'The edit_file FAILED — the merge is NOT complete. Re-read the file with shell_read to get the exact text, then retry edit_file with the exact old_string. Do NOT delete the file until the edit succeeds.';
+                            }
+                        } else {
+                            nudge = 'If you have MORE edits to make, call the next edit_file NOW. Do NOT show changes as a code block — CALL THE TOOL. Only respond with text once ALL edits are complete.';
+                        }
                     } else if (name === 'shell_read') {
                         const lastUserMsg = this._currentTaskMessage.toLowerCase();
                         const wantsPathUpdate = /\b(point|location|path|import|reference|reorganiz|moved|new folder|new director)\b/i.test(lastUserMsg)
