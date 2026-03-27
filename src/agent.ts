@@ -3330,7 +3330,22 @@ Do NOT assume you have no memory — check first.`;
                                 const lineNote = lineNum > 0
                                     ? `Lines are shown as "NNNN: content" — the "NNNN: " prefix is NOT part of the file. Use only the content after the colon+space in old_string.`
                                     : '';
-                                const injectMsg = `[FILE CONTENT: ${relFailPath} lines ~${lineNum > 0 ? lineNum - 3 : '?'}-${lineNum > 0 ? lineNum + 16 : '?'}]\n${failGrepClean}\n\n${lineNote} ${failReason} Copy the EXACT content (preserving all leading spaces) into old_string and retry edit_file with path="${relFailPath}". If the content is already correct, say so and stop.`;
+
+                                // In merge mode: also inject the tail of the file so the model can append
+                                let tailNote = '';
+                                if (this._mergeMode) {
+                                    try {
+                                        const tailCmd = envFail.os === 'windows'
+                                            ? `$lines = Get-Content "${absFailPath}"; $total = $lines.Count; $start = [Math]::Max(0,$total-20); $lines[$start..($total-1)] | ForEach-Object -Begin {$n=$start+1} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`
+                                            : `awk 'END{s=NR-20; if(s<1)s=1} NR>=s{printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`;
+                                        const tailContent = await this.runShellRead(tailCmd, this.workspaceRoot, `t_tail_${Date.now()}`);
+                                        if (tailContent.trim()) {
+                                            tailNote = `\n\n[LAST 20 LINES OF FILE for appending]\n${tailContent}\nTo append new methods, use old_string=the last non-blank line above (NNNN: prefix excluded), new_string=that same line + newlines + new methods.`;
+                                        }
+                                    } catch { /* ignore */ }
+                                }
+
+                                const injectMsg = `[FILE CONTENT: ${relFailPath} lines ~${lineNum > 0 ? lineNum - 3 : '?'}-${lineNum > 0 ? lineNum + 16 : '?'}]\n${failGrepClean}\n\n${lineNote} ${failReason} Copy the EXACT content (preserving all leading spaces) into old_string and retry edit_file with path="${relFailPath}". If the content is already correct, say so and stop.${tailNote}`;
                                 if (isTextMode) {
                                     this.history.push({ role: 'user', content: `Tool ${name} returned:\n${toolResult}\n---\n${injectMsg}` });
                                 } else {
