@@ -1440,6 +1440,10 @@ export class Agent {
     private _lastMemoryContext: string = '';
     /** Whether preProcessEditTask() successfully injected file context this run */
     private _editContextInjected: boolean = false;
+    /** When true, enforce edit_file-before-delete rule (set during merge operations) */
+    private _mergeMode: boolean = false;
+    /** Tracks whether edit_file was called since the last delete in merge mode */
+    private _mergeEditedSinceLastDelete: boolean = false;
     /** Active multi-file plan steps remaining (for sequential execution) */
     private _pendingPlanSteps: FilePlan[] = [];
     /** Output summary from the last completed plan step — passed as context to the next */
@@ -2339,7 +2343,10 @@ export class Agent {
                             `3. ONLY AFTER the edit_file succeeds, delete the now-redundant file with run_command\n` +
                             `IMPORTANT: Never delete a file without first using edit_file to merge its unique content. Do not list the directory between clusters — the file list above is complete. Do not navigate into subdirectories.`;
                         this._isEditTask = true;
+                        this._mergeMode = true;
+                        this._mergeEditedSinceLastDelete = false;
                         await this.run(mergeInstruction, model, post);
+                        this._mergeMode = false;
                     } else {
                         emitAssistant(reportText);
                     }
@@ -3100,6 +3107,26 @@ Do NOT assume you have no memory — check first.`;
                     || /\b(missing|without|lacks?)\b.{0,50}\b(error|exception|try|handl)/i.test(this._currentTaskMessage)
                     || /\b(no\s+error|no\s+try)\b/i.test(this._currentTaskMessage)
                     || /\b(add|fix).{0,30}\b(all|every|each|any)\b/i.test(this._currentTaskMessage);
+                // ── Merge-mode guard: block delete without prior edit_file ──────
+                if (this._mergeMode && name === 'run_command') {
+                    const cmdStr = String(args.command ?? '');
+                    const isDeleteCmd = /\bRemove-Item\b|\brm\s+/i.test(cmdStr);
+                    if (isDeleteCmd && !this._mergeEditedSinceLastDelete) {
+                        logWarn(`[merge-guard] Blocked delete without edit_file: ${cmdStr.slice(0, 80)}`);
+                        // Inject a fake tool result telling the model it must merge first
+                        const blockedResult = `[BLOCKED] You must use edit_file to merge the unique content from the file you are about to delete into the surviving file BEFORE deleting it. Call edit_file now.`;
+                        this.history.push({ role: 'user', content: `[tool:run_command] ${blockedResult}` });
+                        post({ type: 'token', text: '' });
+                        continue;
+                    }
+                    if (isDeleteCmd && this._mergeEditedSinceLastDelete) {
+                        this._mergeEditedSinceLastDelete = false; // reset after each delete
+                    }
+                }
+                if (this._mergeMode && name === 'edit_file') {
+                    this._mergeEditedSinceLastDelete = true;
+                }
+
                 let toolResult: string;
                 try {
                     toolResult = await this.executeTool(name, args, toolId);
