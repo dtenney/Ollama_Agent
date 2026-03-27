@@ -3108,6 +3108,10 @@ Do NOT assume you have no memory — check first.`;
                     || /\b(no\s+error|no\s+try)\b/i.test(this._currentTaskMessage)
                     || /\b(add|fix).{0,30}\b(all|every|each|any)\b/i.test(this._currentTaskMessage);
                 // ── Merge-mode guard: block delete without prior edit_file ──────
+                if (name === 'run_command') {
+                    const cmdStr0 = String(args.command ?? '');
+                    logInfo(`[merge-guard] run_command intercepted, _mergeMode=${this._mergeMode}, cmd=${cmdStr0.slice(0, 60)}`);
+                }
                 if (this._mergeMode && name === 'run_command') {
                     const cmdStr = String(args.command ?? '');
                     const isDeleteCmd = /\bRemove-Item\b|\brm\s+/i.test(cmdStr);
