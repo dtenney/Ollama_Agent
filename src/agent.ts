@@ -1444,6 +1444,8 @@ export class Agent {
     private _mergeMode: boolean = false;
     /** Tracks whether edit_file was called since the last delete in merge mode */
     private _mergeEditedSinceLastDelete: boolean = false;
+    /** Consecutive edit_file failures in merge mode — triggers append hint */
+    private _mergeConsecutiveEditFailures: number = 0;
     /** Active multi-file plan steps remaining (for sequential execution) */
     private _pendingPlanSteps: FilePlan[] = [];
     /** Output summary from the last completed plan step — passed as context to the next */
@@ -2345,6 +2347,7 @@ export class Agent {
                         this._isEditTask = true;
                         this._mergeMode = true;
                         this._mergeEditedSinceLastDelete = false;
+                        this._mergeConsecutiveEditFailures = 0;
                         await this.run(mergeInstruction, model, post);
                         this._mergeMode = false;
                     } else {
@@ -3393,9 +3396,15 @@ Do NOT assume you have no memory — check first.`;
                         if (this._mergeMode) {
                             if (!editFailed) {
                                 this._mergeEditedSinceLastDelete = true;
+                                this._mergeConsecutiveEditFailures = 0;
                                 nudge = 'Edit succeeded. Now delete the redundant file with run_command Remove-Item.';
                             } else {
-                                nudge = 'The edit_file FAILED — the merge is NOT complete. Re-read the file with shell_read to get the exact text, then retry edit_file with the exact old_string. Do NOT delete the file until the edit succeeds.';
+                                this._mergeConsecutiveEditFailures = (this._mergeConsecutiveEditFailures ?? 0) + 1;
+                                if (this._mergeConsecutiveEditFailures >= 2) {
+                                    nudge = 'The edit_file has failed multiple times. The file is likely too large to match exactly. Instead, use edit_file with old_string set to the LAST LINE of the file (read it first to get the exact last line), and new_string set to that same last line PLUS the new methods you want to append. This appends to the end of the file reliably.';
+                                } else {
+                                    nudge = 'The edit_file FAILED — old_string did not match exactly. Re-read the file with shell_read to get the exact text including whitespace, then retry. Do NOT delete the file until the edit succeeds.';
+                                }
                             }
                         } else {
                             nudge = 'If you have MORE edits to make, call the next edit_file NOW. Do NOT show changes as a code block — CALL THE TOOL. Only respond with text once ALL edits are complete.';
