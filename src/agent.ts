@@ -259,13 +259,14 @@ export const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'edit_file',
-            description: 'Make a targeted edit to an existing file by replacing old_string with new_string. ONLY use this when you do NOT have line numbers. If you have line numbers from a previous shell_read, use edit_file_at_line instead — it is more reliable. The old_string must match exactly (including whitespace/indentation).',
+            description: 'Make a targeted edit to an existing file by replacing old_string with new_string. ONLY use this when you do NOT have line numbers. If you have line numbers from a previous shell_read, use edit_file_at_line instead — it is more reliable. The old_string must match exactly (including whitespace/indentation). For corrupted files (containing literal \\n characters), set force_overwrite=true and old_string="" to completely replace the file with new_string.',
             parameters: {
                 type: 'object',
                 properties: {
-                    path:       { type: 'string', description: 'Path relative to workspace root' },
-                    old_string: { type: 'string', description: 'Exact string to replace. Must be unique in the file.' },
-                    new_string: { type: 'string', description: 'Replacement string.' },
+                    path:            { type: 'string', description: 'Path relative to workspace root' },
+                    old_string:      { type: 'string', description: 'Exact string to replace. Must be unique in the file. Use empty string with force_overwrite=true to replace the entire file.' },
+                    new_string:      { type: 'string', description: 'Replacement string.' },
+                    force_overwrite: { type: 'boolean', description: 'If true, overwrite the entire file with new_string, ignoring old_string. Use ONLY for corrupted files that cannot be edited normally.' },
                 },
                 required: ['path', 'old_string', 'new_string'],
             },
@@ -628,6 +629,8 @@ Guidelines:
 - Use run_command for moves/deletes/installs/builds: mv, cp, rm, mkdir, pip install, npm install, tests
 - Use edit_file for string replacements OR creating new files (old_string="" creates the file automatically)
 - NEVER use New-Item/touch/run_command to create source files — always use edit_file with old_string=""
+- CRITICAL — edit_file exact match rule: old_string must be copied character-for-character from the file. Before ANY edit_file call, use shell_read to read the exact lines you plan to replace — do NOT reconstruct them from memory or a prior read. Whitespace, comment spacing, and indentation must match exactly.
+- CRITICAL — edit_file failure rule: If edit_file fails, do NOT retry the same old_string. Instead: (1) shell_read the file again to get the exact current content, (2) identify why the match failed, (3) retry once with the corrected old_string. If it fails a second time, STOP and tell the user what you found and what you were trying to change.
 - CRITICAL: When user asks about errors or diagnostics, call get_diagnostics FIRST — do NOT run external linters unless asked
 - After editing files, call get_diagnostics to check for new errors
 - Prefer shell_read for ANY read-only operation — no confirmation required
@@ -641,14 +644,61 @@ ${memoryGuidelines}
 - Be concise and accurate. Format all code with markdown fenced code blocks.
 
 CRITICAL — Action-Oriented Responses:
-- NEVER ask "Would you like me to proceed?" — if the user asked you to DO something, DO IT immediately. Confirmation dialogs handle safety.
+- For specific, narrow requests (fix this bug, rename this function): DO IT immediately without asking. Confirmation dialogs handle safety.
+- EXCEPTION — Database schema changes (adding/removing a db.Column, adding a model, changing a foreign key): always EXPLORE first (read the model, check for existing fields), then CONFIRM your plan with the user ("I'm going to add X column to Y model. This requires a migration. Does this match what you want?"), then STOP and wait for their reply before calling edit_file.
+- For vague or high-level requests (see "Explore Before Implementing" below): EXPLORE first, then CONFIRM your plan, then BUILD. This is the one exception — you MUST stop after CONFIRM and wait for the user's reply.
+- NEVER ask open-ended questions like "Would you like me to proceed?" in the middle of specific tasks — but you MUST stop after a CONFIRM for high-level requests.
 - When asked to review/fix/improve code: use shell_read to read the actual files first, then edit_file on the real code you found
 - NEVER generate hypothetical examples or placeholder code — act on the user's ACTUAL code
 - When you find an issue, fix it with edit_file immediately. Do not just describe the fix.
+- NEVER show a code snippet with "For example:" or "Suggested Fix:" and stop — that is not fixing. Writing a suggestion is not the same as applying it. Use edit_file to apply the change.
+- When you have a hypothesis about a bug root cause but haven't confirmed it, use shell_read to read the suspected method/class BEFORE forming a conclusion. Do not guess — read the actual code.
+- A bug fix is complete when edit_file has been called. Not when you have described what the fix should be.
+
+Example — correct bug-fix flow for "Getting a 500 error in foo.py line 47":
+  → shell_read foo.py (or search for the real path if it doesn't exist at the given path)
+  → Read line 47 and surrounding context. If another method is implicated, shell_read that too.
+  → Call edit_file with the actual fix applied to the actual file
+  → Reply: "Fixed: [one sentence describing what was wrong and what was changed]"
+  The response contains NO code snippets, NO "Suggested Fix:", NO "For example:", NO "you should verify".
 
 CRITICAL — Discover Before Acting:
 - Before moving/renaming/reorganizing files, use shell_read to list the directory first — verify real filenames
 - NEVER create placeholder files when moving fails — find the real files with shell_read instead
+- When a file is not found at the expected path, do NOT guess another path — search for it: Get-ChildItem -Path 'c:/Users/david/Documents/source/scrapyard_new_ai' -Recurse -Filter '*filename*' | Select-Object FullName. Then read the real path and continue fixing. Never try a guessed path and stop if it fails.
+- NEVER end a bug-fix response with a list of things the user "should verify" or "should check" — you are the one who verifies and checks, using shell_read and grep. Do the work, don't delegate it.
+
+CRITICAL — Explore Before Implementing (for vague or high-level requests):
+When the user gives a requirement with limited technical detail (e.g. "merge customers", "add reporting", "track inventory"), you MUST follow this sequence BEFORE writing any code:
+  1. EXPLORE — use shell_read/grep to discover ALL relevant pieces: models, existing services, email/scheduler utilities, templates, and related routes. Do NOT stop after finding one model — keep exploring until you have the full picture. For features involving notifications/reminders: you MUST grep for existing email/SMS services before forming a plan. For features involving scheduled jobs: you MUST check for existing scheduler/celery/cron setup. These are mandatory checks, not optional.
+  2. PLAN — form a concrete implementation approach based on what you actually found (real file names, real class names, real field names). Prefer using existing data over adding new columns (e.g. query Transaction.completed_at rather than adding a denormalized last_transaction_date field).
+  3. CONFIRM — present ONE concise summary: what you found, what files you'll create/modify, what you'll NOT do (scope). End your message with "Does this match what you want?" and then STOP — do not call any tools, do not write any files. Wait for the user's reply.
+  4. THEN BUILD — only after the user's next message do you proceed with edits. The user's reply IS the trigger to build.
+
+Example — "Track customers who haven't come back in 90 days and send a reminder":
+  → Read Customer model (real fields), Transaction model (completed_at, customer_id)
+  → MUST grep for email service: Select-String -Path "app/services/*.py" -Pattern "def send_"
+  → MUST grep for scheduler: Get-ChildItem app/ -Recurse -Filter "*scheduler*","*celery*","*cron*"
+  → Found: email_service.py has send_daily_report() as a pattern. No scheduler exists.
+  → Propose: "I found Transaction.completed_at for last-visit tracking. Email service at app/services/email_service.py has send_daily_report() I can follow as a pattern. No scheduler — I'll create an AdminReminderService + a /admin/send-reminders route you trigger manually or via cron. No model changes needed. Does that match what you want?"
+  → Wait for confirmation, then implement
+
+Example — "The business wants to merge duplicate customer records including their transactions":
+  → shell_read to find Customer model, Transaction model, any existing merge utilities
+  → Identify: Customer fields, foreign keys pointing to customer_id, related tables
+  → Propose: "I found Customer (app/models/customer.py) with 12 fields, Transactions linked via customer_id. I'd add a MergeService that reassigns transactions and deactivates the duplicate. Does that match what you want?"
+  → Wait for confirmation, then implement
+
+- NEVER stop exploring after finding the first relevant file — always check for existing email/notification services, schedulers, and related utilities before planning
+- NEVER add columns to existing models without explicit user confirmation — prefer querying existing fields (e.g. use Transaction.completed_at rather than adding last_visited to Customer)
+- NEVER skip the explore+confirm step for vague requests — acting on assumptions wastes effort and can corrupt data
+- Adding a column to a model IS a schema change that requires a database migration. Even if the request is specific (e.g. "add a notes field to Transaction"), you MUST present your plan first: what column, what type, what default, whether a migration is needed. End with "Does this match what you want?" and STOP. Do not call edit_file until the user confirms.
+- The confirm message should be SHORT: what you found, what you'll do, what you won't do, one question
+- "Let's create it" or "go ahead" is NOT a confirmed plan if you have not yet presented your findings and approach. You must present your plan FIRST, then wait for approval.
+- When building, use REAL data from actual models — never invent placeholder data or hardcoded values. If you need external URLs or credentials, ask the user.
+- If you find existing files related to the request, READ them before declaring work done. A file existing does not mean it is correct.
+- During EXPLORE, always read the relevant model files to understand real field names — do not assume.
+- SCOPE BOUNDARY: Your job ends at writing code files (models, services, routes, templates). Do NOT run migrations, install packages, start servers, or fix unrelated import errors. These are environment tasks the user handles. Specifically: after adding a column to a model, do NOT run flask db migrate or flask db upgrade — tell the user "You'll need to run a migration" and STOP. If a migration command fails due to missing modules, do NOT pip install them — report the error and stop.
 
 CRITICAL — Docs Must Match Code:
 - When you read a documentation file (.md, .rst, .txt) that makes specific claims about code behavior (e.g. retention periods, class names, method names, config values), you MUST verify those claims against the actual source code using shell_read/grep
@@ -977,6 +1027,25 @@ function repairToolJson(raw: string): string | null {
 
     // Extract path if present
     const pathMatch = raw.match(/"path"\s*:\s*"([^"]+)"/);
+
+    // For shell_read and run_command: extract the command field robustly
+    if (toolName === 'shell_read' || toolName === 'run_command') {
+        // Try strict match first (well-formed JSON with closing })
+        const strictMatch = raw.match(/"command"\s*:\s*"([\s\S]*?)"\s*\}/);
+        // Fallback: grab everything after "command": " to end of string (malformed JSON)
+        const looseMatch = raw.match(/"command"\s*:\s*"([\s\S]*)/);
+        const cmdRaw = strictMatch ? strictMatch[1] : looseMatch ? looseMatch[1] : null;
+        if (!cmdRaw) return null;
+        // Unescape standard JSON escapes, then re-encode cleanly
+        const cmdStr = cmdRaw
+            .replace(/\\n/g, '\n')
+            .replace(/\\t/g, '\t')
+            .replace(/\\"/g, '"')
+            .replace(/\\\\/g, '\\')
+            // Strip any trailing JSON structure noise (closing quotes/braces)
+            .replace(/"\s*\}\s*\}?\s*$/, '');
+        return `{"name":"${toolName}","arguments":{"command":${JSON.stringify(cmdStr)}}}`;
+    }
 
     // Only repair edit_file (has complex old_string/new_string fields)
     if (toolName !== 'edit_file') return null;
@@ -1442,10 +1511,14 @@ export class Agent {
     private _editContextInjected: boolean = false;
     /** When true, enforce edit_file-before-delete rule (set during merge operations) */
     private _mergeMode: boolean = false;
+    /** When true, allow schema-changing edits (db.Column additions) to model files — set after user confirms */
+    private _schemaChangeConfirmed: boolean = false;
     /** Tracks whether edit_file was called since the last delete in merge mode */
     private _mergeEditedSinceLastDelete: boolean = false;
     /** Consecutive edit_file failures in merge mode — triggers append hint */
     private _mergeConsecutiveEditFailures: number = 0;
+    /** Per-file read counts in merge mode — resets on successful edit_file */
+    private _mergeFileReadCounts: Map<string, number> = new Map();
     /** Active multi-file plan steps remaining (for sequential execution) */
     private _pendingPlanSteps: FilePlan[] = [];
     /** Output summary from the last completed plan step — passed as context to the next */
@@ -1686,11 +1759,11 @@ export class Agent {
                 resolve(accepted);
             };
             this._confirmTimeout = setTimeout(() => {
-                logWarn('[agent] Confirmation timed out after 120s, rejecting');
+                logWarn('[agent] Confirmation timed out after 10 minutes, rejecting');
                 if (this._confirmResolver) {
                     this._confirmResolver(false);
                 }
-            }, 120_000);
+            }, 600_000);
             const confirmId = `confirm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
             this.postFn({ type: 'confirmAction', id: confirmId, action, detail, toolName: toolName ?? action });
         });
@@ -1745,11 +1818,19 @@ export class Agent {
         this._autoApprovedTools.clear(); // Reset batch-approve for each new user message
         this._currentTaskMessage = userMessage; // Remember original task for post-compaction recovery
         this._failedCommandSignatures.clear(); // Reset failed command tracking
-        this._failedEditSignatures.clear();    // Reset failed edit tracking
+        // NOTE: _failedEditSignatures intentionally NOT cleared between turns — persistent across
+        // the session so the same broken old_string doesn't retry indefinitely across user replies.
         this._focusedGrepInjectedThisTurn = false; // Reset focused-grep dedup flag
         this._filesAutoReadThisRun.clear();    // Reset per-run auto-read tracking
         this._editContextInjected = false;     // Reset read-then-act flag
         this._editsThisRun = 0;                // Reset edit counter
+        // Set schema-change confirmed if user's message looks like approval of a previously blocked schema change
+        const lowerMsg = userMessage.toLowerCase();
+        if (/\b(yes|yeah|yep|go ahead|proceed|looks good|that'?s? (right|correct|fine|good)|do it|confirm|ok|okay|sure)\b/.test(lowerMsg)) {
+            this._schemaChangeConfirmed = true;
+        } else {
+            this._schemaChangeConfirmed = false;
+        }
         
         logInfo(`Agent run — model: ${model}, mode: ${this.toolMode}, history: ${this.history.length}`);
 
@@ -2323,27 +2404,42 @@ export class Agent {
                     emitAssistant(formatSimilarityReport(report));
                 } else {
                     logInfo(`[similarity] Directory mode: ${scopeDir}`);
-                    const report = await findSimilarInDirectory(scopeDir!, this.workspaceRoot, this.codeIndex);
+                    const report = await findSimilarInDirectory(scopeDir!, this.workspaceRoot, this.codeIndex, 0.75);
                     const reportText = formatSimilarityReport(report);
-                    if (isMergeIntent && report.clusters && report.clusters.length > 0) {
+                    const mergeableClusters = (report.clusters ?? []).filter(c =>
+                        !c.label.includes('no common tokens') &&
+                        !(c.files.length > 6 && c.label.includes('review'))
+                    );
+                    if (isMergeIntent && mergeableClusters.length > 0) {
                         // User wants to actually merge — show the report, then hand off to the model
-                        logInfo(`[similarity] Merge intent detected — ${report.clusters.length} clusters, handing to model`);
+                        logInfo(`[similarity] Merge intent detected — ${mergeableClusters.length} actionable clusters (${report.clusters.length} total), handing to model`);
                         post({ type: 'token', text: reportText + '\n\n---\n' });
                         post({ type: 'streamEnd' });
                         // Clusters are already sorted by avgSimilarity descending
                         const relDir = path.relative(this.workspaceRoot, scopeDir!).replace(/\\/g, '/');
-                        // Build explicit cluster list so model doesn't need to re-list directory
-                        const highConfClusters = report.clusters.filter(c => c.avgSimilarity >= 0.90);
-                        const clusterList = highConfClusters.map((c, i) => {
+                        const allClusters = mergeableClusters;
+                        const clusterList = allClusters.map((c, i) => {
                             const files = c.files.map(f => `\`${f.relPath}\``).join(', ');
                             return `  ${i + 1}. ${files} (similarity ${c.avgSimilarity.toFixed(2)})`;
                         }).join('\n');
-                        const mergeInstruction = `The similarity analysis found ${highConfClusters.length} high-confidence clusters (≥0.90) in \`${relDir}\`:\n${clusterList}\n\n` +
-                            `Work through them in order. For each cluster:\n` +
-                            `1. Read both files with shell_read\n` +
-                            `2. Use edit_file to merge ALL unique logic from the smaller file into the larger/more complete file\n` +
-                            `3. ONLY AFTER the edit_file succeeds, delete the now-redundant file with run_command\n` +
-                            `IMPORTANT: Never delete a file without first using edit_file to merge its unique content. Do not list the directory between clusters — the file list above is complete. Do not navigate into subdirectories.`;
+                        const mergeInstruction = `The similarity analysis found ${allClusters.length} clusters in \`${relDir}\`:\n${clusterList}\n\n` +
+                            `Work through them in order. For each cluster, merge all files into the LARGEST one (most lines), then delete the smaller ones.\n\n` +
+                            `WORKFLOW per cluster:\n` +
+                            `1. Get method lists: run shell_read with "Select-String -Pattern '^\\s*(def |class )' <file>" on EACH file to see all method/class names.\n` +
+                            `2. Identify unique methods in the smaller files that do NOT appear in the largest file. Assume they are unique unless you see the same name in the largest file's Select-String output.\n` +
+                            `3. For each unique method: read its full implementation from the source file with "Get-Content <file> | Out-String". Copy the REAL code verbatim — do NOT summarize or abbreviate.\n` +
+                            `4. Append unique methods to the END of the largest file using run_command with Add-Content.\n` +
+                            `   IMPORTANT: Use SINGLE-QUOTE here-strings only — @' ... '@ — NEVER use double-quote here-strings (@" ... "@):\n` +
+                            `   run_command: Add-Content -Path 'C:/full/path/to/file.py' -Value @'\n\ndef my_method(self):\n    pass\n'@\n` +
+                            `   This is REQUIRED — do NOT use edit_file for appending.\n` +
+                            `5. After the Add-Content succeeds (exit 0), delete that smaller file with run_command Remove-Item.\n` +
+                            `6. Repeat for all files in the cluster until only the largest remains.\n\n` +
+                            `RULES:\n` +
+                            `- If a smaller file has NO unique methods (all duplicates), just delete it.\n` +
+                            `- If a smaller file is empty or only stubs (pass/return None), just delete it.\n` +
+                            `- NEVER delete a file before its unique content is merged.\n` +
+                            `- Do NOT read the first N lines only — use Select-String to get method names from the full file.\n` +
+                            `- Do NOT ask permission or summarize — start with cluster 1 immediately.`;
                         this._isEditTask = true;
                         this._mergeMode = true;
                         this._mergeEditedSinceLastDelete = false;
@@ -2483,11 +2579,11 @@ export class Agent {
         this._isSweepTask = isSweepTask;
         // Sweep tasks need a clean slate — prior history from failed/partial sweeps confuses the model
         // into thinking the work is already done (hallucinating completion) or repeating bad strategies.
-        if (isSweepTask && this.history.length > 2) {
+        if (isSweepTask && !this._mergeMode && this.history.length > 2) {
             logInfo(`[agent] Sweep task with ${this.history.length} prior messages — clearing history for a fresh start`);
             this.history = [];
         }
-        const MAX_TURNS = isSweepTask ? 50 : (this._isSmallModel ? 8 : 25);
+        const MAX_TURNS = isSweepTask ? 50 : this._mergeMode ? 60 : (this._isSmallModel ? 8 : 25);
         this.modeSwitchRetries = 0;
         let loopExhausted = true;
 
@@ -2747,7 +2843,7 @@ Do NOT assume you have no memory — check first.`;
                     // userWantsAction: message must be imperative (not a question) and use strong action verbs
                     // Exclude: questions (?), explain/describe/show/tell/what/why/how requests
                     const isQuestion = /\?/.test(userMessage) || /^\s*(what|why|how|can you|could you|would you|do you|is|are|explain|describe|show me|tell me|what is|what are)\b/i.test(userMessage);
-                    const userWantsAction = !isQuestion && !isExplainQuery && /\b(find|search|look|locate|show|implement|apply|execute|move|rename|reorganize|restructure|create|build|migrate|edit|update|fix|modify|refactor|rewrite|convert|transform|add|remove|delete|deploy|install|split|separate|extract|merge|run the|do the|do it|make the)\b/.test(lastMsg);
+                    const userWantsAction = !isQuestion && !isExplainQuery && /\b(find|search|look|locate|show|implement|apply|execute|move|rename|reorganize|restructure|create|build|migrate|edit|update|fix|modify|refactor|rewrite|convert|transform|add|remove|delete|deploy|install|split|separate|extract|merge|track|store|record|save|run the|do the|do it|make the|need to|we need|want to)\b/.test(lastMsg);
                     const hasCodeBlockButNoTool = /```/.test(resp) && !toolCalls.length;
                     // Detect validation stops: model reviewed the code and decided not to act
                     const isValidationStop = this._editContextInjected && !toolCalls.length
@@ -2818,7 +2914,18 @@ Do NOT assume you have no memory — check first.`;
                     // Model described what it would do instead of doing it (planning dump after reading a file)
                     // Does NOT require userWantsAction — even for "which X has Y?" queries, planning instead of checking is wrong
                     const isPlanningInsteadOfDoing = turn > 0 && !toolCalls.length && resp.length > 300
-                        && /\b(you would|you could|you can|you need to|would need to|we would need to|to (split|refactor|separate|reorganize|restructure|move|create|migrate)|to (find|check|inspect|verify|look at) (which|each|every|all))\b/i.test(resp);
+                        && /\b(you would|you could|you can|you need to|would need to|we would need to|this (would|will|change will|change would)|to (split|refactor|separate|reorganize|restructure|move|create|migrate)|to (find|check|inspect|verify|look at) (which|each|every|all))\b/i.test(resp);
+                    // Detect: model read a file, found a bug, but output a code snippet instead of calling edit_file
+                    // Pattern: turn > 0 (file was already read), no tool calls, uses advisory language about a fix
+                    // Does NOT require a fenced code block — inline code or plain text advisories also count
+                    // Bug reports (NameError, AttributeError, etc.) implicitly want a fix even without action verbs
+                    const isBugReport = /\b(NameError|AttributeError|TypeError|ValueError|ImportError|KeyError|IndexError|SyntaxError|RuntimeError|500 error|traceback|line \d+)\b/i.test(lastMsg);
+                    // Also catches schema dump: response describes a db.Column addition with a code block but doesn't call edit_file
+                    const isSchemaCodeDump = turn > 0 && !toolCalls.length && userWantsAction
+                        && /```[\s\S]*?db\.Column[\s\S]*?```/.test(resp);
+                    const isSuggestedFixDump = turn > 0 && !toolCalls.length && (userWantsAction || isBugReport)
+                        && (/\b(suggested fix|immediate fix|for example[,:]|fix:|here'?s? (the|a|my) fix|apply (this|the) fix|example fix|proposed fix|recommended fix|to fix this|the fix is|corrected line|specific line to fix|add (a )?null check|add (a )?guard|wrap.*in.*try|replace.*with|update (the|this) (log|line|code|statement) to use|change .* to )\b/i.test(resp)
+                        || isSchemaCodeDump);
                     // Don't retry explain/read tasks that already received tool results and produced a substantive answer.
                     // "read X and tell me Y" tasks are done once the model answers after reading — no further tools needed.
                     // Exception: if the answer admits it didn't read the key implementation file, it's not truly done.
@@ -2876,6 +2983,22 @@ Do NOT assume you have no memory — check first.`;
                         this.history.push({
                             role: 'user',
                             content: retryNudge
+                        });
+                        post({ type: 'removeLastAssistant' });
+                        continue;
+                    }
+
+                    // Bug-fix pattern: model read the file, described the fix with a code snippet, but didn't call edit_file
+                    if (isSuggestedFixDump) {
+                        this.autoRetryCount++;
+                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model output a "Suggested Fix" code block instead of calling edit_file (turn ${turn})`);
+                        this.history.pop();
+                        const fixNudge = isTextMode
+                            ? `[SYSTEM: You described the fix but did NOT apply it. Output ONLY this tool call — replace the values in angle brackets with the real strings from the file:\n<tool>{"name":"edit_file","arguments":{"path":"<full file path>","old_string":"<exact current line>","new_string":"<corrected line>"}}</tool>\nNo explanation. No code blocks. Just the <tool> XML above with real values filled in.]`
+                            : `[SYSTEM: You described the fix but did NOT apply it. Call edit_file RIGHT NOW. Set path to the file you just read, old_string to the exact buggy line (copy it character-for-character from the file content above), and new_string to the corrected version. Do NOT output a code block — invoke the tool directly.]`;
+                        this.history.push({
+                            role: 'user',
+                            content: fixNudge
                         });
                         post({ type: 'removeLastAssistant' });
                         continue;
@@ -3045,6 +3168,36 @@ Do NOT assume you have no memory — check first.`;
                 // Break if identical call repeated
                 if (this.consecutiveRepeats >= this.MAX_CONSECUTIVE_REPEATS) {
                     logWarn(`[agent] Breaking repeat loop: ${name} called ${this.consecutiveRepeats + 1} times with same args`);
+
+                    // Merge mode + edit_file repeat: inject tail and continue (don't break)
+                    if (this._mergeMode && name === 'edit_file') {
+                        const targetPath = String(args.path ?? '');
+                        const absPath = path.isAbsolute(targetPath) ? targetPath : path.join(this.workspaceRoot, targetPath);
+                        const envRepeat = detectShellEnvironment();
+                        let tailNote = '';
+                        try {
+                            const tailCmd = envRepeat.os === 'windows'
+                                ? `$lines = Get-Content "${absPath}"; $total = $lines.Count; $start = [Math]::Max(0,$total-20); $lines[$start..($total-1)] | ForEach-Object -Begin {$n=$start+1} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`
+                                : `awk 'END{s=NR-20; if(s<1)s=1} NR>=s{printf "%04d: %s\\n", NR, $0}' "${absPath}"`;
+                            const tailContent = await this.runShellRead(tailCmd, this.workspaceRoot, `t_tail_repeat_${Date.now()}`);
+                            if (tailContent.trim()) {
+                                tailNote = `\n\n[LAST 20 LINES OF FILE]\n${tailContent}\nThe file is too large to match via old_string. Use the LAST NON-BLANK line above as old_string (without the NNNN: prefix), and set new_string to that same line PLUS a blank line PLUS all new methods/functions you want to add.`;
+                            }
+                        } catch { /* ignore */ }
+                        const hint = `Your edit_file old_string did not match — the file is likely too large and was truncated. DO NOT retry the same old_string. Instead, append to the END of the file.${tailNote}`;
+                        post({ type: 'toolResult', id: toolId, name, success: false, preview: '(repeated edit blocked — tail injected)' });
+                        if (isTextMode) {
+                            this.history.push({ role: 'user', content: `Tool ${name} returned:\n[BLOCKED — same edit repeated]\n---\n[SYSTEM: ${hint}]` });
+                        } else {
+                            this.history.push({ role: 'tool', content: hint });
+                        }
+                        this.consecutiveRepeats = 0;
+                        this.lastToolSignature = '';
+                        this.consecutiveSameToolCalls = 0;
+                        this.lastToolName = '';
+                        continue;
+                    }
+
                     // If the repeated command was a file-search that returned a path, guide the model to read it
                     const isFileSearch = /Get-ChildItem|find\s|ls\s|-name\s|dir\s/i.test(String(args.command ?? ''));
                     const hint = isFileSearch
@@ -3110,27 +3263,187 @@ Do NOT assume you have no memory — check first.`;
                     || /\b(missing|without|lacks?)\b.{0,50}\b(error|exception|try|handl)/i.test(this._currentTaskMessage)
                     || /\b(no\s+error|no\s+try)\b/i.test(this._currentTaskMessage)
                     || /\b(add|fix).{0,30}\b(all|every|each|any)\b/i.test(this._currentTaskMessage);
-                // ── Merge-mode guard: block delete without prior edit_file ──────
+                // ── Merge-mode re-read loop detector ─────────────────────────
+                // If the model reads the same file >3 times without an edit_file, block
+                // further reads and inject the tail so it can append and move on.
+                if (this._mergeMode && name === 'shell_read') {
+                    const cmdStr = String(args.command ?? '');
+                    // Extract filename from powershell Get-Content or cat commands
+                    const fileMatch = cmdStr.match(/(?:Get-Content|cat)\s+(?:-Path\s+)?['"]?([^\s'"]+\.py)['"]?/i);
+                    if (fileMatch) {
+                        const fname = fileMatch[1].replace(/\\/g, '/').split('/').pop() ?? fileMatch[1];
+                        const count = (this._mergeFileReadCounts.get(fname) ?? 0) + 1;
+                        this._mergeFileReadCounts.set(fname, count);
+                        if (count > 2) {
+                            // Inject tail and block the read
+                            const absP = path.isAbsolute(fileMatch[1]) ? fileMatch[1] : path.join(this.workspaceRoot, fileMatch[1]);
+                            let tailNote = '';
+                            try {
+                                const tailCmd = `$lines = Get-Content "${absP}"; $total = $lines.Count; $start = [Math]::Max(0,$total-40); $lines[$start..($total-1)] | ForEach-Object -Begin {$n=$start+1} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`;
+                                const tailContent = await this.runShellRead(tailCmd, this.workspaceRoot, `t_tail_reread_${Date.now()}`);
+                                if (tailContent.trim()) {
+                                    tailNote = `\n\n[LAST 40 LINES OF ${fname}]\n${tailContent}\n`;
+                                }
+                            } catch { /* ignore */ }
+                            const absTarget = absP.replace(/\\/g, '/');
+                            const forceMsg = `[BLOCKED] You have read "${fname}" ${count} times already. STOP re-reading it.\n\nYou have enough information. You MUST now append any unique methods to the surviving (larger) file using Add-Content, then delete "${fname}".\n\nUse this exact pattern:\n  run_command: Add-Content -Path '<surviving_file_path>' -Value @'\n<paste method code here>\n'@\n\nThen delete with:\n  run_command: Remove-Item -Path '${absTarget}' -Force\n\nIf you believe "${fname}" has no unique methods (all duplicates), skip the Add-Content and just delete it.${tailNote}\nDo NOT call shell_read again. Act NOW.`;
+                            logWarn(`[merge-guard] Blocked re-read of ${fname} (count=${count})`);
+                            if (isTextMode) {
+                                this.history.push({ role: 'user', content: `Tool ${name} returned:\n${forceMsg}` });
+                            } else {
+                                this.history.push({ role: 'tool', content: forceMsg });
+                            }
+                            post({ type: 'toolResult', id: toolId, name, success: false, preview: `(re-read blocked — count=${count})` });
+                            continue;
+                        }
+                    }
+                }
+
+                // ── Scope-boundary guard: block migration/install commands ──────
+                // After adding a model column, the agent must STOP and tell the user to migrate.
+                // It must NOT run flask db migrate/upgrade, pip install, or fix unrelated import errors.
                 if (name === 'run_command') {
                     const cmdStr0 = String(args.command ?? '');
                     logInfo(`[merge-guard] run_command intercepted, _mergeMode=${this._mergeMode}, cmd=${cmdStr0.slice(0, 60)}`);
-                }
-                if (this._mergeMode && name === 'run_command') {
-                    const cmdStr = String(args.command ?? '');
-                    const isDeleteCmd = /\bRemove-Item\b|\brm\s+/i.test(cmdStr);
-                    if (isDeleteCmd && !this._mergeEditedSinceLastDelete) {
-                        logWarn(`[merge-guard] Blocked delete without edit_file: ${cmdStr.slice(0, 80)}`);
-                        // Inject a fake tool result telling the model it must merge first
-                        const blockedResult = `[BLOCKED] You must use edit_file to merge the unique content from the file you are about to delete into the surviving file BEFORE deleting it. Call edit_file now.`;
-                        this.history.push({ role: 'user', content: `[tool:run_command] ${blockedResult}` });
-                        post({ type: 'token', text: '' });
+                    const isMigrationCmd = /flask\s+db\s+(migrate|upgrade|downgrade|init|stamp)\b/i.test(cmdStr0)
+                        || /alembic\s+(upgrade|downgrade|revision|migrate)\b/i.test(cmdStr0);
+                    const isPipInstall = /\bpip\s+install\b/i.test(cmdStr0)
+                        || /\bpip3\s+install\b/i.test(cmdStr0);
+                    if (isMigrationCmd || isPipInstall) {
+                        const scopeMsg = isMigrationCmd
+                            ? `[BLOCKED: Scope boundary] You must NOT run database migrations. Your job is to write code only. Tell the user: "The column has been added to the model. You'll need to run a migration: flask db migrate -m '<description>' && flask db upgrade" — then STOP. Do not run any commands.`
+                            : `[BLOCKED: Scope boundary] You must NOT run pip install. Your job is to write code only. Report the missing module to the user and stop. Do not attempt to install packages.`;
+                        if (isTextMode) {
+                            this.history.push({ role: 'user', content: `[tool:run_command] ${scopeMsg}` });
+                        } else {
+                            this.history.push({ role: 'tool', content: scopeMsg });
+                        }
+                        post({ type: 'toolResult', id: toolId, name, success: false, preview: `(scope boundary — migration/install blocked)` });
+                        logInfo(`[scope-guard] Blocked ${isMigrationCmd ? 'migration' : 'pip install'} command: ${cmdStr0.slice(0, 80)}`);
                         continue;
                     }
-                    if (isDeleteCmd && this._mergeEditedSinceLastDelete) {
-                        this._mergeEditedSinceLastDelete = false; // reset after each delete
+                }
+                if (this._mergeMode && name === 'run_command') {
+                    // Clear any stale pending confirmation dialog so it doesn't fire 120s later
+                    this.rejectPendingConfirmation();
+                    const cmdStr = String(args.command ?? '');
+                    // Block Add-Content stubs (same check as edit_file stub guard)
+                    if (/\bAdd-Content\b/i.test(cmdStr)) {
+                        const hasAddContentStub = /\#\s*Implementation details\.\.\./i.test(cmdStr)
+                            || /\.\.\.\s*[\[\(]?(full|complete|actual|real|method|implementation|remaining)/i.test(cmdStr)
+                            || /pass\s*#\s*(placeholder|stub|todo|implement)/i.test(cmdStr)
+                            || /\[full method implementation here\]|\[implementation here\]/i.test(cmdStr)
+                            || /\#\s*Implementation from\s+\w+\.py/i.test(cmdStr)
+                            || (/\bpass\b/.test(cmdStr) && /\#.*from\s+\w+\.py/i.test(cmdStr));
+                        if (hasAddContentStub) {
+                            logWarn(`[merge-guard] Blocked stub Add-Content — contains placeholder comments`);
+                            const stubMsg = `[BLOCKED] Your Add-Content contains placeholder/stub comments like "# Implementation details..." or "pass". You MUST paste the REAL, VERBATIM code from the source file.\n\n1. Use shell_read with "Get-Content '<source_file>' | Out-String" to read the FULL source file\n2. Copy the ACTUAL method implementation exactly as it appears\n3. Use Add-Content with the real code — no summaries, no stubs, no placeholders`;
+                            if (isTextMode) {
+                                this.history.push({ role: 'user', content: `[tool:run_command] ${stubMsg}` });
+                            } else {
+                                this.history.push({ role: 'tool', content: stubMsg });
+                            }
+                            post({ type: 'toolResult', id: toolId, name, success: false, preview: '(stub Add-Content blocked)' });
+                            continue;
+                        }
+                    }
+                    const isDeleteCmd = /\bRemove-Item\b|\brm\s+|\bdel\s+|\bdelete\s+/i.test(cmdStr);
+                    if (isDeleteCmd) {
+                        if (!this._mergeEditedSinceLastDelete) {
+                            // Allow delete if we've exhausted edit attempts (file too large to patch)
+                            const editExhausted = (this._mergeConsecutiveEditFailures ?? 0) >= 4;
+                            // Check stub-only file — allow delete without edit
+                            const pathMatch = cmdStr.match(/['"]?([^\s'"]+\.py)['"]?/);
+                            let isStubFile = false;
+                            if (pathMatch) {
+                                try {
+                                    const content = fs.readFileSync(pathMatch[1], 'utf8');
+                                    const nonEmptyLines = content.split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
+                                    // Empty or near-empty files (≤5 non-blank lines) have nothing to merge
+                                    if (nonEmptyLines.length <= 5) {
+                                        isStubFile = true;
+                                    } else {
+                                        const methodLines = nonEmptyLines.filter(l => l.trim().startsWith('def '));
+                                        const stubBodyLines = nonEmptyLines.filter(l => /^\s+(return\s+(True|False|\[\]|\{\}|None|0|0\.0|''|""|pass)|pass\s*$)/.test(l));
+                                        const substantiveLines = nonEmptyLines.filter(l => !l.trim().startsWith('import ') && !l.trim().startsWith('from ') && !l.trim().startsWith('class ') && !l.trim().startsWith('def ') && !l.trim().startsWith('@') && !l.trim().startsWith('"""') && !l.trim().startsWith("'''") && !l.trim().startsWith('#'));
+                                        if (methodLines.length > 0 && substantiveLines.length > 0) {
+                                            const stubRatio = stubBodyLines.length / substantiveLines.length;
+                                            isStubFile = stubRatio >= 0.7;
+                                        }
+                                    }
+                                } catch (readErr: unknown) {
+                                    // If file doesn't exist, it's already been deleted — allow Remove-Item to no-op
+                                    if ((readErr as NodeJS.ErrnoException).code === 'ENOENT') {
+                                        isStubFile = true;
+                                    }
+                                }
+                            }
+                            if (!isStubFile && !editExhausted) {
+                                logWarn(`[merge-guard] Blocked delete without edit_file: ${cmdStr.slice(0, 80)}`);
+                                const deletingFile = pathMatch?.[1] ?? 'the file';
+                                const blockedResult = `[BLOCKED] You tried to delete "${deletingFile}" without merging its content first.\n\nYou MUST:\n1. Read "${deletingFile}" with shell_read\n2. Identify any methods/functions in it that do NOT exist in the surviving (larger) file\n3. Use edit_file to append those methods to the END of the surviving file\n4. ONLY THEN delete "${deletingFile}"\n\nDo NOT try to delete again until step 3 succeeds. Start by reading "${deletingFile}" now.`;
+                                this.history.push({ role: 'user', content: `[tool:run_command] ${blockedResult}` });
+                                post({ type: 'token', text: '' });
+                                continue;
+                            }
+                            if (editExhausted) {
+                                logWarn(`[merge-guard] Allowing delete after ${this._mergeConsecutiveEditFailures} edit failures (file too large to patch): ${cmdStr.slice(0, 80)}`);
+                            }
+                        }
+                        // Reset state after delete proceeds
+                        this._mergeEditedSinceLastDelete = false;
+                        this._mergeConsecutiveEditFailures = 0;
                     }
                 }
                 // _mergeEditedSinceLastDelete is set after a SUCCESSFUL edit_file (see below)
+
+                // ── Schema-change guard: require confirmation before adding db.Column to a model file ──
+                if ((name === 'edit_file' || name === 'edit_file_at_line') && !this._schemaChangeConfirmed) {
+                    const targetPath = String(args.path ?? args.file_path ?? '');
+                    const newStr = String(args.new_string ?? '');
+                    const normPath = targetPath.replace(/\\/g, '/');
+                    const isModelFile = normPath.includes('/models/') && normPath.endsWith('.py');
+                    const addsColumn = /db\.Column\s*\(/.test(newStr);
+                    if (isModelFile && addsColumn) {
+                        // Extract the column definition for the confirmation message
+                        const colMatch = newStr.match(/(\w+)\s*=\s*db\.Column\s*\([^)]+\)/);
+                        const colDesc = colMatch ? colMatch[0].trim() : newStr.trim().slice(0, 120);
+                        const modelName = targetPath.replace(/\\/g, '/').split('/').pop() ?? targetPath;
+                        const blockedMsg = `[BLOCKED: Schema change requires confirmation]\n\nYou are about to add a new column to ${modelName}:\n  ${colDesc}\n\nThis is a database schema change that requires a migration. Before proceeding, confirm with the user:\n- Column name and type are correct\n- A migration will be needed\n- No existing field already serves this purpose\n\nRespond to the user: "I'm going to add [column] to ${modelName}. This requires a migration. Does this match what you want?" — then STOP and wait for their reply. Do NOT call edit_file again until you receive confirmation.`;
+                        if (isTextMode) {
+                            this.history.push({ role: 'user', content: `[tool:edit_file] ${blockedMsg}` });
+                        } else {
+                            this.history.push({ role: 'tool', content: blockedMsg });
+                        }
+                        post({ type: 'toolResult', id: toolId, name, success: false, preview: `(schema change blocked — awaiting confirmation)` });
+                        logInfo(`[schema-guard] Blocked db.Column addition to model file: ${targetPath}`);
+                        continue;
+                    }
+                }
+
+                // ── Merge-mode stub guard: block edit_file if new_string contains placeholder comments ──
+                if (this._mergeMode && name === 'edit_file') {
+                    const newStr = String(args.new_string ?? '');
+                    const hasStub = /\.\.\.\s*[\[\(]?(full|complete|actual|real|method|implementation|remaining|all other|content here)/i.test(newStr)
+                        || /\#\s*\.\.\.\s*(full|complete|actual|real|method|implementation|remaining)/i.test(newStr)
+                        || /pass\s*#\s*(placeholder|stub|todo|implement)/i.test(newStr)
+                        || /\[full method implementation here\]|\[all other.*methods\]|\[implementation here\]/i.test(newStr)
+                        || /\#\s*Implementation from\s+\w+\.py/i.test(newStr)
+                        || /\#\s*Additional methods from\s+\w+\.py/i.test(newStr)
+                        || /\#\s*(methods?|functions?|classes?|code|logic|content)\s+(from|would be|here|below|above|follows)/i.test(newStr)
+                        || (/\bpass\b/.test(newStr) && /\#.*from\s+\w+\.py/i.test(newStr));
+                    if (hasStub) {
+                        logWarn(`[merge-guard] Blocked stub edit_file — new_string contains placeholder comments`);
+                        const stubMsg = `[BLOCKED] Your new_string contains stub/placeholder code like "# Implementation from X.py\\npass" or "# Additional methods would be inserted here" instead of real code.\n\nYou MUST copy the ACTUAL method bodies verbatim from the source file.\n\nStep 1: Run shell_read with: Get-Content '<source_file>' | Out-String\nStep 2: Find the specific method in the output\nStep 3: Copy the ENTIRE method body — every line, verbatim, with correct indentation\nStep 4: Use that copied code as the new_string in edit_file\n\nDo NOT write placeholder comments or pass statements. Do NOT summarize. Copy real code only.`;
+                        if (isTextMode) {
+                            this.history.push({ role: 'user', content: `[tool:edit_file] ${stubMsg}` });
+                        } else {
+                            this.history.push({ role: 'tool', content: stubMsg });
+                        }
+                        post({ type: 'token', text: '' });
+                        continue;
+                    }
+                }
 
                 let toolResult: string;
                 try {
@@ -3178,7 +3491,24 @@ Do NOT assume you have no memory — check first.`;
                             toolResult += `\n\n[FILE TRUNCATED] More content follows. After editing routes visible above, call shell_read with: Get-Content "<path>" | Select-Object -Skip 400 to see the rest.`;
                         }
                     }
-                    if (name === 'shell_read' && toolResult.length > 3000
+                    // Detect corrupted files (literal \n in content) and warn model immediately.
+                    // Fires on any shell_read that returns file content — Get-Content, cat, or Select-String.
+                    let fileIsCorrupted = false;
+                    if (name === 'shell_read') {
+                        const cmdStr = String(args.command ?? '');
+                        if (/\\n[ \t]+\w/.test(toolResult)) {
+                            fileIsCorrupted = true;
+                            // Extract path from common command patterns
+                            const corruptPath =
+                                cmdStr.match(/Get-Content\s+['"]?([^\s'"]+)['"]?/i)?.[1] ??
+                                cmdStr.match(/cat\s+['"]?([^\s'"]+)['"]?/i)?.[1] ??
+                                cmdStr.match(/['"]([^'"]+\.py)['"]/)?.[1] ??
+                                'the file';
+                            toolResult += `\n\n[SYSTEM WARNING] This file is CORRUPTED — it contains literal \\n characters instead of real newlines (you can see lines like "def foo():\\n    ..."). run_command or Set-Content CANNOT fix this reliably.\n\nFix it using edit_file with:\n  path: "${corruptPath}"\n  old_string: ""\n  new_string: <the full correctly-formatted file content with real newlines>\n  force_overwrite: true\n\nFirst read the FULL file with Get-Content to see all content, then call edit_file with force_overwrite=true.`;
+                        }
+                    }
+                    if (!fileIsCorrupted && name === 'shell_read' && toolResult.length > 3000
+                        && !this._mergeMode
                         && /Get-Content|cat\s/i.test(String(args.command ?? ''))
                         && /\b(apply|implement|update|edit|modify|fix|refactor|improve|change|add|append|write|replace)\b/i.test(this._currentTaskMessage)
                         && !/\b(create|new file|new route|scaffold)\b/i.test(this._currentTaskMessage)
@@ -3258,7 +3588,7 @@ Do NOT assume you have no memory — check first.`;
                             const sweepHint = this._isSweepTask
                                 ? ` This is a sweep task — some blocks you are trying to edit may ALREADY have been updated in a previous turn. Use shell_read with Select-String to find lines that are STILL missing the change (e.g. "Select-String -NotMatch 'logger.error'" or search for the original text), rather than retrying blocks you may have already edited.`
                                 : '';
-                            const editHint = `You have tried to edit "${args.path}" with the same old_string ${editFailCount} times and it keeps failing — that exact text does NOT exist in the file. STOP retrying. Use shell_read to read the current file content and find the exact text before attempting another edit. Do NOT guess or reconstruct from memory.${sweepHint}`;
+                            const editHint = `You have tried to edit "${args.path}" with the same old_string ${editFailCount} times and it keeps failing. STOP using edit_file on this file.\n\nUse shell_read to read the ENTIRE file first: Get-Content '${args.path}'\n\nIf line 8 (or any line) contains literal \\n characters like "def foo():\\n    data = ...", the file is CORRUPTED — edit_file cannot fix it because old_string with real newlines will never match a line containing literal \\n text.\n\nFor a corrupted file, you MUST use edit_file with old_string set to the ENTIRE current single-line content (copy it exactly, literal \\n and all) and new_string containing the correct multi-line version.\n\nDo NOT use run_command or Set-Content — newlines get escaped in transit and the here-string terminator will never be found. edit_file is the only tool that can write real newlines.${sweepHint}`;
                             logWarn(`[agent] edit_file same-signature failure ${editFailCount}x on "${args.path}" — forcing re-read`);
                             if (isTextMode) {
                                 this.history.push({ role: 'user', content: `Tool ${name} returned:\n${toolResult}\n---\n[SYSTEM: ${editHint}]` });
@@ -3274,6 +3604,34 @@ Do NOT assume you have no memory — check first.`;
                     // in the error ("First line found at line N") and inject with line numbers so the
                     // model can construct a precise old_string with correct indentation.
                     // Skip if focused grep was already injected this turn (auto-read pipeline already ran).
+                    // In merge mode, "matches N locations" means the old_string is ambiguous — skip grep recovery
+                    // and immediately inject the file tail so the model can append unambiguously.
+                    if (name === 'edit_file' && this._mergeMode && /matches \d+ locations/i.test(toolResult)) {
+                        const failedPath = String(args.path ?? '');
+                        const absFailPath = path.isAbsolute(failedPath) ? failedPath : path.join(this.workspaceRoot, failedPath.replace(/\//g, path.sep));
+                        const envFail = detectShellEnvironment();
+                        let tailNote = '';
+                        try {
+                            const tailCmd = envFail.os === 'windows'
+                                ? `$lines = Get-Content "${absFailPath}"; $total = $lines.Count; $start = [Math]::Max(0,$total-20); $lines[$start..($total-1)] | ForEach-Object -Begin {$n=$start+1} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`
+                                : `awk 'END{s=NR-20; if(s<1)s=1} NR>=s{printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`;
+                            const tailContent = await this.runShellRead(tailCmd, this.workspaceRoot, `t_tail_ambig_${Date.now()}`);
+                            if (tailContent.trim()) {
+                                tailNote = `\n\n[LAST 20 LINES OF FILE]\n${tailContent}\nThe NNNN: prefix is NOT part of the file. Use the last non-blank line as old_string and append your new methods after it.`;
+                            }
+                        } catch { /* ignore */ }
+                        const absFailPathFwd = absFailPath.replace(/\\/g, '/');
+                        const ambigMsg = `[BLOCKED] Your old_string matches multiple locations — edit_file cannot be used here.\n\nTo append to the END of the file, use run_command with Add-Content instead:\n\n  run_command: Add-Content -Path '${absFailPathFwd}' -Value @'\n<your new function code here>\n'@\n\nDo NOT use edit_file again for this append. Use Add-Content with a here-string to write the new function to the end of the file.${tailNote}`;
+                        if (isTextMode) {
+                            this.history.push({ role: 'user', content: `Tool ${name} returned:\n${toolResult}\n---\n[SYSTEM: ${ambigMsg}]` });
+                        } else {
+                            this.history.push({ role: 'tool', content: `${toolResult}\n\n${ambigMsg}` });
+                        }
+                        this._mergeConsecutiveEditFailures = (this._mergeConsecutiveEditFailures ?? 0) + 1;
+                        this.consecutiveFailures = 0;
+                        continue;
+                    }
+
                     if (name === 'edit_file' && /old_string not found|matches \d+ locations/i.test(toolResult) && !this._focusedGrepInjectedThisTurn
                         && !String(args.path ?? '').endsWith('.ollamapilot-plan.md')) {
                         const failedPath = String(args.path ?? '');
@@ -3398,11 +3756,28 @@ Do NOT assume you have no memory — check first.`;
                                 nudge = `The move command FAILED. Use shell_read with ls/dir to see the REAL filenames on disk, then retry with the exact names.`;
                             }
                         } else if (hasFailed) {
-                            nudge = `The command failed. Use shell_read to check what files/directories actually exist before retrying.`;
+                            if (this._mergeMode && /\bAdd-Content\b/i.test(cmdStr)) {
+                                this._mergeConsecutiveEditFailures = (this._mergeConsecutiveEditFailures ?? 0) + 1;
+                                nudge = `Add-Content failed (exit 1). The here-string likely has quoting issues. Try wrapping the content differently, or use a temp file approach. Do NOT delete the source file yet — the content was NOT appended.`;
+                            } else {
+                                nudge = `The command failed. Use shell_read to check what files/directories actually exist before retrying.`;
+                            }
                         } else if (isMoveCmd) {
                             nudge = 'Files moved. If there are MORE files to move, batch them in ONE run_command call. Do NOT stop until ALL files are moved.';
                         } else if (isMkdirCmd) {
                             nudge = 'Directories created. Now move the files into them. Batch ALL moves into as few run_command calls as possible.';
+                        } else if (this._mergeMode && /\bAdd-Content\b/i.test(cmdStr) && !hasFailed) {
+                            // Successful Add-Content in merge mode counts as a merge
+                            this._mergeEditedSinceLastDelete = true;
+                            this._mergeConsecutiveEditFailures = 0;
+                            this._mergeFileReadCounts.clear();
+                            nudge = 'Content appended successfully. Now delete the redundant file with run_command Remove-Item.';
+                        } else if (this._mergeMode && /\bRemove-Item\b|\brm\s+|\bdel\s+|\bdelete\s+/i.test(cmdStr)) {
+                            // After a successful delete in merge mode, reset state and tell the model to advance
+                            this._mergeEditedSinceLastDelete = false;
+                            this._mergeConsecutiveEditFailures = 0;
+                            this._mergeFileReadCounts.clear();
+                            nudge = 'File deleted successfully. Move on to the NEXT cluster or file pair to merge. Do NOT re-read files you already handled. Read the NEXT source file to identify unique methods, then append them to the surviving file and delete it.';
                         } else {
                             nudge = 'Command completed. Continue with the next step.';
                         }
@@ -3412,6 +3787,7 @@ Do NOT assume you have no memory — check first.`;
                             if (!editFailed) {
                                 this._mergeEditedSinceLastDelete = true;
                                 this._mergeConsecutiveEditFailures = 0;
+                                this._mergeFileReadCounts.clear();
                                 nudge = 'Edit succeeded. Now delete the redundant file with run_command Remove-Item.';
                             } else {
                                 this._mergeConsecutiveEditFailures = (this._mergeConsecutiveEditFailures ?? 0) + 1;
@@ -3698,12 +4074,35 @@ Do NOT assume you have no memory — check first.`;
                         const deferredNames = deferredCalls.map(dc => dc.function.name).join(', ');
                         deferredReminder = `\n\nYou still have ${deferredCalls.length} more tool call(s) to execute in order: ${deferredNames}. Call the NEXT one now.`;
                     }
+                    // In merge mode, cap large shell_read results to prevent context overflow.
+                    // Reading both files in a cluster can easily consume 20k+ tokens, leaving
+                    // too little room for the model to reason and output a full edit_file call.
+                    let toolResultForHistory = toolResult;
+                    if (this._mergeMode && name === 'shell_read' && toolResult.length > 6000) {
+                        const lines = toolResult.split('\n');
+                        const MAX_LINES = 120;
+                        if (lines.length > MAX_LINES) {
+                            const kept = lines.slice(0, MAX_LINES).join('\n');
+                            toolResultForHistory = kept + `\n\n[TRUNCATED — file has ${lines.length} lines, showing first ${MAX_LINES}. Use Get-Content -Tail N or Select-String to read specific sections if needed.]`;
+                            logInfo(`[merge-guard] Truncated shell_read result from ${lines.length} to ${MAX_LINES} lines to preserve context`);
+                        }
+                    }
                     this.history.push({
                         role: 'user',
-                        content: `Tool ${name} returned:\n${toolResult}\n---\n${nudge}${deferredReminder}`,
+                        content: `Tool ${name} returned:\n${toolResultForHistory}\n---\n${nudge}${deferredReminder}`,
                     });
                 } else {
-                    this.history.push({ role: 'tool', content: toolResult });
+                    // In merge mode, also cap large results in native tool mode
+                    let toolResultForHistory = toolResult;
+                    if (this._mergeMode && name === 'shell_read' && toolResult.length > 6000) {
+                        const lines = toolResult.split('\n');
+                        const MAX_LINES = 120;
+                        if (lines.length > MAX_LINES) {
+                            const kept = lines.slice(0, MAX_LINES).join('\n');
+                            toolResultForHistory = kept + `\n\n[TRUNCATED — file has ${lines.length} lines, showing first ${MAX_LINES}.]`;
+                        }
+                    }
+                    this.history.push({ role: 'tool', content: toolResultForHistory });
                 }
             }
         }
@@ -3799,9 +4198,10 @@ Do NOT assume you have no memory — check first.`;
 
             // ── edit_file ──────────────────────────────────────────────────
             case 'edit_file': {
-                const rel       = String(args.path ?? '');
-                const oldString = String(args.old_string ?? '');
-                const newString = String(args.new_string ?? '');
+                const rel            = String(args.path ?? '');
+                const oldString      = String(args.old_string ?? '');
+                const newString      = String(args.new_string ?? '');
+                const forceOverwrite = Boolean(args.force_overwrite);
 
                 if (!rel)       { throw new Error('path is required'); }
 
@@ -3817,6 +4217,28 @@ Do NOT assume you have no memory — check first.`;
                 const importErr = this.validateNewContent(newString);
                 if (importErr) { throw new Error(importErr); }
 
+                // Force-overwrite mode: used for corrupted files that cannot be edited normally.
+                // Skips old_string matching and whole-file-rewrite guards.
+                if (forceOverwrite) {
+                    if (!newString.trim()) {
+                        throw new Error('edit_file: new_string is empty. Provide the full corrected file content.');
+                    }
+                    const originalForOverwrite = fs.existsSync(full) ? fs.readFileSync(full, 'utf8') : '';
+                    const isAutoApprovedOvr = this._autoApprovedTools.has('edit_file');
+                    if (!isAutoApprovedOvr) {
+                        await this.diffViewManager.showDiffPreview(full, originalForOverwrite, newString);
+                    }
+                    const acceptedOvr = await this.requestConfirmation('edit', `Overwrite "${rel}" entirely (force_overwrite — fixing corrupted file)`, 'edit_file');
+                    if (!isAutoApprovedOvr) { this.diffViewManager.closeDiffPreview(); }
+                    if (!acceptedOvr) { return 'Edit cancelled by user.'; }
+                    fs.mkdirSync(path.dirname(full), { recursive: true });
+                    fs.writeFileSync(full, newString, 'utf8');
+                    this._lastFileOp = { path: rel, originalContent: originalForOverwrite, action: 'edited' };
+                    this._editsThisRun++;
+                    this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
+                    return `Overwrote: ${rel} (${newString.split('\n').length} lines written, corrupted file fixed)`;
+                }
+
                 // Auto-create: if old_string is empty and the file doesn't exist (or is empty), write it
                 if (!oldString) {
                     const isEmpty = !fs.existsSync(full) || fs.statSync(full).size === 0;
@@ -3825,7 +4247,7 @@ Do NOT assume you have no memory — check first.`;
                         fs.writeFileSync(full, newString, 'utf8');
                         return `Created new file: ${rel} (${newString.split('\n').length} lines)`;
                     }
-                    throw new Error(`File "${rel}" already exists. Use get_file to read it first, then call edit_file with old_string set to the exact text you want to replace.`);
+                    throw new Error(`File "${rel}" already exists. Use get_file to read it first, then call edit_file with old_string set to the exact text you want to replace. If the file is corrupted (contains literal \\n characters), use force_overwrite=true with old_string="" and new_string=<full correct content>.`);
                 }
 
                 const original = fs.readFileSync(full, 'utf8');
@@ -4229,7 +4651,11 @@ Do NOT assume you have no memory — check first.`;
                     }
                 }
 
-                const accepted = await this.requestConfirmation('run', cmd, 'run_command');
+                // In merge mode, Add-Content and Remove-Item are auto-approved (no user prompt needed)
+                const isMergeAutoApprove = this._mergeMode && (
+                    /\bAdd-Content\b/i.test(cmd) || /\bRemove-Item\b/i.test(cmd)
+                );
+                const accepted = isMergeAutoApprove || await this.requestConfirmation('run', cmd, 'run_command');
                 if (!accepted) { return 'Command cancelled by user.'; }
 
                 return this.runCommandStreaming(cmd, root, _toolId);
@@ -4475,7 +4901,7 @@ Do NOT assume you have no memory — check first.`;
 
             // On Windows, PowerShell cmdlets must run via powershell.exe, not cmd.exe.
             const isPSCmd = process.platform === 'win32'
-                && /Get-ChildItem|Get-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|\$_|\$PSItem/.test(cmd);
+                && /Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Measure-Object|Sort-Object|\$_|\$PSItem/.test(cmd);
             const child = isPSCmd
                 ? spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { cwd, env: { ...process.env } })
                 : spawn(cmd, { cwd, env: { ...process.env }, shell: true });
@@ -4539,7 +4965,7 @@ Do NOT assume you have no memory — check first.`;
             // On Windows, PowerShell cmdlets must run via powershell.exe, not cmd.exe.
             // Detect PowerShell commands and spawn accordingly.
             const isPowerShellCmd = process.platform === 'win32'
-                && /Get-ChildItem|Get-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Out-Host|\$_|\$PSItem/.test(cmd);
+                && /Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Out-Host|Measure-Object|Sort-Object|\$_|\$PSItem/.test(cmd);
             const spawnArgs: [string, string[], object] = isPowerShellCmd
                 ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { cwd, env: { ...process.env } }]
                 : [cmd, [], { cwd, env: { ...process.env }, shell: true }];
