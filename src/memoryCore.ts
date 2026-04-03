@@ -8,6 +8,15 @@ import { EmbeddingService } from './embeddingService';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+/**
+ * How an entry was accessed:
+ * - passive_load : injected into system prompt automatically (weakest signal)
+ * - search_result: returned by memory_search but may not have been read carefully
+ * - search_hit   : returned by memory_search AND referenced by the model in its response
+ *                  (strongest signal — model actually used this fact)
+ */
+export type MemoryAccessType = 'passive_load' | 'search_result' | 'search_hit';
+
 export interface MemoryEntry {
     id: string;
     tier: 0 | 1 | 2 | 3 | 4 | 5;
@@ -15,6 +24,8 @@ export interface MemoryEntry {
     createdAt: string;
     lastAccessed: string;
     accessCount: number;
+    /** Breakdown of how this entry has been accessed, by type */
+    accessHistory?: { type: MemoryAccessType; at: string }[];
     tags?: string[];
     relevanceScore?: number;
 }
@@ -362,16 +373,39 @@ export class TieredMemoryManager {
 
     // ── Access Tracking ───────────────────────────────────────────────────────
 
-    /** Record access to an entry (increments count, updates timestamp) */
-    recordAccess(entryId: string): void {
+    /** Find an entry by ID across all tiers. Returns undefined if not found. */
+    findById(entryId: string): MemoryEntry | undefined {
+        const core = this.getCoreReadonly();
+        for (const tierKey of Object.keys(core) as (keyof MemoryCore)[]) {
+            const entry = core[tierKey].find(e => e.id === entryId);
+            if (entry) { return entry; }
+        }
+        return undefined;
+    }
+
+    /**
+     * Record access to an entry.
+     * - Increments accessCount
+     * - Updates lastAccessed timestamp
+     * - Appends to accessHistory (capped at last 50 events to avoid unbounded growth)
+     * accessType: 'passive_load' | 'search_result' | 'search_hit'
+     */
+    recordAccess(entryId: string, accessType: MemoryAccessType = 'passive_load'): void {
         // Non-blocking access tracking - fire and forget
         this.withLock(async () => {
             const core = this.getCore();
             for (const tierKey of Object.keys(core) as (keyof MemoryCore)[]) {
                 const entry = core[tierKey].find(e => e.id === entryId);
                 if (entry) {
-                    entry.lastAccessed = new Date().toISOString();
+                    const now = new Date().toISOString();
+                    entry.lastAccessed = now;
                     entry.accessCount++;
+                    if (!entry.accessHistory) { entry.accessHistory = []; }
+                    entry.accessHistory.push({ type: accessType, at: now });
+                    // Cap history at 50 events — oldest drop off
+                    if (entry.accessHistory.length > 50) {
+                        entry.accessHistory = entry.accessHistory.slice(-50);
+                    }
                     await this.saveCore(core);
                     break;
                 }
@@ -379,6 +413,14 @@ export class TieredMemoryManager {
         }).catch((error) => {
             logError(`[memory] Failed to record access for ${entryId}: ${toErrorMessage(error)}`);
         });
+    }
+
+    /**
+     * Convenience: count accesses of a specific type for an entry.
+     * Used by maintenance to distinguish passive views from real usage.
+     */
+    countAccessType(entry: MemoryEntry, type: MemoryAccessType): number {
+        return entry.accessHistory?.filter(h => h.type === type).length ?? 0;
     }
 
     // ── Tier Management ──────────────────────────────────────────────────────
@@ -435,42 +477,90 @@ export class TieredMemoryManager {
         });
     }
 
-    /** Automatically demote stale entries from Tier 2-4 */
+    /**
+     * Tag-based TTL rules for auto-demotion and deletion of stale entries.
+     *
+     * Categories (matched by tags):
+     *  - ephemeral  (auto-compact, session)         → delete after 7 days with 0 search_hits
+     *  - discovered (auto-discovery, file-resolution,
+     *                stub, template, js-handler,
+     *                route, schema, auto-edit)       → demote after 30 days with 0 search_hits
+     *  - session-end (session-end, completed)        → demote after 60 days with 0 search_hits
+     *  - manual (no matching tags)                   → demote after demotionThresholdDays
+     *                                                   with total accessCount < 3 (legacy rule)
+     *
+     * Returns { demoted, deleted } counts.
+     */
     async demoteStaleEntries(daysThreshold?: number): Promise<number> {
         return this.withLock(async () => {
-            const threshold = daysThreshold ?? this.config.demotionThresholdDays;
-            const cutoffDate = new Date();
-            cutoffDate.setDate(cutoffDate.getDate() - threshold);
-            
-            const core = this.getCore();
-            let demotedCount = 0;
-            const entriesToDemote: string[] = [];
+            const manualThreshold = daysThreshold ?? this.config.demotionThresholdDays;
+            const now = Date.now();
+            const DAY_MS = 86_400_000;
 
-            // Collect entries to demote (read-only pass)
+            const core = this.getCore();
+            const entriesToDemote: string[] = [];
+            const entriesToDelete: string[] = [];
+
+            const daysSince = (iso: string) => (now - new Date(iso).getTime()) / DAY_MS;
+            const searchHits = (e: MemoryEntry) =>
+                e.accessHistory?.filter(h => h.type === 'search_hit').length ?? 0;
+
+            // Collect decisions (read-only pass — tiers 2-4)
             for (let tier = 2; tier <= 4; tier++) {
                 const tierKey = `tier_${tier}_${this.getTierName(tier)}` as keyof MemoryCore;
-                const entries = core[tierKey];
-                
-                for (const entry of entries) {
-                    const lastAccess = new Date(entry.lastAccessed);
-                    if (lastAccess < cutoffDate && entry.accessCount < 3) {
+                for (const entry of core[tierKey]) {
+                    const tags = entry.tags ?? [];
+                    const age = daysSince(entry.lastAccessed);
+                    const hits = searchHits(entry);
+
+                    // Ephemeral: auto-compact / session entries expire fast
+                    if (tags.some(t => ['auto-compact', 'session'].includes(t))) {
+                        if (age >= 7 && hits === 0) {
+                            entriesToDelete.push(entry.id);
+                        }
+                        continue;
+                    }
+
+                    // Discovered: auto-saved file/schema facts — demote if unused
+                    if (tags.some(t => ['auto-discovery', 'file-resolution', 'stub', 'template',
+                                        'js-handler', 'route', 'schema', 'auto-edit'].includes(t))) {
+                        if (age >= 30 && hits === 0) {
+                            entriesToDemote.push(entry.id);
+                        }
+                        continue;
+                    }
+
+                    // Session-end summaries — longer lived, demote if not revisited
+                    if (tags.some(t => ['session-end', 'completed', 'compaction'].includes(t))) {
+                        if (age >= 60 && hits === 0) {
+                            entriesToDemote.push(entry.id);
+                        }
+                        continue;
+                    }
+
+                    // Manual / untagged — legacy rule: age + low total access count
+                    if (age >= manualThreshold && entry.accessCount < 3) {
                         entriesToDemote.push(entry.id);
                     }
                 }
             }
-            
-            // Demote collected entries (write pass)
+
+            // Write pass
+            let demotedCount = 0;
+            let deletedCount = 0;
+
+            for (const id of entriesToDelete) {
+                if (await this.deleteEntry(id)) { deletedCount++; }
+            }
             for (const id of entriesToDemote) {
-                if (await this.demoteEntryInternal(id, core)) {
-                    demotedCount++;
-                }
+                if (await this.demoteEntryInternal(id, core)) { demotedCount++; }
             }
-            
-            if (demotedCount > 0) {
+
+            if (demotedCount > 0 || deletedCount > 0) {
                 await this.saveCore(core);
-                logInfo(`[memory] Auto-demoted ${demotedCount} stale entries`);
+                logInfo(`[memory] Maintenance: demoted=${demotedCount}, deleted=${deletedCount} (ephemeral/stale entries)`);
             }
-            return demotedCount;
+            return demotedCount + deletedCount;
         });
     }
 
@@ -509,27 +599,33 @@ export class TieredMemoryManager {
         });
     }
 
-    /** Archive old Tier 3 entries to Tier 5 */
+    /**
+     * Archive old Tier 3 entries to Tier 5, and prune Tier 5 entries that have
+     * been sitting unused long enough to be considered dead weight.
+     *
+     * Tier 5 pruning threshold: 180 days since lastAccessed with 0 search_hits.
+     * Entries that have ever been retrieved via search (search_hit > 0) are kept.
+     */
     async archiveOldEntries(daysThreshold?: number): Promise<number> {
         return this.withLock(async () => {
             const threshold = daysThreshold ?? this.config.archiveThresholdDays;
             const cutoffDate = new Date();
             cutoffDate.setDate(cutoffDate.getDate() - threshold);
-            
+
             const core = this.getCore();
             const tier3Key = 'tier_3_collaboration' as keyof MemoryCore;
             const tier5Key = 'tier_5_archive' as keyof MemoryCore;
             let archivedCount = 0;
             const entriesToArchive: MemoryEntry[] = [];
 
-            // Collect entries to archive (read-only pass)
+            // Collect Tier 3 entries old enough to archive (read-only pass)
             for (const entry of core[tier3Key]) {
                 const createdAt = new Date(entry.createdAt);
                 if (createdAt < cutoffDate) {
                     entriesToArchive.push(entry);
                 }
             }
-            
+
             // Archive collected entries (write pass)
             for (const entry of entriesToArchive) {
                 const idx = core[tier3Key].findIndex(e => e.id === entry.id);
@@ -538,19 +634,48 @@ export class TieredMemoryManager {
                     const oldTier = archived.tier;
                     archived.tier = 5;
                     core[tier5Key] = [archived, ...core[tier5Key]];
-                    
-                    // Handle Qdrant transition (Tier 3 → Tier 5)
                     await this.handleTierTransition(archived, oldTier, 5);
-                    
                     archivedCount++;
                 }
             }
-            
-            if (archivedCount > 0) {
-                await this.saveCore(core);
-                logInfo(`[memory] Archived ${archivedCount} old entries to Tier 5`);
+
+            // ── Tier 5 pruning ────────────────────────────────────────────
+            // Delete Tier 5 entries that are very old and have never been
+            // retrieved by a real search (search_hit = 0). These are facts
+            // the system auto-saved but the agent never found useful enough
+            // to reference — safe to remove.
+            const PRUNE_DAYS = 180;
+            const pruneCutoff = new Date();
+            pruneCutoff.setDate(pruneCutoff.getDate() - PRUNE_DAYS);
+            const idsToDelete: string[] = [];
+
+            for (const entry of core[tier5Key]) {
+                const lastAccess = new Date(entry.lastAccessed);
+                const searchHits = entry.accessHistory?.filter(h => h.type === 'search_hit').length ?? 0;
+                if (lastAccess < pruneCutoff && searchHits === 0) {
+                    idsToDelete.push(entry.id);
+                }
             }
-            return archivedCount;
+
+            let prunedCount = 0;
+            for (const id of idsToDelete) {
+                // Remove from in-memory core directly (already inside the lock)
+                const idx5 = core[tier5Key].findIndex(e => e.id === id);
+                if (idx5 !== -1) {
+                    const [removed] = core[tier5Key].splice(idx5, 1);
+                    // Clean up Qdrant if present
+                    if (this.qdrantClient) {
+                        this.qdrantClient.deletePoint(removed.id).catch(() => {});
+                    }
+                    prunedCount++;
+                }
+            }
+
+            if (archivedCount > 0 || prunedCount > 0) {
+                await this.saveCore(core);
+                logInfo(`[memory] archiveOldEntries: archived=${archivedCount} to Tier 5, pruned=${prunedCount} from Tier 5`);
+            }
+            return archivedCount + prunedCount;
         });
     }
 
@@ -703,6 +828,7 @@ export class TieredMemoryManager {
                 if (estimatedTokens + tokens > tokenLimit) break;
                 context += line;
                 estimatedTokens += tokens;
+                this.recordAccess(entry.id, 'passive_load');
             }
         }
 
@@ -717,21 +843,44 @@ export class TieredMemoryManager {
                 if (estimatedTokens + tokens > tokenLimit) { break; }
                 context += line;
                 estimatedTokens += tokens;
+                this.recordAccess(entry.id, 'passive_load');
             }
         }
 
-        // Add a summary of what's available (not the content itself)
-        const stats = this.getStats();
-        const totalEntries = stats.reduce((s, t) => s + t.count, 0);
-        const nonCriticalEntries = totalEntries - (core.tier_0_critical?.length || 0) - seededEntries.length;
-        if (nonCriticalEntries > 0) {
-            const tierSummary = stats
-                .filter(s => s.tier > 0 && s.count > 0)
-                .map(s => `T${s.tier}(${s.name}): ${s.count}`)
-                .join(', ');
-            context += `\n### More Memory Available (use memory_search or memory_tier_list to access)\n`;
-            context += `${nonCriticalEntries} additional entries across tiers: ${tierSummary}\n`;
-            context += `Call memory_search("<topic>") to find relevant memories before answering project-specific questions.\n`;
+        // Auto-search remaining tiers using keywords from the user message
+        if (userMessage && userMessage.trim()) {
+            try {
+                // Extract meaningful keywords (skip stopwords, short words)
+                const stopwords = new Set(['the','a','an','is','in','on','at','to','for','of','and','or','but','with','this','that','what','how','why','can','we','i','it','be','do','my','our','your','from','by','as','are','was','were','will','would','should','could','have','has','had','not','no','if','so','up','out','its']);
+                const keywords = userMessage.toLowerCase()
+                    .replace(/[^a-z0-9\s_]/g, ' ')
+                    .split(/\s+/)
+                    .filter(w => w.length > 3 && !stopwords.has(w))
+                    .slice(0, 6); // top 6 keywords
+
+                if (keywords.length > 0) {
+                    const searchQuery = keywords.join(' ');
+                    const hits = await this.searchMemory(searchQuery, undefined, 5);
+                    // Filter out entries already shown (tier 0 and auto-seeded tier 1)
+                    const shownIds = new Set([
+                        ...core.tier_0_critical.map(e => e.id),
+                        ...seededEntries.map(e => e.id),
+                    ]);
+                    const relevant = hits.filter(e => !shownIds.has(e.id));
+                    if (relevant.length > 0) {
+                        context += '\n### Relevant Memory\n';
+                        for (const entry of relevant) {
+                            const line = `- ${entry.content}\n`;
+                            const tokens = Math.ceil(line.length / 4);
+                            if (estimatedTokens + tokens > tokenLimit) break;
+                            context += line;
+                            estimatedTokens += tokens;
+                            // search_result: surfaced by semantic search into the prompt
+                            this.recordAccess(entry.id, 'search_result');
+                        }
+                    }
+                }
+            } catch { /* search failure is non-fatal */ }
         }
 
         return context.trim();

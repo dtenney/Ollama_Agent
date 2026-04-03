@@ -79,6 +79,19 @@ export function getConfig(): OllamaConfig {
     };
 }
 
+export interface OpenClawConfig {
+    baseUrl: string;
+    token: string;
+}
+
+export function getOpenClawConfig(): OpenClawConfig {
+    const c = vscode.workspace.getConfiguration(SECTION);
+    return {
+        baseUrl: c.get<string>('openClaw.baseUrl', '').trim().replace(/\/$/, ''),
+        token:   c.get<string>('openClaw.token',   '').trim(),
+    };
+}
+
 /** Parse a base URL string into hostname + port for use with http.request. */
 export function parseBaseUrl(baseUrl: string): { hostname: string; port: number; protocol: string } {
     try {

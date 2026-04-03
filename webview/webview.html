@@ -737,6 +737,21 @@
     .confirm-card.rejected { border-color: rgba(244,71,71,0.35); opacity: 0.7; }
     .confirm-resolved { font-size: 12px; opacity: 0.8; }
 
+    /* Sticky confirmation bar pinned above the input */
+    #pending-confirm-bar {
+        flex-shrink: 0;
+        padding: 6px 10px;
+        background: rgba(229,192,123,0.12);
+        border-top: 1px solid rgba(229,192,123,0.4);
+        border-bottom: 1px solid rgba(229,192,123,0.2);
+    }
+    #pending-confirm-bar .confirm-card {
+        margin: 0;
+        border: none;
+        background: none;
+        padding: 0;
+    }
+
     /* ── Markdown elements ───────────────────────────────────────────────── */
     strong { font-weight: 700; }
     em     { font-style: italic; }
@@ -1098,6 +1113,12 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .openclaw-card { background: var(--vscode-editor-background); border: 1px solid rgba(90,170,255,0.25); border-left: 3px solid rgba(90,170,255,0.7); border-radius: 6px; margin: 4px 0; padding: 8px 12px; }
+    .openclaw-card .msg-header { margin-bottom: 4px; }
+    .openclaw-query { font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 6px; font-style: italic; }
+    .openclaw-status { font-size: 12px; color: var(--vscode-descriptionForeground); display: flex; align-items: center; gap: 6px; }
+    .openclaw-spinner { display: inline-block; color: var(--vscode-terminal-ansiCyan,#5af); font-size: 13px; }
+    .openclaw-result { margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(90,170,255,0.15); }
     .plan-card { background: var(--vscode-editor-background); border: 1px solid rgba(100,220,100,0.25); border-left: 3px solid rgba(100,220,100,0.7); border-radius: 6px; margin: 4px 0; font-size: 12px; overflow: hidden; }
     .plan-card .pc-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; color: var(--vscode-descriptionForeground); font-weight: 500; }
     .plan-card .pc-body { padding: 4px 10px 8px; }
@@ -1184,6 +1205,9 @@
     </div>
     <button id="scroll-btn" title="Scroll to bottom">↓</button>
   </div>
+
+  <!-- Sticky pending confirmation bar — shown above input when a confirm is waiting -->
+  <div id="pending-confirm-bar" style="display:none"></div>
 
   <!-- Context progress bar (slim strip at top of input area) -->
   <div id="ctx-progress-wrap" title="">

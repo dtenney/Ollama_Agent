@@ -44,10 +44,10 @@
   "scripts": {
     "vendor": "node scripts/vendor-hljs.js",
     "compile": "npm run vendor && tsc",
-    "deploy": "npm run compile && node -e \"const fs=require('fs'),path=require('path');const extRoot=process.env.USERPROFILE+'/.vscode/extensions/dtenney.ollamapilot-0.4.0';const ext=extRoot+'/dist';const files=['agent','provider','main','memoryCore','contextCalculator','ollamaClient','config'];files.forEach(f=>{const src='dist/'+f+'.js';const dst=ext+'/'+f+'.js';if(fs.existsSync(src)){fs.copyFileSync(src,dst);console.log('Deployed '+f+'.js');}});const wv=extRoot+'/webview/webview.js';fs.copyFileSync('webview/webview.js',wv);console.log('Deployed webview.js');fs.copyFileSync('package.json',extRoot+'/package.json');console.log('Deployed package.json');\"",
+    "deploy": "npm run compile && node -e \"const fs=require('fs'),path=require('path');const extRoot=process.env.USERPROFILE+'/.vscode/extensions/dtenney.ollamapilot-0.4.0';const ext=extRoot+'/dist';const files=['agent','provider','main','memoryCore','contextCalculator','ollamaClient','config','openClawClient'];files.forEach(f=>{const src='dist/'+f+'.js';const dst=ext+'/'+f+'.js';if(fs.existsSync(src)){fs.copyFileSync(src,dst);console.log('Deployed '+f+'.js');}});const wv=extRoot+'/webview/webview.js';fs.copyFileSync('webview/webview.js',wv);console.log('Deployed webview.js');fs.copyFileSync('package.json',extRoot+'/package.json');console.log('Deployed package.json');\"",
     "bundle": "npm run vendor && node esbuild.js",
     "bundle:prod": "npm run vendor && node esbuild.js --production",
-    "build": "npm run compile",
+    "build": "npm run deploy",
     "vscode:prepublish": "npx tsc",
     "test": "npm run compile && vscode-test",
     "test:unit": "npm run compile && mocha dist/test/unit/**/*.test.js",
@@ -456,6 +456,16 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Enable chain-of-thought reasoning for models that support it (e.g. qwen3, deepseek-r1). The model will reason internally before responding — slower but more accurate for complex tasks like code verification, debugging, and doc cross-checking. Requires a compatible Ollama model."
+        },
+        "ollamaAgent.openClaw.baseUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Base URL for your OpenCLAW instance, e.g. `http://localhost:18789`. Leave empty to disable `/openclaw` commands."
+        },
+        "ollamaAgent.openClaw.token": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Bearer token for OpenCLAW authentication. Set via `openclaw config set gateway.token <your-token>` on your OpenCLAW server."
         },
         "ollamaAgent.codeLens.enabled": {
           "type": "boolean",

@@ -174,6 +174,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             );
             logInfo('[code-index] CodeIndexer created');
 
+            // Dispose indexer (cancels in-progress indexing) on extension deactivate/reload
+            context.subscriptions.push({ dispose: () => codeIndexer?.dispose() });
+
             // Re-index any file the user saves
             context.subscriptions.push(
                 vscode.workspace.onDidSaveTextDocument(doc => {
@@ -831,6 +834,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 export async function deactivate(): Promise<void> {
     logInfo('Deactivating...');
+    (global as any).__ollamapilotCodeIndexer = undefined;
     await stopAllMCPServers();
     logInfo('Deactivated');
 }

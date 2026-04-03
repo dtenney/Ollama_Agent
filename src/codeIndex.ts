@@ -142,6 +142,7 @@ export class CodeIndexer {
     private indexedFiles = new Map<string, number>();
     private initialized = false;
     private indexing = false;
+    private _disposed = false;
 
     constructor(
         config: MemoryConfig,
@@ -239,11 +240,17 @@ export class CodeIndexer {
 
     // ── Public API ────────────────────────────────────────────────────────────
 
+    /** Cancel any in-progress indexing and release resources. */
+    dispose(): void {
+        this._disposed = true;
+    }
+
     /**
      * Initialize collection and run the initial indexing pass.
      * Non-blocking — caller does not need to await completion.
      */
     async initialize(): Promise<void> {
+        if (this._disposed) { return; }
         try {
             await this.ensureCollection();
             await this.loadExistingIndex();
@@ -288,6 +295,7 @@ export class CodeIndexer {
 
             // Index in batches
             for (let i = 0; i < toIndex.length; i += INDEX_BATCH_SIZE) {
+                if (this._disposed) { return; } // cancelled — stop immediately
                 const batch = toIndex.slice(i, i + INDEX_BATCH_SIZE);
                 const points: Parameters<typeof this.upsertPoints>[0] = [];
 

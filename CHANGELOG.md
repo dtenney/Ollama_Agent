@@ -5,6 +5,27 @@ All notable changes to OllamaPilot will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **SQLAlchemy model integrity check** — after any `models/*.py` edit, scans for multiple FK columns referencing the same table without `foreign_keys=` on relationships; blocks with a specific `AmbiguousForeignKeysError` warning before the model continues
+- **Substantive analysis bypass** (`isSubstantiveAnalysis`) — responses >2000 chars with 2+ `##` headings and a closing question only in the final 300 chars are treated as complete analysis reports, not stalls; suppresses the `isSummaryWithQuestion` auto-retry that was looping on planning/discussion sessions
+- **`isConfirmStop` expanded patterns** — now catches "Should I proceed?", "Should we proceed?", "Ready to implement?", "Want to proceed?" in addition to the existing "Shall I proceed?" variants; prevents `isAskingPermission` from firing on complete analysis reports with natural handoff questions
+- **Structured auto-compact summarization** — 99% context auto-compaction now runs full LLM-based structured JSON extraction (same prompt as manual compact) instead of regex scraping; saves task, confirmed files, ruled-out files, decisions, edits made, and next steps to Tier 2 memory
+- **`preProcessEditTask` returns `pendingSteps`** — completion checklist items from the pre-processor are now passed back to the agent and stored in `_activeTask.stepsPending`, giving the task state machine real content to track
+- **Step completion cross-reference** — after a successful `edit_file`, matching steps in `stepsPending` are automatically moved to `stepsCompleted` based on the edited file's basename; compaction context note includes remaining steps
+- **Memory access tracking** — `recordAccess(entryId, accessType)` now appends timestamped events to `accessHistory[]` (capped at 50); called at system prompt load (`passive_load`), `memory_search` return (`search_result`), and post-response snippet match (`search_hit`)
+- **`_recentSearchResultIds`** — agent tracks entry IDs returned by `memory_search` each turn; checks if model response text contains a snippet from any of them and upgrades to `search_hit` access type
+- **Tag-based TTL rules** in `demoteStaleEntries` — `auto-compact`/`session` tags expire after 7 days (delete), discovery/file-resolution tags after 30 days (demote), session-end/completed tags after 60 days (demote), untagged entries use the existing threshold
+- **Tier 5 pruning** — entries older than 180 days with zero `search_hit` accesses are permanently deleted (including Qdrant cleanup)
+- **`findById` on `TieredMemoryManager`** — searches all tiers by entry ID, used by the `search_hit` upgrade path
+- **`edit_file` append fallback** — when `old_string` is not found AND `new_string` starts with a function/method definition AND `old_string` is ≤10 lines, immediately injects the last 30 lines of the file with line numbers on the first failure rather than requiring two failures
+- **Qwen3.5 27B tested and confirmed** — validated on `qwen3.5:27b-49k` with 262k context; performs reliably on multi-file agentic tasks including planning, exploration, and code editing with thinking mode enabled
+
+### Fixed
+- `isSummaryWithQuestion` false-positive on complete analysis reports ending with "Should I proceed?" — was looping 4+ times on planning/discussion sessions
+- Auto-compact at 99% was silently discarding all discovered facts; now preserves them in Tier 2 memory via structured extraction
+
 ## [0.4.0] - 2025-06-14
 
 ### Added

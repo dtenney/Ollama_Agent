@@ -124,7 +124,7 @@ export function detectShellEnvironment(): ShellEnvironment {
     if (isWin) {
         // Check if PowerShell is available (preferred on Windows)
         try {
-            execSync('powershell -Command "echo ok"', { stdio: 'pipe', timeout: 3000 });
+            execSync('powershell -NoProfile -ExecutionPolicy Bypass -Command "echo ok"', { stdio: 'pipe', timeout: 3000 });
             shell = 'powershell';
         } catch {
             shell = 'cmd';
@@ -175,11 +175,11 @@ function buildShellExamples(env: ShellEnvironment, workspaceRoot?: string): stri
     if (env.os === 'windows') {
         return `Your PRIMARY tools are shell_read and run_command. The host is **${env.label}**. Workspace: ${ws}
 Use Windows-native PowerShell commands — NOT Unix commands (find, grep, cat, mv, mkdir -p are NOT available):
-- Finding files: shell_read with "Get-ChildItem -Path '${ws}' -Recurse -Filter '*transaction*' | Select-Object FullName"
-- Searching code: shell_read with "Get-ChildItem -Path '${ws}' -Recurse -Include *.py | Select-String 'def fetch_user'"
-- Listing directories: shell_read with "Get-ChildItem '${ws}/app' -Recurse | Select-Object Name,DirectoryName"
+- Finding files by name: shell_read with "Get-ChildItem -Path '${ws}' -Recurse -Filter '*transaction*' | Select-Object FullName"
+- Searching code for a symbol: shell_read with "Get-ChildItem -Path '${ws}/app' -Recurse -Filter '*.py' | Select-String -Pattern 'def fetch_user' | Select-Object Path,LineNumber,Line | Select-Object -First 20"
 - Viewing files: shell_read with "Get-Content 'C:/full/path/to/file.py'"
 - Git operations: shell_read with "git status", "git log --oneline -20", "git diff"
+PREFER grep/Select-String over directory listing — it finds what you need in one step instead of two.
 ALWAYS use full paths from search results — never guess relative paths.`;
     } else {
         return `Your PRIMARY tools are shell_read and run_command. The host is **${env.label}**. Workspace: ${ws}
@@ -202,23 +202,31 @@ The host is **${env.label}**. Workspace root: ${ws}
 Use PowerShell commands for ALL file operations. Do NOT use Unix commands (find, grep, cat, mv, mkdir -p).
 
 EXAMPLE - User says "find the payment service code":
+Step 1 — find by filename filter (fast):
 <tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem -Path '${ws}' -Recurse -Filter '*payment*' | Select-Object FullName"}}</tool>
+Step 2 — read it immediately using the path from step 1:
+<tool>{"name": "shell_read", "arguments": {"command": "Get-Content 'C:\\path\\from\\step1\\payment_service.py'"}}</tool>
 
 EXAMPLE - User says "search for where process_payment is defined":
-<tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem -Path '${ws}' -Recurse -Include *.py | Select-String 'def process_payment'"}}</tool>
+<tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem -Path '${ws}/app' -Recurse -Filter '*.py' | Select-String -Pattern 'def process_payment' | Select-Object Path,LineNumber,Line | Select-Object -First 10"}}</tool>
 
 EXAMPLE - User says "read the checkout service":
-Step 1 — find the file:
-<tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem -Path '${ws}' -Recurse -Filter '*checkout_service*' | Select-Object FullName"}}</tool>
-Step 2 — read it (use the EXACT path from step 1 result):
-<tool>{"name": "shell_read", "arguments": {"command": "Get-Content 'C:\\path\\to\\checkout_service.py'"}}</tool>
+<tool>{"name": "shell_read", "arguments": {"command": "Get-Content '${ws}/app/services/checkout_service.py'"}}</tool>
+If path is wrong, search: Get-ChildItem -Recurse -Filter '*checkout*' | Select-Object FullName
 
 EXAMPLE - User says "show me the files under app/routes":
-<tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem '${ws}/app/routes' -Recurse | Select-Object Name,DirectoryName"}}</tool>
+<tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem '${ws}/app/routes' | Select-Object Name"}}</tool>
+
+CRITICAL: Prefer targeted reads over broad directory sweeps. If you know the likely path (e.g. app/services/email_service.py), read it directly — do NOT list the whole directory first.
 
 EXAMPLE - User says "create the admin directory and move admin.py into it":
 <tool>{"name": "run_command", "arguments": {"command": "New-Item -ItemType Directory -Path '${ws}/app/routes/admin' -Force; Move-Item '${ws}/app/routes/admin.py' '${ws}/app/routes/admin/'"}}</tool>
 
+EXAMPLE - User says "create a new file new_service.py with this content":
+Use edit_file with old_string="" (empty string) to create the file — NEVER use echo or shell redirection:
+<tool>{"name": "edit_file", "arguments": {"path": "${ws}/app/services/new_service.py", "old_string": "", "new_string": "# full file content here"}}</tool>
+
+CRITICAL: NEVER use echo, Add-Content, or shell redirection (>, >>) to write source code files. echo collapses newlines and produces broken code. Always use edit_file to create or modify source files.
 CRITICAL: When file search returns a path, READ the full path in the next call. Do NOT guess paths.`;
     } else {
         return `CRITICAL — Shell-First Approach:
@@ -587,132 +595,57 @@ Rules:
     return `You are an expert AI coding assistant integrated into VS Code.
 Current date: ${dateStr}, ${timeStr}.${activeLanguage ? ` Active file: ${activeFile} (${activeLanguage}).` : ''}${workspaceInfo ? `\n${workspaceInfo}` : ''}
 
-CRITICAL — You are operating INSIDE A REAL PROJECT. When the user asks ANY question about code, features, or how something works, you MUST search the actual project files to answer — do NOT answer from general knowledge or training data.
+You are operating INSIDE A REAL PROJECT. Always search actual project files — never answer from training data.
 
-CRITICAL — MEMORY BEFORE FILES. For any feature request or vague business requirement, you MUST call memory_search FIRST to retrieve project context, THEN use shell_read to find the affected files. This sequence is mandatory:
-  1. memory_search("<topic>") — retrieve what you already know about this area
-  2. shell_read / grep — find the specific files using what memory told you
+Memory-first sequence (mandatory for any feature/change/question):
+  1. memory_search("<topic>") — check what you already know
+  2. shell_read / grep — find the specific files
   3. edit_file — make the change
-
-Examples:
-- "allow decimals for X" → memory_search("weight field") THEN grep for weight in the codebase
-- "add feature Y to page Z" → memory_search("page Z") THEN find the template/route
-- "how does X work?" → memory_search("X") THEN cat the file memory pointed you to
-- "show me how X works" → memory_search("X") THEN shell_read with grep to find X, then cat the file
-- "where is X configured" → memory_search("X config") THEN shell_read with grep/find to locate it
-- "explain how X works" → memory_search("X") THEN grep to find X, cat the relevant file
-- NEVER skip memory_search for ANY feature/change/question — always check memory first
 ${autoSaveBlock}
-You have access to the following tools:
+Tools:
+  workspace_summary  — project structure (call first on a new project)
+  edit_file          — replace old_string with new_string in a file
+  shell_read         — any read-only command (no confirmation): cat, grep, find, ls, git diff, head, wc
+  run_command        — state-changing commands (confirmation required): mv, cp, rm, mkdir, pip/npm install
+  memory_search      — semantic search over saved project knowledge
+  memory_list        — list all saved memory notes
+  memory_write       — save a fact or decision
+  memory_tier_write  — save to specific tier (0=infra, 1=frameworks, 2=current work, 3=conventions, 4=solutions)
+  memory_delete      — remove a stale note (call memory_list first to get real IDs)
+  read_terminal      — read VS Code terminal output
+  get_diagnostics    — VS Code errors/warnings for a file
 
-  workspace_summary  — understand the project structure (call this first on a new project)
-  edit_file          — targeted code edit: replace old_string with new_string (use shell_read/grep to get exact strings first)
-  shell_read         — ANY read-only shell command, NO confirmation: cat, grep, find, ls, git log/status/diff, head, tail, wc, etc.
-  run_command        — shell commands that MODIFY state, requires confirmation: mv, cp, rm, mkdir, npm/pip install, tests, builds
-  memory_list        — recall saved facts/decisions about this project
-  memory_write       — persist important facts, decisions, or context across sessions
-  memory_delete      — remove a stale memory note
-  memory_search      — search past memories using semantic similarity
-  memory_tier_write  — save to specific tier (0=critical, 1=essential, 2=operational, 3=collaboration, 4=references)
-  memory_tier_list   — list memories from specific tiers
-  memory_stats       — get memory statistics (entry count and tokens per tier)
-  read_terminal      — read recent output from VS Code integrated terminals
-  get_diagnostics    — get VS Code errors/warnings for a file or workspace
-
-## Shell-First — Use These Patterns
-
+## Shell patterns
 ${buildShellExamples(detectShellEnvironment(), workspaceRoot)}
 
-Guidelines:
-- ALWAYS CALL TOOLS DIRECTLY — never explain what tool to call, just call it immediately
-- Use shell_read for ALL reading: cat file.py, grep -n pattern file.py, find . -name '*.py', ls dir/, git diff
-- Use run_command for moves/deletes/installs/builds: mv, cp, rm, mkdir, pip install, npm install, tests
-- Use edit_file for string replacements OR creating new files (old_string="" creates the file automatically)
-- NEVER use New-Item/touch/run_command to create source files — always use edit_file with old_string=""
-- CRITICAL — edit_file exact match rule: old_string must be copied character-for-character from the file. Before ANY edit_file call, use shell_read to read the exact lines you plan to replace — do NOT reconstruct them from memory or a prior read. Whitespace, comment spacing, and indentation must match exactly.
-- CRITICAL — edit_file failure rule: If edit_file fails, do NOT retry the same old_string. Instead: (1) shell_read the file again to get the exact current content, (2) identify why the match failed, (3) retry once with the corrected old_string. If it fails a second time, STOP and tell the user what you found and what you were trying to change.
-- CRITICAL: When user asks about errors or diagnostics, call get_diagnostics FIRST — do NOT run external linters unless asked
-- After editing files, call get_diagnostics to check for new errors
-- Prefer shell_read for ANY read-only operation — no confirmation required
-- Your persistent memory is automatically loaded (Tiers 0-2) and shown above.
+## Rules
+- Call tools directly — never narrate what you're about to do, just do it
+- edit_file: old_string must be copied verbatim from the file (use shell_read first). On failure: re-read, fix, retry once. Stop after second failure.
+- Never create source files with New-Item/touch — use edit_file with old_string=""
+- get_diagnostics: call after every edit. Also call first when user asks about errors.
+- Bug fix is complete when edit_file succeeds, not when you've described the fix
+- Never end with a list of things to verify — do the verification yourself with shell_read
+- Docs: cross-check specific claims (numbers, class names, config values) against actual code
 ${memoryGuidelines}
-- CRITICAL: When user asks "what do you know about this project", call memory_list — do not answer from conversation alone
-- CRITICAL: When user asks "explain what this project does", call workspace_summary FIRST — memory alone is not enough
-- CRITICAL: Before calling memory_delete, ALWAYS call memory_list first to get real IDs — never guess IDs
-- CRITICAL: When the user gives a VAGUE BUSINESS REQUIREMENT (e.g. "allow decimals for X", "add feature Y to page Z"), call memory_search FIRST with the relevant concept (e.g. "weight field", "transaction page") to discover what the project already knows — then use shell_read to find the affected files
-- CRITICAL: Before implementing ANY feature request or code change, call memory_search("<feature area>") to check if there are existing patterns, conventions, or past decisions relevant to that area
-- Be concise and accurate. Format all code with markdown fenced code blocks.
+## Action vs Confirm
+- Specific narrow tasks (fix bug, rename, add route): DO IT immediately. No asking.
+- Schema changes (db.Column, new model, FK change): EXPLORE → CONFIRM plan → WAIT for reply → BUILD
+- Vague/high-level requests (merge X, add reporting, track Y): EXPLORE → CONFIRM → WAIT → BUILD
+- CONFIRM message format: what you found | what you'll change | what you won't touch | one question. SHORT.
+- "go ahead" is a valid trigger to build IF you already presented a plan. If not, present the plan first.
+- Scope: write code files only. Do NOT run migrations, pip install, or start servers — tell the user to do those.
 
-CRITICAL — Action-Oriented Responses:
-- For specific, narrow requests (fix this bug, rename this function): DO IT immediately without asking. Confirmation dialogs handle safety.
-- EXCEPTION — Database schema changes (adding/removing a db.Column, adding a model, changing a foreign key): always EXPLORE first (read the model, check for existing fields), then CONFIRM your plan with the user ("I'm going to add X column to Y model. This requires a migration. Does this match what you want?"), then STOP and wait for their reply before calling edit_file.
-- For vague or high-level requests (see "Explore Before Implementing" below): EXPLORE first, then CONFIRM your plan, then BUILD. This is the one exception — you MUST stop after CONFIRM and wait for the user's reply.
-- NEVER ask open-ended questions like "Would you like me to proceed?" in the middle of specific tasks — but you MUST stop after a CONFIRM for high-level requests.
-- When asked to review/fix/improve code: use shell_read to read the actual files first, then edit_file on the real code you found
-- NEVER generate hypothetical examples or placeholder code — act on the user's ACTUAL code
-- When you find an issue, fix it with edit_file immediately. Do not just describe the fix.
-- NEVER show a code snippet with "For example:" or "Suggested Fix:" and stop — that is not fixing. Writing a suggestion is not the same as applying it. Use edit_file to apply the change.
-- When you have a hypothesis about a bug root cause but haven't confirmed it, use shell_read to read the suspected method/class BEFORE forming a conclusion. Do not guess — read the actual code.
-- A bug fix is complete when edit_file has been called. Not when you have described what the fix should be.
+## Explore before implementing (vague requests)
+When the request lacks technical detail, in this order:
+  1. Read relevant models (real field names — do not assume)
+  2. grep for existing services (email, scheduler, notification) before proposing new ones
+  3. grep for the template/form if task involves a UI field
+  4. Confirm plan with user before writing anything
 
-Example — correct bug-fix flow for "Getting a 500 error in foo.py line 47":
-  → shell_read foo.py (or search for the real path if it doesn't exist at the given path)
-  → Read line 47 and surrounding context. If another method is implicated, shell_read that too.
-  → Call edit_file with the actual fix applied to the actual file
-  → Reply: "Fixed: [one sentence describing what was wrong and what was changed]"
-  The response contains NO code snippets, NO "Suggested Fix:", NO "For example:", NO "you should verify".
+Prefer existing data over new columns. Never add a column without user confirmation and migration warning.
 
-CRITICAL — Discover Before Acting:
-- Before moving/renaming/reorganizing files, use shell_read to list the directory first — verify real filenames
-- NEVER create placeholder files when moving fails — find the real files with shell_read instead
-- When a file is not found at the expected path, do NOT guess another path — search for it: Get-ChildItem -Path 'c:/Users/david/Documents/source/scrapyard_new_ai' -Recurse -Filter '*filename*' | Select-Object FullName. Then read the real path and continue fixing. Never try a guessed path and stop if it fails.
-- NEVER end a bug-fix response with a list of things the user "should verify" or "should check" — you are the one who verifies and checks, using shell_read and grep. Do the work, don't delegate it.
-
-CRITICAL — Explore Before Implementing (for vague or high-level requests):
-When the user gives a requirement with limited technical detail (e.g. "merge customers", "add reporting", "track inventory"), you MUST follow this sequence BEFORE writing any code:
-  1. EXPLORE — use shell_read/grep to discover ALL relevant pieces: models, existing services, email/scheduler utilities, templates, and related routes. Do NOT stop after finding one model — keep exploring until you have the full picture. For features involving notifications/reminders: you MUST grep for existing email/SMS services before forming a plan. For features involving scheduled jobs: you MUST check for existing scheduler/celery/cron setup. These are mandatory checks, not optional.
-  2. PLAN — form a concrete implementation approach based on what you actually found (real file names, real class names, real field names). Prefer using existing data over adding new columns (e.g. query Transaction.completed_at rather than adding a denormalized last_transaction_date field).
-  3. CONFIRM — present ONE concise summary: what you found, what files you'll create/modify, what you'll NOT do (scope). End your message with "Does this match what you want?" and then STOP — do not call any tools, do not write any files. Wait for the user's reply.
-  4. THEN BUILD — only after the user's next message do you proceed with edits. The user's reply IS the trigger to build.
-
-Example — "Track customers who haven't come back in 90 days and send a reminder":
-  → Read Customer model (real fields), Transaction model (completed_at, customer_id)
-  → MUST grep for email service: Select-String -Path "app/services/*.py" -Pattern "def send_"
-  → MUST grep for scheduler: Get-ChildItem app/ -Recurse -Filter "*scheduler*","*celery*","*cron*"
-  → Found: email_service.py has send_daily_report() as a pattern. No scheduler exists.
-  → Propose: "I found Transaction.completed_at for last-visit tracking. Email service at app/services/email_service.py has send_daily_report() I can follow as a pattern. No scheduler — I'll create an AdminReminderService + a /admin/send-reminders route you trigger manually or via cron. No model changes needed. Does that match what you want?"
-  → Wait for confirmation, then implement
-
-Example — "The business wants to merge duplicate customer records including their transactions":
-  → shell_read to find Customer model, Transaction model, any existing merge utilities
-  → Identify: Customer fields, foreign keys pointing to customer_id, related tables
-  → Propose: "I found Customer (app/models/customer.py) with 12 fields, Transactions linked via customer_id. I'd add a MergeService that reassigns transactions and deactivates the duplicate. Does that match what you want?"
-  → Wait for confirmation, then implement
-
-- NEVER stop exploring after finding the first relevant file — always check for existing email/notification services, schedulers, and related utilities before planning
-- NEVER add columns to existing models without explicit user confirmation — prefer querying existing fields (e.g. use Transaction.completed_at rather than adding last_visited to Customer)
-- NEVER skip the explore+confirm step for vague requests — acting on assumptions wastes effort and can corrupt data
-- Adding a column to a model IS a schema change that requires a database migration. Even if the request is specific (e.g. "add a notes field to Transaction"), you MUST present your plan first: what column, what type, what default, whether a migration is needed. End with "Does this match what you want?" and STOP. Do not call edit_file until the user confirms.
-- The confirm message should be SHORT: what you found, what you'll do, what you won't do, one question
-- "Let's create it" or "go ahead" is NOT a confirmed plan if you have not yet presented your findings and approach. You must present your plan FIRST, then wait for approval.
-- When building, use REAL data from actual models — never invent placeholder data or hardcoded values. If you need external URLs or credentials, ask the user.
-- If you find existing files related to the request, READ them before declaring work done. A file existing does not mean it is correct.
-- During EXPLORE, always read the relevant model files to understand real field names — do not assume.
-- SCOPE BOUNDARY: Your job ends at writing code files (models, services, routes, templates). Do NOT run migrations, install packages, start servers, or fix unrelated import errors. These are environment tasks the user handles. Specifically: after adding a column to a model, do NOT run flask db migrate or flask db upgrade — tell the user "You'll need to run a migration" and STOP. If a migration command fails due to missing modules, do NOT pip install them — report the error and stop.
-
-CRITICAL — Docs Must Match Code:
-- When you read a documentation file (.md, .rst, .txt) that makes specific claims about code behavior (e.g. retention periods, class names, method names, config values), you MUST verify those claims against the actual source code using shell_read/grep
-- If you find a discrepancy between a doc and the code, flag it clearly: "⚠️ Doc says X but code does Y (file:line)" and ask the user if they want you to update the doc
-- NEVER present doc content as fact without cross-checking verifiable claims (numbers, class names, function names, config values) against the real code
-- When answering questions about compliance, security, or data handling: ALWAYS check BOTH the docs folder (shell_read docs/*.md) AND the actual source code — then cross-check them and report any mismatches
-
-CRITICAL — Security/PII Questions:
-- When asked about PII, encryption, security, or data protection, you MUST follow this exact sequence:
-  1. shell_read the relevant doc file FIRST: Get-Content 'docs/PII_COMPLIANCE.md' or docs/COMPLIANCE.md
-  2. shell_read the actual source files to verify: app/utils/pii_encryption.py, app/models/customer.py, app/utils/pii_audit.py
-  3. Cross-check: for every specific claim in the doc (numbers, class names, retention periods), verify against the code
-  4. Report any mismatches with ⚠️ and ask user if they want the doc updated
-- Do NOT skip step 1 — docs must always be read AND cross-checked, not just the code alone
+## Compliance/security questions
+When asked about PII, encryption, retention, or security: read the docs file first (docs/*.md), then cross-check against actual source code. Report mismatches with ⚠️.
 ${projectGuidance ?? (workspaceRoot ? buildProjectTypeGuidance(workspaceRoot) : '')}`;
 }
 
@@ -1078,6 +1011,110 @@ function repairToolJson(raw: string): string | null {
     return null;
 }
 
+/**
+ * Fix raw (unescaped) newlines/tabs inside JSON string values.
+ * Walks character by character to avoid regex catastrophe on large payloads.
+ * Only escapes characters that appear inside JSON string values (between unescaped quotes).
+ */
+function fixRawNewlinesInJson(s: string): string {
+    const out: string[] = [];
+    let inString = false;
+    let i = 0;
+    while (i < s.length) {
+        const ch = s[i];
+        if (ch === '\\' && inString) {
+            // Pass escape sequence through unchanged
+            out.push(ch);
+            i++;
+            if (i < s.length) { out.push(s[i]); i++; }
+            continue;
+        }
+        if (ch === '"') {
+            inString = !inString;
+            out.push(ch);
+            i++;
+            continue;
+        }
+        if (inString) {
+            if (ch === '\n') { out.push('\\n'); i++; continue; }
+            if (ch === '\r') { out.push('\\r'); i++; continue; }
+            if (ch === '\t') { out.push('\\t'); i++; continue; }
+        }
+        out.push(ch);
+        i++;
+    }
+    return out.join('');
+}
+
+/**
+ * Direct field extraction for edit_file tool calls that fail JSON.parse.
+ * Extracts name, path, old_string, new_string by finding field boundaries,
+ * handling the case where new_string contains raw code with unescapable characters.
+ */
+function extractEditFileArgs(jsonStr: string): { name: string; arguments: Record<string, unknown> } | null {
+    try {
+        // Extract tool name
+        const nameMatch = jsonStr.match(/"name"\s*:\s*"(edit_file(?:_at_line)?)"/);
+        if (!nameMatch) return null;
+        const toolName = nameMatch[1];
+
+        // Extract path
+        const pathMatch = jsonStr.match(/"path"\s*:\s*"([^"\\]*)"/);
+        if (!pathMatch) return null;
+        const filePath = pathMatch[1];
+
+        // Extract old_string: find the value between "old_string": " and the next unescaped "
+        // For new-file creation old_string is always empty, handle that fast path
+        const oldStringEmptyMatch = jsonStr.match(/"old_string"\s*:\s*""/);
+        const oldString = oldStringEmptyMatch ? '' : extractJsonStringValue(jsonStr, 'old_string');
+
+        // Extract new_string: the large content block
+        // Find "new_string": " then take everything up to the end of the JSON object
+        const newString = extractJsonStringValue(jsonStr, 'new_string');
+        if (newString === null) return null;
+
+        return {
+            name: toolName,
+            arguments: { path: filePath, old_string: oldString ?? '', new_string: newString }
+        };
+    } catch {
+        return null;
+    }
+}
+
+/** Extract a JSON string value by key, handling escape sequences. Returns raw (unescaped) string. */
+function extractJsonStringValue(jsonStr: string, key: string): string | null {
+    const keyPattern = new RegExp(`"${key}"\\s*:\\s*"`);
+    const keyMatch = keyPattern.exec(jsonStr);
+    if (!keyMatch) return null;
+
+    let i = keyMatch.index + keyMatch[0].length;
+    const chars: string[] = [];
+    while (i < jsonStr.length) {
+        const ch = jsonStr[i];
+        if (ch === '\\' && i + 1 < jsonStr.length) {
+            const next = jsonStr[i + 1];
+            switch (next) {
+                case '"': chars.push('"'); break;
+                case '\\': chars.push('\\'); break;
+                case '/': chars.push('/'); break;
+                case 'n': chars.push('\n'); break;
+                case 'r': chars.push('\r'); break;
+                case 't': chars.push('\t'); break;
+                case 'b': chars.push('\b'); break;
+                case 'f': chars.push('\f'); break;
+                default: chars.push('\\', next); break;
+            }
+            i += 2;
+            continue;
+        }
+        if (ch === '"') break; // end of string value
+        chars.push(ch);
+        i++;
+    }
+    return chars.join('');
+}
+
 /** Parse <tool>...</tool> blocks, raw JSON, or JSON in markdown code blocks from text-mode model output. */
 function parseTextToolCalls(text: string): OllamaToolCall[] {
     const calls: OllamaToolCall[] = [];
@@ -1170,17 +1207,37 @@ function parseTextToolCalls(text: string): OllamaToolCall[] {
                     parsed = JSON.parse(escaped);
                     addCall(parsed!, 'XML (backslash-escaped)');
                 } catch {
-                    // Fall back to full repair for more complex cases
-                    const repaired = repairToolJson(jsonStr);
-                    if (repaired) {
-                        try {
-                            const reparsed = JSON.parse(repaired);
-                            addCall(reparsed, 'XML (repaired)');
-                        } catch {
-                            logWarn(`[parseTextToolCalls] Failed to parse XML JSON (even after repair): ${jsonStr.slice(0, 100)}`);
+                    // Try escaping raw newlines/tabs inside JSON string values (common when model writes
+                    // large new_string values containing code with literal newlines).
+                    // Use character-by-character fix to avoid regex catastrophe on 40KB payloads.
+                    try {
+                        const fixedStr = fixRawNewlinesInJson(jsonStr);
+                        parsed = JSON.parse(fixedStr);
+                        addCall(parsed!, 'XML (newline-escaped)');
+                    } catch {
+                        // Last resort for large edit_file calls: extract fields directly without full JSON parse.
+                        // Handles cases where new_string contains code with truly unescapable content.
+                        if (jsonStr.includes('"edit_file"') || jsonStr.includes('"edit_file_at_line"')) {
+                            const directExtract = extractEditFileArgs(jsonStr);
+                            if (directExtract) {
+                                addCall(directExtract, 'XML (direct-extract)');
+                            } else {
+                                logWarn(`[parseTextToolCalls] Failed to extract edit_file args: ${jsonStr.slice(0, 100)}`);
+                            }
+                        } else {
+                            // Fall back to full repair for more complex cases
+                            const repaired = repairToolJson(jsonStr);
+                            if (repaired) {
+                                try {
+                                    const reparsed = JSON.parse(repaired);
+                                    addCall(reparsed, 'XML (repaired)');
+                                } catch {
+                                    logWarn(`[parseTextToolCalls] Failed to parse XML JSON (even after repair): ${jsonStr.slice(0, 100)}`);
+                                }
+                            } else {
+                                logWarn(`[parseTextToolCalls] Failed to parse XML JSON: ${jsonStr.slice(0, 100)}`);
+                            }
                         }
-                    } else {
-                        logWarn(`[parseTextToolCalls] Failed to parse XML JSON: ${jsonStr.slice(0, 100)}`);
                     }
                 }
             }
@@ -1442,7 +1499,7 @@ export class Agent {
     }
     /** Track consecutive failed tool calls to prevent infinite loops */
     private consecutiveFailures = 0;
-    private readonly MAX_CONSECUTIVE_FAILURES = 3;
+    private readonly MAX_CONSECUTIVE_FAILURES = 4;
     /** Track repeated failing run_command invocations (same command failing even with other tools in between) */
     private _failedCommandSignatures = new Map<string, number>();
     private readonly MAX_SAME_COMMAND_FAILURES = 2;
@@ -1457,7 +1514,7 @@ export class Agent {
     private lastToolName = '';
     private consecutiveSameToolCalls = 0;
     /** Higher limit for action tools (rename, run_command) during batch operations */
-    private readonly MAX_CONSECUTIVE_SAME_TOOL_ACTION = 15;
+    private readonly MAX_CONSECUTIVE_SAME_TOOL_ACTION = 20;
     /** Lower limit for read/info tools (more likely to be loops) */
     private readonly MAX_CONSECUTIVE_SAME_TOOL_DEFAULT = 4;
     /** Track mode-switch retries to prevent infinite retry loops */
@@ -1476,13 +1533,14 @@ export class Agent {
 
     /** Track auto-retries for permission-asking / plan-dumping to prevent infinite loops */
     private autoRetryCount = 0;
-    private readonly MAX_AUTO_RETRIES = 3;
+    private readonly MAX_AUTO_RETRIES = 5;
 
     private diffViewManager: DiffViewManager;
     private refactorManager: MultiFileRefactoringManager;
     /** Last file operation for undo support */
     private _lastFileOp: { path: string; originalContent: string | null; action: string } | null = null;
     private _editsThisRun = 0; // count of successful file edits in current agent run
+    private _lastEditedFilePath: string = ''; // path of last successfully edited file
     /** Pending inline confirmation resolver */
     private _confirmResolver: ((accepted: boolean) => void) | null = null;
     /** Timeout for pending confirmation to prevent hanging forever */
@@ -1513,16 +1571,32 @@ export class Agent {
     private _mergeMode: boolean = false;
     /** When true, allow schema-changing edits (db.Column additions) to model files — set after user confirms */
     private _schemaChangeConfirmed: boolean = false;
+    /** How many times the feature-write guard has fired this run — break loop after 2 blocks */
+    private _featureGuardBlockCount: number = 0;
+    /** shell_read calls this run when userWantsAction and no edit attempted yet — cap exploration */
+    private _exploreShellReadCount: number = 0;
     /** Tracks whether edit_file was called since the last delete in merge mode */
     private _mergeEditedSinceLastDelete: boolean = false;
     /** Consecutive edit_file failures in merge mode — triggers append hint */
     private _mergeConsecutiveEditFailures: number = 0;
+    /** Entry IDs returned by memory_search this turn — checked post-response for search_hit upgrade */
+    private _recentSearchResultIds = new Set<string>();
     /** Per-file read counts in merge mode — resets on successful edit_file */
     private _mergeFileReadCounts: Map<string, number> = new Map();
     /** Active multi-file plan steps remaining (for sequential execution) */
     private _pendingPlanSteps: FilePlan[] = [];
     /** Output summary from the last completed plan step — passed as context to the next */
     private _lastPlanStepOutput: string = '';
+
+    // Fix 5a: Task state machine — survives context compaction, drives completion tracking
+    private _activeTask: {
+        message: string;
+        type: 'add_field' | 'fix_bug' | 'add_route' | 'refactor' | 'query' | 'other';
+        filesConfirmed: string[];   // real paths proven correct this session
+        filesRuledOut: string[];    // stubs/wrong paths to avoid
+        stepsCompleted: string[];   // what's been verified done
+        stepsPending: string[];     // what still needs doing
+    } | null = null;
 
     constructor(
         private workspaceRoot: string,
@@ -1643,30 +1717,76 @@ export class Agent {
 
         logInfo(`[context] compactContext: oldCount=${oldCount} removed=${removedCount} minRemove=${Math.max(Math.floor(oldCount * 0.4), 4)}`);
 
-        // Summarize dropped messages if there are enough to be worth it
+        // Summarize dropped messages — structured extraction instead of vague 2-sentence summary
         if (removedCount >= 2) {
             const dropped = this.history.slice(0, removedCount);
             const summaryText = dropped
                 .filter(m => m.role === 'user' || m.role === 'assistant')
-                .map(m => `${m.role}: ${m.content.slice(0, 300)}`)
+                .map(m => `${m.role}: ${m.content.slice(0, 500)}`)
                 .join('\n');
 
             if (summaryText.trim()) {
                 try {
-                    let summary = '';
+                    let rawSummary = '';
                     await streamChatRequest(
                         model,
                         [
-                            { role: 'system', content: 'Summarize this conversation in 2-3 sentences. Be concise. Output ONLY the summary.' },
-                            { role: 'user', content: summaryText.slice(0, 4000) },
+                            {
+                                role: 'system',
+                                content: [
+                                    'You are a context extractor. Extract structured facts from this conversation.',
+                                    'Output ONLY a JSON object with these keys (omit any key with an empty value):',
+                                    '  task: string — one sentence describing what was being worked on',
+                                    '  files_confirmed: string[] — real file paths that were found and confirmed correct',
+                                    '  files_ruled_out: string[] — stub files, wrong paths, files that do not exist',
+                                    '  decisions: string[] — key decisions made (e.g. "column already exists, skip adding it")',
+                                    '  edits_made: string[] — describe each successful file edit',
+                                    '  blockers: string[] — anything that failed or was unclear',
+                                    '  next_step: string — what should happen next if the task is not done',
+                                    'Output ONLY the JSON. No explanation, no markdown fences.',
+                                ].join('\n'),
+                            },
+                            { role: 'user', content: summaryText.slice(0, 6000) },
                         ],
                         [],
-                        (token) => { summary += token; onToken?.(token); },
+                        (token) => { rawSummary += token; onToken?.(token); },
                         this.stopRef
                     );
-                    if (summary.trim()) {
-                        compacted.unshift({ role: 'assistant', content: `[Earlier conversation summary] ${summary.trim()}` });
-                        logInfo(`[context] Compaction summary: ${summary.trim().slice(0, 120)}`);
+                    // Parse and format as a readable context note
+                    let structured: Record<string, unknown> = {};
+                    try {
+                        const jsonMatch = rawSummary.match(/\{[\s\S]*\}/);
+                        if (jsonMatch) { structured = JSON.parse(jsonMatch[0]); }
+                    } catch { /* fall through to plain summary */ }
+
+                    const lines: string[] = ['[Earlier conversation summary]'];
+                    if (structured.task) { lines.push(`Task: ${structured.task}`); }
+                    if (Array.isArray(structured.files_confirmed) && structured.files_confirmed.length) {
+                        lines.push(`Files confirmed: ${(structured.files_confirmed as string[]).join(', ')}`);
+                    }
+                    if (Array.isArray(structured.files_ruled_out) && structured.files_ruled_out.length) {
+                        lines.push(`Files ruled out (do NOT edit): ${(structured.files_ruled_out as string[]).join(', ')}`);
+                    }
+                    if (Array.isArray(structured.decisions) && structured.decisions.length) {
+                        lines.push(`Decisions: ${(structured.decisions as string[]).join(' | ')}`);
+                    }
+                    if (Array.isArray(structured.edits_made) && structured.edits_made.length) {
+                        lines.push(`Edits made: ${(structured.edits_made as string[]).join(' | ')}`);
+                    }
+                    if (structured.next_step) { lines.push(`Next step: ${structured.next_step}`); }
+                    if (Array.isArray(structured.blockers) && structured.blockers.length) {
+                        lines.push(`Blockers: ${(structured.blockers as string[]).join(' | ')}`);
+                    }
+
+                    const summaryContent = lines.length > 1 ? lines.join('\n') : `[Earlier conversation summary] ${rawSummary.trim()}`;
+                    compacted.unshift({ role: 'assistant', content: summaryContent });
+                    logInfo(`[context] Structured compaction summary: ${summaryContent.slice(0, 200)}`);
+
+                    // Save to Tier 2 memory so facts survive across sessions
+                    if (this.memory && lines.length > 1) {
+                        const memContent = lines.slice(1).join('\n'); // skip header line
+                        this.memory.addEntry(2, memContent, ['compaction', 'session']).catch(() => {});
+                        logInfo(`[context] Saved compaction summary to Tier 2 memory`);
                     }
                 } catch (err) {
                     logWarn(`[context] Summary generation failed, compacting without summary: ${toErrorMessage(err)}`);
@@ -1817,6 +1937,29 @@ export class Agent {
         this.memoryWritesThisResponse = 0; // Reset rate limiter for this response
         this._autoApprovedTools.clear(); // Reset batch-approve for each new user message
         this._currentTaskMessage = userMessage; // Remember original task for post-compaction recovery
+
+        // Fix 5a: Initialize task state machine for this run
+        {
+            const msgLower = userMessage.toLowerCase();
+            const taskType: typeof this._activeTask extends null ? never : NonNullable<typeof this._activeTask>['type'] =
+                /\badd\b.{0,40}\b(field|column|input)\b/i.test(userMessage) || /\b(form|template)\b/i.test(userMessage) ? 'add_field'
+                : /\bfix\b/i.test(userMessage) && !/\ball\b/.test(msgLower) ? 'fix_bug'
+                : /\badd\b.{0,30}\broute\b/i.test(userMessage) ? 'add_route'
+                : /\b(refactor|rename|reorganize|restructure)\b/i.test(userMessage) ? 'refactor'
+                : /\b(what|how|where|why|explain|show|list|find)\b/i.test(userMessage) ? 'query'
+                : 'other';
+            // Preserve filesConfirmed/filesRuledOut across turns in same session; reset steps
+            const prev = this._activeTask;
+            this._activeTask = {
+                message: userMessage,
+                type: taskType,
+                filesConfirmed: prev?.filesConfirmed ?? [],
+                filesRuledOut: prev?.filesRuledOut ?? [],
+                stepsCompleted: [],
+                stepsPending: [],
+            };
+        }
+
         this._failedCommandSignatures.clear(); // Reset failed command tracking
         // NOTE: _failedEditSignatures intentionally NOT cleared between turns — persistent across
         // the session so the same broken old_string doesn't retry indefinitely across user replies.
@@ -1831,6 +1974,9 @@ export class Agent {
         } else {
             this._schemaChangeConfirmed = false;
         }
+        this._featureGuardBlockCount = 0;
+        this._exploreShellReadCount = 0;
+        this._lastEditedFilePath = '';
         
         logInfo(`Agent run — model: ${model}, mode: ${this.toolMode}, history: ${this.history.length}`);
 
@@ -2117,11 +2263,20 @@ export class Agent {
         const isNewFileTask = /\b(create|add|make|generate|scaffold)\b.{0,50}\bnew\s+(route\s+file|file|module|blueprint)\b/i.test(userMessage)
             || /\b(create|generate|scaffold)\b.{0,50}\b(route\s+file|module|blueprint)\b/i.test(userMessage)
             || /\bnew\s+(route\s+file|module|blueprint)\b/i.test(userMessage);
+        // Planning/discussion tasks: model should explore freely without action guardrails.
+        // Suppress explore-cap, same-tool limit exemptions, and planning-instead-of-doing retries.
+        const isPlanTask = /\b(plan|design|discuss|proposal|is it possible|can we|could we|would it be possible|create a (plan|doc|file|proposal)|how (can|could|would) (we|this)|let'?s discuss|think about|possibilities|options|approach|strategy)\b/i.test(userMessage)
+            && !/\b(implement now|do it now|build it|go ahead|proceed)\b/i.test(userMessage);
+        // Review/audit tasks produce a written report — not action-oriented, suppress action guardrails.
+        const isReviewTask = /\b(review|audit|check|analyse|analyze|look for|find (bugs?|issues?|problems?|errors?|race conditions?|inconsistencies)|code review|spot|identify (bugs?|issues?|problems?))\b/i.test(userMessage)
+            && !/\b(and fix|then fix|fix them|fix (all|it|those)|also fix|apply (the )?fix)\b/i.test(userMessage);
+
         const isEditTask = /\b(add|insert|append|implement|fix|modify|update|change|remove|delete|refactor|rename|replace|wrap|extract|move|convert|migrate)\b/i.test(userMessage)
             && !/\b(import\s+\w+|from\s+\w+\s+import|path)\b/i.test(userMessage)
             && !isMultiFileRestructure
             && !isFindSimilar
             && !isExplainQuery
+            && !isPlanTask && !isReviewTask
             && !isNewFileTask
             && !preProcessedContext;  // already handled by preProcessPathUpdate
 
@@ -2207,6 +2362,11 @@ export class Agent {
                 };
                 this._editContextInjected = true;
                 logInfo(`[pre-edit] Injected ${preResult.injection.length} chars of pre-loaded file context`);
+                // Populate task state machine with programmatically-derived pending steps
+                if (this._activeTask && preResult.pendingSteps.length > 0) {
+                    this._activeTask.stepsPending = preResult.pendingSteps.map(s => s.replace(/^\[ \]\s*/, ''));
+                    logInfo(`[task-state] Pending steps: ${this._activeTask.stepsPending.join(' | ')}`);
+                }
             }
         } else if (isMultiFileRestructure) {
             // Programmatic split — no model needed.
@@ -2583,7 +2743,7 @@ export class Agent {
             logInfo(`[agent] Sweep task with ${this.history.length} prior messages — clearing history for a fresh start`);
             this.history = [];
         }
-        const MAX_TURNS = isSweepTask ? 50 : this._mergeMode ? 60 : (this._isSmallModel ? 8 : 25);
+        const MAX_TURNS = isSweepTask ? 50 : this._mergeMode ? 60 : (this._isSmallModel ? 8 : isPlanTask ? 50 : 40);
         this.modeSwitchRetries = 0;
         let loopExhausted = true;
 
@@ -2605,6 +2765,43 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
 Do NOT assume you have no memory — check first.`;
         }
 
+        // Fix M5: Recent-work briefing on session start
+        // Inject the last 3 Tier 2+3 entries so the model knows what was done recently
+        // without having to search memory first.
+        if (this.memory) {
+            try {
+                const tier3 = this.memory.getTier(3)
+                    .filter(e => e.tags?.includes('session-end') || e.tags?.includes('completed'))
+                    .slice(0, 2);
+                const tier2disc = this.memory.getTier(2)
+                    .filter(e => e.tags?.includes('auto-discovery') || e.tags?.includes('stub') || e.tags?.includes('template'))
+                    .slice(0, 3);
+                const recentEntries = [...tier3, ...tier2disc].slice(0, 4);
+                if (recentEntries.length > 0) {
+                    const briefing = recentEntries.map(e => `- ${e.content.slice(0, 120)}`).join('\n');
+                    baseSystemWithMemory += `\n\n## Recent work (from memory)\n${briefing}\nUse this to avoid re-discovering facts already known.`;
+                    logInfo(`[memory] Injected recent-work briefing: ${recentEntries.length} entries`);
+                }
+            } catch { /* skip if memory unavailable */ }
+        }
+
+        // Fix 6a: Task-type-specific system prompt suffix
+        // Small, focused instructions beat long generic ones for 7B models.
+        // Only appended when we know the task type (edit task with pre-loaded context).
+        if (this._isEditTask && this._editContextInjected) {
+            const isFormTaskMsg = /\b(form|template|inline|frontend|html)\b/i.test(userMessage)
+                || /\badd\b.{0,40}\b(field|column|input)\b/i.test(userMessage);
+            const isBugFixMsg = /\bfix\b/i.test(userMessage) && !/\ball\b|\bevery\b/.test(userMessage);
+            const isAddRouteMsg = /\badd\b.{0,30}\broute\b/i.test(userMessage);
+            if (isFormTaskMsg) {
+                baseSystemWithMemory += `\n\n## TASK TYPE: Add field to form\nThis task requires changes to MULTIPLE files — the HTML template, the JS submit handler, and possibly the backend route. The pre-loaded context above identifies all three. You MUST edit all of them. Do not stop after one file. The task is complete only when every file in the "TASK COMPLETE WHEN" checklist above has been edited.`;
+            } else if (isBugFixMsg) {
+                baseSystemWithMemory += `\n\n## TASK TYPE: Bug fix\nRead the error, find the exact line, fix it with edit_file. Do not describe the fix — apply it. Do not suggest the user verify anything — you verify by reading the file after the edit. One sentence response after the fix: what was wrong and what was changed.`;
+            } else if (isAddRouteMsg) {
+                baseSystemWithMemory += `\n\n## TASK TYPE: Add route\nCopy the pattern shown in the pre-loaded context exactly — same blueprint variable, same decorator style, same return format. Do not invent a different structure. Call edit_file_at_line once. If the route already exists in "Already defined", stop immediately.`;
+            }
+        }
+
         // Cache system content per toolMode to avoid rebuilding every turn
         let lastToolMode: 'native' | 'text' | null = null;
         let systemContent = '';
@@ -2612,6 +2809,7 @@ Do NOT assume you have no memory — check first.`;
         for (let turn = 0; turn < MAX_TURNS; turn++) {
             if (this.stopRef.stop) { break; }
             this._focusedGrepInjectedThisTurn = false; // Reset per-turn to prevent double-injection
+            this._recentSearchResultIds.clear();        // Reset per-turn search_hit tracking
 
             // Build system content only when toolMode changes
             const isTextMode = this.toolMode === 'text';
@@ -2672,6 +2870,99 @@ Do NOT assume you have no memory — check first.`;
                     // Calculate removed count AFTER compaction
                     const messagesRemoved = oldMessageCount - this.history.length;
 
+                    // Save structured facts from dropped messages to Tier 2 memory so discoveries
+                    // survive even silent auto-compaction. Use the same LLM-based structured
+                    // extraction as manual compact — run async so it doesn't block this turn.
+                    if (this.memory && messagesRemoved > 0) {
+                        const droppedForSave = this.history.slice(0, messagesRemoved);
+                        const droppedText = droppedForSave
+                            .filter(m => m.role === 'user' || m.role === 'assistant')
+                            .map(m => `${m.role}: ${m.content.slice(0, 500)}`)
+                            .join('\n');
+                        const currentModel2 = this.currentModel || getConfig().model;
+                        const taskMsgSnap = this._currentTaskMessage;
+                        // Fire-and-forget: run LLM extraction in background, save to memory when done
+                        (async () => {
+                            try {
+                                let rawSummary = '';
+                                if (droppedText.trim()) {
+                                    await streamChatRequest(
+                                        currentModel2,
+                                        [
+                                            {
+                                                role: 'system',
+                                                content: [
+                                                    'You are a context extractor. Extract structured facts from this conversation.',
+                                                    'Output ONLY a JSON object with these keys (omit any key with an empty value):',
+                                                    '  task: string — one sentence describing what was being worked on',
+                                                    '  files_confirmed: string[] — real file paths that were found and confirmed correct',
+                                                    '  files_ruled_out: string[] — stub files, wrong paths, files that do not exist',
+                                                    '  decisions: string[] — key decisions made',
+                                                    '  edits_made: string[] — describe each successful file edit',
+                                                    '  blockers: string[] — anything that failed or was unclear',
+                                                    '  next_step: string — what should happen next if the task is not done',
+                                                    'Output ONLY the JSON. No explanation, no markdown fences.',
+                                                ].join('\n'),
+                                            },
+                                            { role: 'user', content: droppedText.slice(0, 6000) },
+                                        ],
+                                        [],
+                                        (token) => { rawSummary += token; },
+                                        { stop: false }
+                                    );
+                                }
+                                let structured: Record<string, unknown> = {};
+                                try {
+                                    const jsonMatch = rawSummary.match(/\{[\s\S]*\}/);
+                                    if (jsonMatch) { structured = JSON.parse(jsonMatch[0]); }
+                                } catch { /* fall through */ }
+                                const lines: string[] = [];
+                                if (taskMsgSnap) { lines.push(`Task: ${taskMsgSnap.slice(0, 80)}`); }
+                                if (structured.task) { lines.push(`Summary: ${structured.task}`); }
+                                if (Array.isArray(structured.files_confirmed) && structured.files_confirmed.length) {
+                                    lines.push(`Files confirmed: ${(structured.files_confirmed as string[]).join(', ')}`);
+                                }
+                                if (Array.isArray(structured.files_ruled_out) && structured.files_ruled_out.length) {
+                                    lines.push(`Files ruled out: ${(structured.files_ruled_out as string[]).join(', ')}`);
+                                }
+                                if (Array.isArray(structured.decisions) && structured.decisions.length) {
+                                    lines.push(`Decisions: ${(structured.decisions as string[]).join(' | ')}`);
+                                }
+                                if (Array.isArray(structured.edits_made) && structured.edits_made.length) {
+                                    lines.push(`Edits made: ${(structured.edits_made as string[]).join(' | ')}`);
+                                }
+                                if (structured.next_step) { lines.push(`Next step: ${structured.next_step}`); }
+                                if (Array.isArray(structured.blockers) && structured.blockers.length) {
+                                    lines.push(`Blockers: ${(structured.blockers as string[]).join(' | ')}`);
+                                }
+                                lines.push(`(auto-compact ${new Date().toLocaleTimeString()})`);
+                                const memNote = lines.join('\n');
+                                this.memory!.addEntry(2, memNote, ['auto-compact', 'session']).catch(() => {});
+                                logInfo(`[context] Auto-compact: saved structured snapshot to Tier 2 memory (${lines.length} facts)`);
+                            } catch (err) {
+                                logWarn(`[context] Auto-compact: structured extraction failed, falling back to regex: ${toErrorMessage(err)}`);
+                                // Fallback: plain regex scrape
+                                const editFacts = droppedForSave
+                                    .filter(m => m.role === 'assistant')
+                                    .flatMap(m => {
+                                        const edits = [...m.content.matchAll(/Edited:\s*([^\s—]+)/g)].map(x => `edited ${x[1]}`);
+                                        const paths = [...m.content.matchAll(/['"](app\/[^'"]+\.[a-z]+)['"]/g)].map(x => x[1]);
+                                        return [...edits, ...paths];
+                                    })
+                                    .filter((v, i, a) => a.indexOf(v) === i)
+                                    .slice(0, 8);
+                                if (editFacts.length > 0 || taskMsgSnap) {
+                                    const fallbackNote = [
+                                        taskMsgSnap ? `Task: ${taskMsgSnap.slice(0, 80)}` : '',
+                                        editFacts.length ? `Progress: ${editFacts.join(', ')}` : '',
+                                        `(auto-compact fallback ${new Date().toLocaleTimeString()})`,
+                                    ].filter(Boolean).join('\n');
+                                    this.memory!.addEntry(2, fallbackNote, ['auto-compact', 'session']).catch(() => {});
+                                }
+                            }
+                        })();
+                    }
+
                     // After compaction, ensure the original task is still in history.
                     // compactHistory works backwards from the end, so the first user message
                     // (the actual task) is often the first thing dropped when context is full.
@@ -2681,7 +2972,36 @@ Do NOT assume you have no memory — check first.`;
                             m => m.role === 'user' && m.content.includes(this._currentTaskMessage.slice(0, 50))
                         );
                         if (!taskStillPresent) {
-                            const compactNote = `[CONTEXT NOTE: Earlier messages were removed to free up context. Your current task is: "${this._currentTaskMessage}". Continue working on this task. Do NOT start a new task or execute suggestions from any planning documents you may have read.]\n\n${this._currentTaskMessage}`;
+                            // Load any recent Tier 2 memory to give the model the structured facts
+                            let recentMemFacts = '';
+                            if (this.memory) {
+                                try {
+                                    const tier2 = this.memory.getTier(2).slice(0, 3);
+                                    if (tier2.length) {
+                                        recentMemFacts = '\n\nRecent memory:\n' + tier2.map(e => `- ${e.content.slice(0, 120)}`).join('\n');
+                                    }
+                                } catch { /* skip */ }
+                            }
+                            // Fix 5c: Include task state in compaction note
+                            const taskStateLines: string[] = [];
+                            if (this._activeTask) {
+                                if (this._activeTask.stepsCompleted.length) {
+                                    taskStateLines.push(`Done so far: ${this._activeTask.stepsCompleted.join(', ')}`);
+                                }
+                                if (this._activeTask.stepsPending.length) {
+                                    taskStateLines.push(`Still to do: ${this._activeTask.stepsPending.join(', ')}`);
+                                }
+                                if (this._activeTask.filesConfirmed.length) {
+                                    taskStateLines.push(`Files confirmed correct: ${this._activeTask.filesConfirmed.join(', ')}`);
+                                }
+                                if (this._activeTask.filesRuledOut.length) {
+                                    taskStateLines.push(`Files to avoid (stubs/wrong): ${this._activeTask.filesRuledOut.join(', ')}`);
+                                }
+                            }
+                            const taskStateBlock = taskStateLines.length
+                                ? `\n\nTask state:\n${taskStateLines.join('\n')}`
+                                : '';
+                            const compactNote = `[CONTEXT NOTE: Earlier messages were removed to free up context. Your current task is: "${this._currentTaskMessage}". Continue working on this task. Do NOT start a new task or execute suggestions from any planning documents you may have read.]${taskStateBlock}${recentMemFacts}\n\n${this._currentTaskMessage}`;
                             this.history.unshift({ role: 'user', content: compactNote });
                             logInfo(`[context] Re-injected original task message after compaction`);
                         }
@@ -2835,11 +3155,35 @@ Do NOT assume you have no memory — check first.`;
             });
 
             if (!toolCalls.length) {
+                // ── Think-stall guard: model produced thinking but no content and no tool calls ──
+                // qwen3 "thinking" models sometimes complete the <think> block but then emit nothing —
+                // no content, no tool calls. The stream resolves with content='' toolCalls=[].
+                // Detect this and retry with a nudge to continue from where thinking left off.
+                const isThinkStall = !result.content && !displayContent && turn > 0 && this.autoRetryCount < this.MAX_AUTO_RETRIES;
+                if (isThinkStall) {
+                    this.autoRetryCount++;
+                    logInfo(`[agent] Auto-retry ${this.autoRetryCount}: think-stall — model completed thinking but emitted no content or tool calls (turn ${turn})`);
+                    this.history.pop(); // remove the empty assistant message
+                    this.history.push({
+                        role: 'user',
+                        content: `[SYSTEM: Your response was empty. You were in the middle of exploring the codebase. Continue where you left off — call the next tool now. Do NOT explain or summarize. Just call the tool.]`
+                    });
+                    post({ type: 'removeLastAssistant' });
+                    continue;
+                }
+
                 // ── Auto-retry: detect "asking permission" or verbose plan without action ──
                 if (turn < MAX_TURNS - 1 && this.autoRetryCount < this.MAX_AUTO_RETRIES) {
                     const resp = (displayContent || result.content).toLowerCase();
                     const lastMsg = (userMessage).toLowerCase();
-                    const isAskingPermission = /would you like me to|shall i|do you want me to|want me to proceed|like me to continue|is there anything specific/i.test(resp);
+                    // Detect a correct EXPLORE→CONFIRM stop: model explored with tools (turn > 0),
+                    // produced a structured plan (has ## headers or numbered list), and asked a
+                    // single closing question. This is intentional — do NOT retry it.
+                    const isConfirmStop = turn > 0
+                        && /(?:##|\n\d+\.\s|\*\*).{20,}/i.test(resp)   // has plan structure
+                        && /does this match|sound right|shall i proceed|should i proceed|want me to proceed|like me to proceed|would you like me to (start|begin|implement|proceed)|ready to (implement|proceed|start|begin)|should we proceed|want to proceed/i.test(resp);
+                    const isAskingPermission = !isConfirmStop
+                        && /would you like me to|shall i|do you want me to|want me to proceed|like me to continue|is there anything specific/i.test(resp);
                     // userWantsAction: message must be imperative (not a question) and use strong action verbs
                     // Exclude: questions (?), explain/describe/show/tell/what/why/how requests
                     const isQuestion = /\?/.test(userMessage) || /^\s*(what|why|how|can you|could you|would you|do you|is|are|explain|describe|show me|tell me|what is|what are)\b/i.test(userMessage);
@@ -2913,7 +3257,15 @@ Do NOT assume you have no memory — check first.`;
                     const isOfferingHelp = /\b(is there anything (else|more)|anything else i can|feel free to ask|let me know if|how can i (further )?help|do you (have|want|need)|would you like|shall i|next steps?)\b/i.test(resp);
                     // Model described what it would do instead of doing it (planning dump after reading a file)
                     // Does NOT require userWantsAction — even for "which X has Y?" queries, planning instead of checking is wrong
+                    // Don't treat a response as "planning instead of doing" if:
+                    // (a) the response contains a <tool> block that failed to parse (parser failure, not model failure)
+                    // (b) the user explicitly asked for a plan/document/summary
+                    const userAskedForPlan = /\b(plan|design|document|write.*doc|create.*file|save.*plan|discuss|proposal|how.*can|is it possible)\b/i.test(this._currentTaskMessage);
+                    const responseHasToolBlock = result.content.includes('<tool>');
+                    // Detect task-completion responses — model correctly concluded nothing more needed
+                    const isTaskCompletion = /\b(no (further |more |additional |other )?changes? (are |is )?(needed|required|necessary)|no (further |more )?edits? (are |is )?(needed|required)|already (implemented|fully implemented|in place|connected|wired up|present|exists?|correct)|implementation (is |looks )?(complete|correct|already|done)|task (is |appears )?(complete|done|finished)|nothing (else |more |further |additional )?(is |are |was )?(needed|required|to do)|fully (connected|wired|implemented|functional)|no (action|update|change|edit) (is |are )?(needed|required|necessary))\b/i.test(resp);
                     const isPlanningInsteadOfDoing = turn > 0 && !toolCalls.length && resp.length > 300
+                        && !userAskedForPlan && !responseHasToolBlock && !isTaskCompletion
                         && /\b(you would|you could|you can|you need to|would need to|we would need to|this (would|will|change will|change would)|to (split|refactor|separate|reorganize|restructure|move|create|migrate)|to (find|check|inspect|verify|look at) (which|each|every|all))\b/i.test(resp);
                     // Detect: model read a file, found a bug, but output a code snippet instead of calling edit_file
                     // Pattern: turn > 0 (file was already read), no tool calls, uses advisory language about a fix
@@ -2944,9 +3296,20 @@ Do NOT assume you have no memory — check first.`;
                         && turn > 0 && turn < 4 && resp.length < 1200
                         && /\b(does not (show|contain|include|have)|no (specific|direct|explicit)|not (shown|visible|found|included|present)|snippet does not|code (does|did) not (show|include|contain)|no implementation)\b/i.test(resp)
                         && isExplainQuery;
+                    // A substantive analysis report: long (>2000 chars), has multiple ## headings or code blocks,
+                    // and any closing question appears only in the last 300 chars. Model completed its work — don't retry.
+                    const headingCount = (resp.match(/^##\s/gm) || []).length;
+                    const hasCodeBlocks = /```[\s\S]{20,}```/.test(resp);
+                    const isSubstantiveAnalysis = resp.length > 2000
+                        && (headingCount >= 2 || (headingCount >= 1 && hasCodeBlocks))
+                        && !/\b(would you|shall i|do you want|like me to|which file|what file|next step)\b/i.test(resp.slice(0, resp.length - 300));
                     const isSummaryWithQuestion = !toolCalls.length
                         && !modelAlreadyAnswered
                         && !isHedgingWithoutReading
+                        && !isPlanTask && !isReviewTask
+                        && !isTaskCompletion
+                        && !isConfirmStop
+                        && !isSubstantiveAnalysis
                         && turn > 0 && resp.length > 100
                         && (isOfferingHelp || isPlanningInsteadOfDoing || (/\b(here are|the (?:search|results?|output|matches)|found \d+|instances?|occurrences?)\b/i.test(resp)
                         && /\b(would you|shall i|do you want|like me to|specific file|which file|what file|have another|next step)\b/i.test(resp)));
@@ -3064,13 +3427,16 @@ Do NOT assume you have no memory — check first.`;
                             : isGenericLongAnswer
                             ? await (async () => {
                                 // Model answered from training data — run a grep search programmatically
-                                const stopWords = new Set(['show','me','how','the','a','an','is','are','does','do','what','where','find','all','please','works','work','working','this','that','it','in','on','of','for','to','and','or','with','by','from','at','into']);
-                                const keywords = lastMsg.split(/\W+/).filter(w => w.length > 2 && !stopWords.has(w.toLowerCase()));
-                                const query = keywords.slice(0, 3).join(' ') || lastMsg.slice(0, 40);
+                                const stopWords = new Set(['show','me','how','the','a','an','is','are','does','do','what','where','find','all','please','works','work','working','this','that','it','in','on','of','for','to','and','or','with','by','from','at','into','save','saved','saving','get','set','use','used','make','made','take','taken','run','new','old','add','added','create','created','update','updated','delete','deleted']);
+                                const keywords = lastMsg.split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w.toLowerCase()));
+                                // Prefer longer, more specific keywords — pick the longest one from first 5
+                                const bestKeyword = keywords.slice(0, 5).sort((a, b) => b.length - a.length)[0] ?? lastMsg.slice(0, 40);
                                 const isWin = process.platform === 'win32';
+                                const wsRoot = this.workspaceRoot ? this.workspaceRoot.replace(/\\/g, '/') : '.';
                                 const grepCmd = isWin
-                                    ? `Get-ChildItem -Recurse -Include *.py,*.ts,*.js | Select-String "${keywords[0] ?? query}" | Select-Object -First 20`
-                                    : `grep -rn --include="*.py" --include="*.ts" --include="*.js" -l "${keywords[0] ?? query}" . 2>/dev/null | head -10`;
+                                    ? `Get-ChildItem -Path '${wsRoot}' -Recurse -Include '*.py','*.ts','*.js' | Select-String -Pattern '${bestKeyword}' | Select-Object Path,LineNumber,Line | Select-Object -First 20`
+                                    : `grep -rn --include="*.py" --include="*.ts" --include="*.js" -l "${bestKeyword}" "${wsRoot}" 2>/dev/null | head -10`;
+                                const query = bestKeyword;
                                 const searchId = `t_autosearch_${Date.now()}`;
                                 post({ type: 'toolCall', id: searchId, name: 'shell_read', args: { command: grepCmd } });
                                 let searchResult = '';
@@ -3112,6 +3478,54 @@ Do NOT assume you have no memory — check first.`;
                     this.autoExtractFacts(userMessage, displayContent || result.content).catch(err => {
                         logWarn(`[agent] Auto-extract facts failed: ${toErrorMessage(err)}`);
                     });
+                }
+
+                // ── Fix M3: Session-end save to Tier 3 ───────────────────
+                // When a session completes successfully (model gave final answer after ≥1 tool call),
+                // save a durable summary of what was accomplished to Tier 3 (Collaboration).
+                if (this.memory && this._editsThisRun > 0) {
+                    const sessionFacts: string[] = [];
+                    if (this._currentTaskMessage) { sessionFacts.push(`Task: ${this._currentTaskMessage.slice(0, 80)}`); }
+                    if (this._lastEditedFilePath) { sessionFacts.push(`Last edited: ${this._lastEditedFilePath}`); }
+                    sessionFacts.push(`Edits this session: ${this._editsThisRun}`);
+                    sessionFacts.push(`Completed: ${new Date().toLocaleDateString()}`);
+                    // Include any Tier 2 auto-discoveries from this session
+                    try {
+                        const tier2Recent = this.memory.getTier(2)
+                            .filter(e => e.tags?.includes('auto-discovery') || e.tags?.includes('file-resolution'))
+                            .slice(0, 3)
+                            .map(e => e.content.slice(0, 100));
+                        if (tier2Recent.length) { sessionFacts.push(`Discoveries: ${tier2Recent.join(' | ')}`); }
+                    } catch { /* skip */ }
+                    const sessionNote = sessionFacts.join('\n');
+                    this.memory.isSemanticDuplicate(sessionNote, 0.9).then(isDupe => {
+                        if (!isDupe) {
+                            this.memory!.addEntry(3, sessionNote, ['session-end', 'completed']).catch(() => {});
+                            logInfo(`[memory] Session-end: saved to Tier 3`);
+                        }
+                    }).catch(() => {});
+                }
+
+                // ── search_hit upgrade ───────────────────────────────────
+                // If the model's final response references content from a
+                // recently searched memory entry (by quoting ≥10 chars of it),
+                // upgrade that entry's last access to search_hit — the strongest
+                // signal that the fact was genuinely useful.
+                if (this.memory && this._recentSearchResultIds.size > 0) {
+                    const respText = (displayContent || result.content).toLowerCase();
+                    for (const entryId of this._recentSearchResultIds) {
+                        try {
+                            const entry = this.memory.findById(entryId);
+                            if (entry) {
+                                const snippet = entry.content.slice(0, 60).toLowerCase();
+                                if (snippet.length >= 10 && respText.includes(snippet)) {
+                                    this.memory.recordAccess(entryId, 'search_hit');
+                                    logInfo(`[memory] search_hit: model used entry ${entryId}`);
+                                }
+                            }
+                        } catch { /* skip */ }
+                    }
+                    this._recentSearchResultIds.clear();
                 }
 
                 loopExhausted = false;
@@ -3200,7 +3614,10 @@ Do NOT assume you have no memory — check first.`;
 
                     // If the repeated command was a file-search that returned a path, guide the model to read it
                     const isFileSearch = /Get-ChildItem|find\s|ls\s|-name\s|dir\s/i.test(String(args.command ?? ''));
-                    const hint = isFileSearch
+                    const isEditFile = name === 'edit_file' || name === 'edit_file_at_line';
+                    const hint = isEditFile
+                        ? `[BLOCKED — edit NOT applied] Your edit_file call was identical to a previous attempt that already failed (old_string did not match). The file has NOT been changed.\n\nYou MUST:\n1. Call shell_read with Get-Content to re-read the current file\n2. Find the exact lines you want to change\n3. Copy the old_string character-for-character from that output\n4. Retry edit_file with the corrected old_string\n\nDo NOT use the same old_string again.`
+                        : isFileSearch
                         ? `You already ran this file search and got the result. DO NOT run it again. Take the file path from the result and READ the file content now: use shell_read with "cat <path>" or "Get-Content <path>".`
                         : `You already called ${name} with the same arguments ${this.consecutiveRepeats + 1} times and got the same result. DO NOT call this tool again. Use the result you already have and respond to the user with a text answer now.`;
                     if (isTextMode) {
@@ -3208,7 +3625,7 @@ Do NOT assume you have no memory — check first.`;
                     } else {
                         this.history.push({ role: 'tool', content: hint });
                     }
-                    post({ type: 'toolResult', id: toolId, name, success: true, preview: '(duplicate call skipped)' });
+                    post({ type: 'toolResult', id: toolId, name, success: isEditFile ? false : true, preview: isEditFile ? '(edit NOT applied — re-read file and fix old_string)' : '(duplicate call skipped)' });
                     this.consecutiveRepeats = 0;
                     this.lastToolSignature = '';
                     this.consecutiveSameToolCalls = 0;
@@ -3224,8 +3641,10 @@ Do NOT assume you have no memory — check first.`;
                     ? this.MAX_CONSECUTIVE_SAME_TOOL_ACTION
                     : this.MAX_CONSECUTIVE_SAME_TOOL_DEFAULT;
                 // Sweep tasks legitimately call edit_file many times in a row (once per route/function).
-                // Skip the same-tool consecutive limit for sweep tasks to avoid breaking mid-sweep.
-                const skipSameToolLimit = this._isSweepTask && (name === 'edit_file' || name === 'shell_read');
+                // Plan tasks legitimately call shell_read many times while exploring the codebase.
+                // Skip the same-tool consecutive limit in both cases to avoid breaking mid-exploration.
+                const skipSameToolLimit = (this._isSweepTask && (name === 'edit_file' || name === 'shell_read'))
+                    || (isPlanTask && name === 'shell_read');
                 if (!skipSameToolLimit && this.consecutiveSameToolCalls >= sameToolLimit) {
                     logWarn(`[agent] Breaking same-tool loop: ${name} called ${this.consecutiveSameToolCalls} times consecutively (limit: ${sameToolLimit})`);
                     // Tell the model to try a different approach — not just summarize and give up
@@ -3257,6 +3676,36 @@ Do NOT assume you have no memory — check first.`;
                     }
                     logInfo(`[pre-edit] Blocked shell_read for small model — context already injected`);
                     continue;
+                }
+
+                // ── Feature-exploration cap: stop directory-listing loop before CONFIRM ──
+                // When userWantsAction and no edit_file has been called yet, cap directory listings.
+                // Get-ChildItem/ls/find calls are "listing" reads — limit to 3 before warning.
+                // Get-Content/cat calls are "content" reads — these are valuable, don't count them.
+                const exploreTaskWantsAction = /\b(implement|apply|add|build|create|track|store|record|save|need to|we need|want to|should get|should send|should have)\b/i.test(this._currentTaskMessage);
+                if (name === 'shell_read' && exploreTaskWantsAction && !isPlanTask && !isReviewTask && !this._schemaChangeConfirmed && this._editsThisRun === 0 && !isSweepTask) {
+                    // A "listing" command is one whose PRIMARY purpose is to list files/dirs.
+                // Get-ChildItem piped into Select-String is a GREP (content search) — don't count it.
+                const cmdStr2 = String(args.command ?? '');
+                const isGrepPipe = /Select-String\s+-Pattern|Select-String\s+'|grep\s+-[rn]/i.test(cmdStr2);
+                const isListingCmd = !isGrepPipe && /Get-ChildItem|Select-Object\s+FullName|\bls\b|\bfind\b/i.test(cmdStr2);
+                    if (isListingCmd) {
+                        this._exploreShellReadCount++;
+                        // On follow-up turns (history has prior exchanges), only allow 1 listing before redirecting
+                        const priorTurns = this.history.filter(h => h.role === 'assistant').length;
+                        const listingCap = priorTurns > 1 ? 1 : 3;
+                        if (this._exploreShellReadCount >= listingCap) {
+                            const exploreCapMsg = `[SYSTEM: You have listed directories ${this._exploreShellReadCount} time(s). Stop listing files. You already know the codebase structure from prior turns. Read the specific files you need to make this change using Get-Content, then present your CONFIRM plan or make the edit. Do NOT list more directories.]`;
+                            if (isTextMode) {
+                                this.history.push({ role: 'user', content: exploreCapMsg });
+                            } else {
+                                this.history.push({ role: 'tool', content: exploreCapMsg });
+                            }
+                            post({ type: 'toolResult', id: toolId, name, success: false, preview: '(listing cap reached — read key files now)' });
+                            logWarn(`[explore-cap] ${this._exploreShellReadCount} directory listings — injecting redirect`);
+                            continue; // don't break — let it read actual files
+                        }
+                    }
                 }
 
                 const isSweepMessage = /\b(all|every|each|any)\b.{0,40}\b(route|function|endpoint|def)\b/i.test(this._currentTaskMessage)
@@ -3397,6 +3846,33 @@ Do NOT assume you have no memory — check first.`;
                 }
                 // _mergeEditedSinceLastDelete is set after a SUCCESSFUL edit_file (see below)
 
+                // ── Write-before-explore guard: block writes on vague requests before any real reads ──
+                // When a high-level/vague request (matching EXPLORE→CONFIRM pattern) results in an
+                // edit_file or memory_tier_write before the model has read any real source files,
+                // the model is inventing file paths from training data rather than exploring the codebase.
+                // Intercept and redirect to exploration first.
+                const isWriteBeforeExploreVulnerable = (name === 'edit_file' || name === 'edit_file_at_line' || name === 'memory_tier_write')
+                    && this._editsThisRun === 0
+                    && this._filesAutoReadThisRun.size === 0
+                    && turn <= 1
+                    && !this._schemaChangeConfirmed
+                    && !isSweepTask;
+                if (isWriteBeforeExploreVulnerable) {
+                    const isVagueRequest = /\b(shorten|simplify|streamline|improve|integrate|workflow|process|feature|business|could we|can we|would it be|is it possible|reduce|fewer|less clicks?|less steps?)\b/i.test(this._currentTaskMessage);
+                    if (isVagueRequest) {
+                        const explorationRedirect = `[EXPLORE FIRST] You are attempting to write a file before reading the actual codebase. For this type of request you MUST explore the real project files first.\n\nDo NOT write files or save plans until you have:\n1. Listed relevant directories: Get-ChildItem app/templates -Recurse -Filter *.html | Select FullName\n2. Read the actual source files that are relevant to this task\n3. Identified the real file paths (not guessed ones)\n\nStart now by exploring the real codebase structure.`;
+                        post({ type: 'toolCall', id: toolId, name, args });
+                        post({ type: 'toolResult', id: toolId, name, success: false, preview: explorationRedirect });
+                        if (isTextMode) {
+                            this.history.push({ role: 'user', content: `Tool ${name} returned:\n${explorationRedirect}` });
+                        } else {
+                            this.history.push({ role: 'tool', content: explorationRedirect });
+                        }
+                        logInfo(`[write-before-explore] Blocked ${name} — vague request with no prior reads`);
+                        continue;
+                    }
+                }
+
                 // ── Schema-change guard: require confirmation before adding db.Column to a model file ──
                 if ((name === 'edit_file' || name === 'edit_file_at_line') && !this._schemaChangeConfirmed) {
                     const targetPath = String(args.path ?? args.file_path ?? '');
@@ -3417,6 +3893,88 @@ Do NOT assume you have no memory — check first.`;
                         }
                         post({ type: 'toolResult', id: toolId, name, success: false, preview: `(schema change blocked — awaiting confirmation)` });
                         logInfo(`[schema-guard] Blocked db.Column addition to model file: ${targetPath}`);
+                        continue;
+                    }
+                }
+
+                // ── Undefined-function call guard: catch calls to functions that don't exist yet ──
+                // Fires when new_string calls a function (e.g. _check_currency(...)) that is not
+                // defined anywhere in the target file. Prevents wiring up a dispatch to a missing impl.
+                if ((name === 'edit_file' || name === 'edit_file_at_line') && !this._schemaChangeConfirmed) {
+                    const ufPath = String(args.path ?? args.file_path ?? '');
+                    const ufNewStr = String(args.new_string ?? '');
+                    // Only check Python/TS/JS source files
+                    if (/\.(py|ts|js)$/.test(ufPath)) {
+                        // Find all function calls in new_string that look like internal helpers (_foo, _bar)
+                        const calledFns = [...ufNewStr.matchAll(/\b(_\w+)\s*\(/g)].map(m => m[1]);
+                        if (calledFns.length > 0) {
+                            try {
+                                const absUfPath = path.isAbsolute(ufPath) ? ufPath : path.join(this.workspaceRoot, ufPath);
+                                const fileContent = fs.existsSync(absUfPath) ? fs.readFileSync(absUfPath, 'utf8') : '';
+                                const missing = calledFns.filter(fn => {
+                                    // Check if it's defined in the file (def _fn / function _fn / const _fn =)
+                                    return !new RegExp(`(?:def|function|const)\\s+${fn}\\s*[\\(=]`).test(fileContent);
+                                });
+                                if (missing.length > 0) {
+                                    const ufMsg = `[BLOCKED: Calling undefined function(s)]\n\nYour edit calls ${missing.map(f => `${f}()`).join(', ')} but ${missing.length === 1 ? 'this function is' : 'these functions are'} not defined in ${path.basename(ufPath)}.\n\nYou must implement ${missing.length === 1 ? 'it' : 'them'} before or in the same edit. Either:\n1. Add the implementation to your edit (include the full function definition in new_string), OR\n2. Make a separate edit_file call to add the implementation first\n\nDo NOT wire up a call to a function that doesn't exist yet.`;
+                                    if (isTextMode) {
+                                        this.history.push({ role: 'user', content: `[tool:edit_file] ${ufMsg}` });
+                                    } else {
+                                        this.history.push({ role: 'tool', content: ufMsg });
+                                    }
+                                    post({ type: 'toolResult', id: toolId, name, success: false, preview: `(blocked — ${missing.join(', ')} not defined)` });
+                                    logWarn(`[undef-guard] Blocked call to undefined: ${missing.join(', ')} in ${ufPath}`);
+                                    continue;
+                                }
+                            } catch { /* file read failed — skip guard */ }
+                        }
+                    }
+                }
+
+                // ── Feature-write guard: require confirmation before adding new functions ──
+                // Fires when: edit_file adds a substantial new function AND the task message is exploratory/vague
+                // (not a targeted bug fix). Does NOT fire if _schemaChangeConfirmed is already set.
+                if ((name === 'edit_file' || name === 'edit_file_at_line') && !this._schemaChangeConfirmed) {
+                    const targetPath2 = String(args.path ?? args.file_path ?? '');
+                    const newStr2 = String(args.new_string ?? '');
+                    const normPath2 = targetPath2.replace(/\\/g, '/');
+                    // Any source file (not a config/template/test) — language-agnostic
+                    const isModelFile2 = normPath2.includes('/models/') && normPath2.endsWith('.py');
+                    const isSourceFile = !isModelFile2 && /\.(py|ts|js|rb|go|java|cs|php)$/.test(normPath2)
+                        && !/\.(test|spec|config|lock|min)\./i.test(normPath2);
+                    // Exploratory task = vague high-level request, not a pinpoint fix
+                    const isExploratory = /\b(what else|could|might|benefit|improve|enhance|review|suggest|recommend|consider|explore|refactor|look at|what can)\b/i.test(this._currentTaskMessage)
+                        || /\b(let'?s? work on|i like this|sounds good|go ahead with)\b/i.test(this._currentTaskMessage);
+                    const isServiceOrRoute = isSourceFile && (isExploratory || exploreTaskWantsAction);
+                    const addsNewMethod = /^\s*(@\w+\s*\n\s*)?(?:async\s+)?(?:def|function|func|fn)\s+\w+/m.test(newStr2)
+                        || /^\s*(?:export\s+)?(?:async\s+)?(?:function|const\s+\w+\s*=\s*(?:async\s+)?\()/m.test(newStr2);
+                    // Only block when the new_string is substantial (>100 chars) and adds a new method
+                    // This filters out small targeted fixes (typo, variable rename, one-liner)
+                    const isSubstantialAdd = newStr2.length > 100 && addsNewMethod;
+                    if (isServiceOrRoute && isSubstantialAdd) {
+                        this._featureGuardBlockCount++;
+                        const fileName = targetPath2.replace(/\\/g, '/').split('/').pop() ?? targetPath2;
+                        const methodMatch = newStr2.match(/def\s+(\w+)\s*\(/);
+                        const methodName = methodMatch ? methodMatch[1] : 'new method';
+                        const featureMsg = `[BLOCKED: Unconfirmed feature write]\n\nYou are about to add a new function "${methodName}" to ${fileName} without first presenting a plan.\n\nFor feature requests, you MUST:\n1. Finish EXPLORE (check all relevant files)\n2. Present a CONFIRM summary: what you found, what files you'll create/modify, what you will NOT do\n3. End with "Does this match what you want?" and STOP\n4. Only write code after the user confirms\n\nPresent your findings and plan to the user NOW. Do not call edit_file until confirmed.`;
+                        if (isTextMode) {
+                            this.history.push({ role: 'user', content: `[tool:edit_file] ${featureMsg}` });
+                        } else {
+                            this.history.push({ role: 'tool', content: featureMsg });
+                        }
+                        post({ type: 'toolResult', id: toolId, name, success: false, preview: `(feature write blocked — present plan first)` });
+                        logInfo(`[feature-guard] Blocked unconfirmed feature write to service/route file: ${targetPath2} (block #${this._featureGuardBlockCount})`);
+                        // After 2 blocks, force-break the tool loop so the model must respond to the user
+                        if (this._featureGuardBlockCount >= 2) {
+                            logWarn(`[feature-guard] Blocked ${this._featureGuardBlockCount} times — breaking tool loop to force plan presentation`);
+                            const confirmFormatMsg = `[SYSTEM: You have been blocked from writing code twice. You MUST now present a CONFIRM plan to the user as plain text — NO code blocks allowed.\n\nFormat your response exactly like this:\n\nEXPLORE complete. Here is what I found:\n- [list each file you read and the key relevant facts]\n\nHere is my plan:\n1. File: [file path] — [what you will add/change, in plain English, no code]\n2. File: [file path] — [what you will add/change]\n\nI will NOT:\n- [things you explicitly will not do]\n\nDoes this match what you want?\n\nDo NOT include code blocks. Do NOT use \`\`\` fences. Describe the logic in plain English only. End with exactly "Does this match what you want?" and stop.]`;
+                            if (isTextMode) {
+                                this.history.push({ role: 'user', content: confirmFormatMsg });
+                            } else {
+                                this.history.push({ role: 'tool', content: confirmFormatMsg });
+                            }
+                            break;
+                        }
                         continue;
                     }
                 }
@@ -3491,29 +4049,90 @@ Do NOT assume you have no memory — check first.`;
                             toolResult += `\n\n[FILE TRUNCATED] More content follows. After editing routes visible above, call shell_read with: Get-Content "<path>" | Select-Object -Skip 400 to see the rest.`;
                         }
                     }
-                    // Detect corrupted files (literal \n in content) and warn model immediately.
+                    // Detect corrupted files (literal \n in content OR UTF-16 encoding) and warn model.
                     // Fires on any shell_read that returns file content — Get-Content, cat, or Select-String.
                     let fileIsCorrupted = false;
                     if (name === 'shell_read') {
                         const cmdStr = String(args.command ?? '');
-                        if (/\\n[ \t]+\w/.test(toolResult)) {
+                        // UTF-16 detection: every character separated by space (e.g. "f r o m   f l a s k")
+                        // This pattern looks for 4+ consecutive single-char tokens separated by spaces
+                        const isUtf16Wide = /(?:\b\w\b ?){6,}/.test(toolResult.split('\n')[0] ?? '');
+                        if (/\\n[ \t]+\w/.test(toolResult) || isUtf16Wide) {
                             fileIsCorrupted = true;
                             // Extract path from common command patterns
                             const corruptPath =
-                                cmdStr.match(/Get-Content\s+['"]?([^\s'"]+)['"]?/i)?.[1] ??
+                                cmdStr.match(/Get-Content\s+(?:-Raw\s+)?['"]?([^\s'"]+)['"]?/i)?.[1] ??
                                 cmdStr.match(/cat\s+['"]?([^\s'"]+)['"]?/i)?.[1] ??
-                                cmdStr.match(/['"]([^'"]+\.py)['"]/)?.[1] ??
+                                cmdStr.match(/['"]([^'"]+\.\w+)['"]/)?.[1] ??
                                 'the file';
-                            toolResult += `\n\n[SYSTEM WARNING] This file is CORRUPTED — it contains literal \\n characters instead of real newlines (you can see lines like "def foo():\\n    ..."). run_command or Set-Content CANNOT fix this reliably.\n\nFix it using edit_file with:\n  path: "${corruptPath}"\n  old_string: ""\n  new_string: <the full correctly-formatted file content with real newlines>\n  force_overwrite: true\n\nFirst read the FULL file with Get-Content to see all content, then call edit_file with force_overwrite=true.`;
+                            const corruptType = isUtf16Wide
+                                ? 'UTF-16 encoded (each character has a null byte, showing as "f r o m   f l a s k"). edit_file cannot match strings in UTF-16 files.'
+                                : 'contains literal \\n characters instead of real newlines';
+                            toolResult += `\n\n[SYSTEM WARNING] This file is CORRUPTED — it is ${corruptType}.\n\nYou MUST rewrite it using edit_file with force_overwrite=true:\n  path: "${corruptPath}"\n  old_string: ""\n  new_string: <the full correctly-formatted file content>\n  force_overwrite: true\n\nDo NOT attempt any other edit_file calls on this file — they will all fail until it is rewritten as proper UTF-8.`;
                         }
                     }
+                    // Detect stub/placeholder HTML files: suspiciously small HTML that lacks the
+                    // standard markers of a real template. These are often agent-created placeholders
+                    // from a previous session. Warn the model not to edit them as if they were real.
+                    if (!fileIsCorrupted && name === 'shell_read') {
+                        const stubCmdStr = String(args.command ?? '');
+                        const isHtmlRead = /Get-Content|cat\s/i.test(stubCmdStr) && /\.html['"]/i.test(stubCmdStr);
+                        if (isHtmlRead) {
+                            const lineCount = toolResult.split('\n').length;
+                            const hasRealHtmlMarkers = /<!DOCTYPE|<html|{%\s*extends|{%\s*block/i.test(toolResult);
+                            if (lineCount < 15 && !hasRealHtmlMarkers) {
+                                const wsRootStub = this.workspaceRoot.replace(/\\/g, '/');
+                                // Auto-search: extract keywords from the stub content to find the real file
+                                const stubKeywords = toolResult
+                                    .match(/\{\{\s*form\.(\w+)\s*[\.(]|id=["']([^"']+)["']|name=["']([^"']+)["']/g)
+                                    ?.map(m => m.match(/form\.(\w+)|id=["']([^"']+)["']|name=["']([^"']+)["']/)?.[1] ?? m.match(/form\.(\w+)|id=["']([^"']+)["']|name=["']([^"']+)["']/)?.[2] ?? '')
+                                    .filter(k => k.length > 3)
+                                    .slice(0, 3) ?? [];
+                                const searchPattern = stubKeywords.length > 0 ? stubKeywords[0] : path.basename(stubCmdStr.match(/['"](.*?)['"]/)?.[1] ?? '').replace(/\.\w+$/, '');
+                                let realFileHint = '';
+                                if (searchPattern) {
+                                    try {
+                                        const envStub2 = detectShellEnvironment();
+                                        const realSearchCmd = envStub2.os === 'windows'
+                                            ? `Get-ChildItem -Path '${wsRootStub}/app/templates' -Recurse -Include '*.html' | Where-Object { $_.FullName -notmatch '__pycache__' } | Select-String -Pattern '${searchPattern}' | Select-Object Path,LineNumber,Line | Select-Object -First 10`
+                                            : `grep -rn '${searchPattern}' '${wsRootStub}/app/templates' --include='*.html' | head -10`;
+                                        const realSearchId = `t_stubsearch_${Date.now()}`;
+                                        post({ type: 'toolCall', id: realSearchId, name: 'shell_read', args: { command: realSearchCmd } });
+                                        const realSearchResult = await this.runShellRead(realSearchCmd, this.workspaceRoot, realSearchId);
+                                        post({ type: 'toolResult', id: realSearchId, name: 'shell_read', success: true, preview: realSearchResult.slice(0, 200) });
+                                        if (realSearchResult.trim()) {
+                                            realFileHint = `\n\nAuto-search found these real templates containing "${searchPattern}":\n${realSearchResult.slice(0, 1000)}\n\nRead the most relevant file above and edit it instead.`;
+                                        }
+                                    } catch { /* ignore */ }
+                                }
+                                toolResult += `\n\n[SYSTEM WARNING] This file is a STUB — it has only ${lineCount} lines and no real HTML structure. It was created as a placeholder and does NOT contain the real feature implementation. Do NOT edit this stub.${realFileHint}`;
+                            }
+                        }
+                    }
+
+                    // When the task is about adding a field to a form/template and the model just read
+                    // a Python model file, nudge it to search the templates next rather than exploring
+                    // the model file further (error patterns, etc.).
+                    if (!fileIsCorrupted && name === 'shell_read') {
+                        const formTaskHint = /\b(form|template|inline|frontend|html)\b/i.test(this._currentTaskMessage)
+                            && /\b(add|insert|append)\b/i.test(this._currentTaskMessage)
+                            && /Get-Content|cat\s/i.test(String(args.command ?? ''))
+                            && /models[/\\].*\.py['"]/i.test(String(args.command ?? ''));
+                        if (formTaskHint) {
+                            const wsRootForm = this.workspaceRoot.replace(/\\/g, '/');
+                            toolResult += `\n\n[NEXT STEP] You've confirmed the model schema. Now find the HTML form. Search templates:\nshell_read: Get-ChildItem -Path '${wsRootForm}/app/templates' -Recurse -Include '*.html' | Select-Object FullName\nThen search for where the inline form renders this input, and look for the JS submit handler that sends this data.`;
+                        }
+                    }
+
                     if (!fileIsCorrupted && name === 'shell_read' && toolResult.length > 3000
                         && !this._mergeMode
                         && /Get-Content|cat\s/i.test(String(args.command ?? ''))
                         && /\b(apply|implement|update|edit|modify|fix|refactor|improve|change|add|append|write|replace)\b/i.test(this._currentTaskMessage)
-                        && !/\b(create|new file|new route|scaffold)\b/i.test(this._currentTaskMessage)
+                        && !/\b(create|new file|new route|scaffold|suggest|calculate|review|analyse|analyze|look for|find|check|how|what|which|show me|tell me)\b/i.test(this._currentTaskMessage)
                         && !isSweepMessage
-                        && !this._isEditTask) {
+                        && !this._isEditTask
+                        && !isReviewTask
+                        && !isPlanTask) {
                         const interceptCmd = String(args.command ?? '');
                         const interceptPathMatch = interceptCmd.match(/['"](.*?)['"]/);
                         const interceptPath = interceptPathMatch?.[1] ?? '';
@@ -3655,18 +4274,16 @@ Do NOT assume you have no memory — check first.`;
                                     : `awk 'NR>=${startLine} && NR<=${endLine} {printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`;
                                 logInfo(`[agent] edit_file failed at line ${lineNum} — reading lines ${startLine}-${endLine}`);
                             } else {
-                                const failKeywords = this._currentTaskMessage
-                                    .toLowerCase()
-                                    .match(/\b(fail|timeout|retry|auth|login|upload|download|connect|validat)\w*\b/g)
-                                    ?.slice(0, 3)
-                                    .join('|');
-                                const failPattern = failKeywords
-                                    ? `except|raise|\\.error\\(|\\.critical\\(|${failKeywords}`
-                                    : 'except|raise|\\.error\\(|\\.critical\\(';
+                                // Search for the first line of the failed old_string so we find the
+                                // actual location and can show the model the real surrounding context.
+                                const firstLineOfOld = String(args.old_string ?? '').split('\n')[0].trim();
+                                // Escape special regex chars in the first line
+                                const escapedFirst = firstLineOfOld.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 80);
+                                const fallbackPattern = escapedFirst.length > 3 ? escapedFirst : 'def |class |return ';
                                 grepFailCmd = envFail.os === 'windows'
-                                    ? `Get-Content "${absFailPath}" | Select-String -Pattern "${failPattern}" -Context 2,2`
-                                    : `grep -n -A 2 -B 2 -E "${failPattern}" "${absFailPath}" | head -100`;
-                                logInfo(`[agent] edit_file old_string failed — running focused grep: ${grepFailCmd}`);
+                                    ? `Get-Content "${absFailPath}" | Select-String -Pattern "${fallbackPattern}" -Context 5,5 | Select-Object -First 30`
+                                    : `grep -n -A 5 -B 5 -E "${fallbackPattern}" "${absFailPath}" | head -100`;
+                                logInfo(`[agent] edit_file old_string failed (first line not found) — searching for: ${fallbackPattern}`);
                             }
                             const failGrepId = `t_failgrep_${Date.now()}`;
                             post({ type: 'toolCall', id: failGrepId, name: 'shell_read', args: { command: grepFailCmd } });
@@ -3797,8 +4414,17 @@ Do NOT assume you have no memory — check first.`;
                                     nudge = 'The edit_file FAILED — old_string did not match exactly. Re-read the file with shell_read to get the exact text including whitespace, then retry. Do NOT delete the file until the edit succeeds.';
                                 }
                             }
+                        } else if (!editFailed) {
+                            const editedPath = String(args.path ?? args.file_path ?? '');
+                            if (editedPath && editedPath === this._lastEditedFilePath) {
+                                // Consecutive edit to the same file — require re-read first
+                                nudge = `Edit succeeded. Before making another edit to this file, you MUST re-read it first: use shell_read with Get-Content on "${editedPath}" to see the current state. Your mental model of the file may be out of date after the last edit.`;
+                            } else {
+                                this._lastEditedFilePath = editedPath;
+                                nudge = 'Edit applied. Before declaring done: re-read the full file and check for other issues in the same file (unused imports, resource leaks, dead code, other functions with the same problem). Fix everything you see in the file before responding. Do NOT show code as a text block — use edit_file for each fix.';
+                            }
                         } else {
-                            nudge = 'If you have MORE edits to make, call the next edit_file NOW. Do NOT show changes as a code block — CALL THE TOOL. Only respond with text once ALL edits are complete.';
+                            nudge = 'The edit_file FAILED — old_string did not match. Re-read the file with shell_read to get the exact current content, then retry with the correct old_string.';
                         }
                     } else if (name === 'shell_read') {
                         const lastUserMsg = this._currentTaskMessage.toLowerCase();
@@ -3817,6 +4443,9 @@ Do NOT assume you have no memory — check first.`;
                                 || toolResult.trim() === ''
                                 || isShellError
                                 || /^[\s\r\n]*(FullName|Name|Path)[\s\r\n]*-+[\s\r\n]*(searched in:|$)/im.test(toolResult));
+                        // Detect empty Select-String / grep results — model may hallucinate answers when search returns nothing
+                        const isEmptySearch = !isShellError && toolResult.trim() === ''
+                            && /\b(Select-String|grep)\b/i.test(String(args.command ?? ''));
                         // Detect if the result is just a file path list (not file content):
                         // Handle both bare paths and PowerShell Select-Object table format (FullName header + dashes).
                         // Works even on truncated output — checks if ANY line looks like an absolute path.
@@ -3947,11 +4576,13 @@ Do NOT assume you have no memory — check first.`;
                                 nudge = `You found the file path. Now READ the file content before editing. Call shell_read with: ${catCmd}`;
                             }
                             } // close the else-block for "not already auto-read"
-                        } else if (wantsEdit && /Get-Content|cat\s/i.test(String(args.command ?? '')) && toolResult.length < 300 && !/def |class |import |#/.test(toolResult)) {
-                            // Get-Content returned too little to be real source code — wrong path.
-                            // Search recursively using the filename from the command.
+                        } else if (/Get-Content|cat\s/i.test(String(args.command ?? ''))
+                            && (isShellError || (toolResult.length < 300 && !/def |class |import |#/.test(toolResult)))) {
+                            // Get-Content failed (path not found) OR returned too little to be real source code.
+                            // Auto-recover: search for the file by name recursively.
                             const cmdStr = String(args.command ?? '');
-                            const fileNameMatch = cmdStr.match(/['\"]([^'"]*?([^'/\\]+\.py))['"]/i);
+                            // Match any file extension, not just .py
+                            const fileNameMatch = cmdStr.match(/['\"]([^'"]*?([^'/\\]+\.\w+))['"]/i);
                             const fileName = fileNameMatch?.[2] ?? '';
                             const wsRoot2 = this.workspaceRoot.replace(/\\/g, '/');
                             const env2 = detectShellEnvironment();
@@ -3971,7 +4602,7 @@ Do NOT assume you have no memory — check first.`;
                                     post({ type: 'toolResult', id: autoSearchId, name: 'shell_read', success: false, preview: String(e) });
                                 }
                                 // Extract the best path from the search result and auto-read it
-                                const pathLines = searchResult.split('\n').map(l => l.trim()).filter(l => /\.py$/i.test(l) && isAbsPath(l));
+                                const pathLines = searchResult.split('\n').map(l => l.trim()).filter(l => /\.\w+$/.test(l) && isAbsPath(l));
                                 const bestPath = pathLines.find(l => /service/i.test(l)) ?? pathLines[0];
                                 if (bestPath) {
                                     const readCmd = env2.os === 'windows' ? `Get-Content "${bestPath.replace(/\//g, '\\')}"` : `cat "${bestPath}"`;
@@ -3991,12 +4622,18 @@ Do NOT assume you have no memory — check first.`;
                                         nudge = `The path "${bestPath}" was found but returned empty. The file at "${String(args.command ?? '').match(/['"][^'"]*['"]/)?.[0] ?? 'the path you tried'}" does not exist. Use the path from the search result: ${searchResult.slice(0, 200)}`;
                                     }
                                 } else {
-                                    nudge = `The file at the path you tried does not exist. Search result: ${searchResult.slice(0, 300)}. Use the EXACT full path from the search results above.`;
+                                    // File not found by exact name — tell the agent to search by content/keyword instead
+                                    const wsRoot3 = this.workspaceRoot.replace(/\\/g, '/');
+                                    const env3b = detectShellEnvironment();
+                                    const broadSearchCmd = env3b.os === 'windows'
+                                        ? `Get-ChildItem -Path '${wsRoot3}' -Recurse -Include '*.html','*.py','*.ts','*.js' | Where-Object { $_.FullName -notmatch '__pycache__|htmlcov' } | Select-Object FullName | Select-Object -First 30`
+                                        : `find '${wsRoot3}' -type f \\( -name '*.html' -o -name '*.py' \\) -not -path '*__pycache__*' | head -30`;
+                                    nudge = `[FILE NOT FOUND] "${fileName}" does not exist at that path and was not found anywhere in the project.\n\nDo NOT create this file. The feature you are looking for is likely implemented inline in an existing file.\n\nSearch for it by content — run this to list all templates and routes:\n${broadSearchCmd}\n\nThen look for the form/section that handles this feature inside those existing files using Select-String.`;
                                 }
                             } else {
                                 nudge = `The file you tried to read returned almost no content (${toolResult.length} chars) — it may be at the wrong path. Use shell_read with Get-ChildItem -Recurse -Filter to find the correct absolute path first.`;
                             }
-                        } else if (wantsEdit && /Get-Content|cat\s/i.test(String(args.command ?? '')) && toolResult.length > 2000 && !isSweepMessage) {
+                        } else if (wantsEdit && !isReviewTask && !isPlanTask && /Get-Content|cat\s/i.test(String(args.command ?? '')) && toolResult.length > 2000 && !isSweepMessage) {
                             // Model read a large file — extract focused section to help it find the right old_string.
                             // (Skipped for sweep tasks — they need the full numbered file content)
                             const cmdStr2 = String(args.command ?? '');
@@ -4036,6 +4673,17 @@ Do NOT assume you have no memory — check first.`;
                             }
                         } else if (wantsEdit) {
                             nudge = 'You have the file content. The user wants you to MODIFY it. Use the EXACT strings from the output above as old_string in edit_file. Call edit_file NOW — do NOT show changes as a code block.';
+                        } else if (isEmptySearch) {
+                            // Select-String / grep returned nothing — force the model to try a broader search
+                            // rather than hallucinating an answer from training data.
+                            const emptyCmd = String(args.command ?? '');
+                            const patternMatch = emptyCmd.match(/-Pattern\s+['"]([^'"]+)['"]/i) ?? emptyCmd.match(/grep\s+['""]?([^\s'"]+)/i);
+                            const pattern = patternMatch?.[1] ?? '';
+                            const wsRoot = this.workspaceRoot.replace(/\\/g, '/');
+                            const broadenHint = process.platform === 'win32'
+                                ? `Get-ChildItem -Path '${wsRoot}' -Recurse -Filter '*.html' | Select-String -Pattern '${pattern || 'customer'}' | Select-Object Path,LineNumber,Line | Select-Object -First 20`
+                                : `grep -rn "${pattern || 'customer'}" "${wsRoot}" --include="*.html" | head -20`;
+                            nudge = `[SEARCH RETURNED NO RESULTS] The pattern was not found with that command. Do NOT guess or invent file paths — the search found nothing.\n\nTry a broader search:\nshell_read with: ${broadenHint}\n\nIf that also returns nothing, tell the user the feature was not found rather than fabricating an answer.`;
                         } else if (isEmptyFileSearch) {
                             const env2 = detectShellEnvironment();
                             const wsRoot = this.workspaceRoot;
@@ -4190,7 +4838,7 @@ Do NOT assume you have no memory — check first.`;
                 return `The tool "${name}" is no longer available. Use shell commands instead:\n` +
                     `- Read a file: shell_read with ${isWin2 ? 'Get-Content path/to/file' : 'cat path/to/file'}\n` +
                     `- Find files: shell_read with ${isWin2 ? 'Get-ChildItem -Recurse -Filter "*name*"' : 'find . -name "*name*"'}\n` +
-                    `- Search content: shell_read with ${isWin2 ? 'Select-String -Path "*.py" -Pattern "keyword"' : 'grep -rn "keyword" --include="*.py" .'}\n` +
+                    `- Search content: shell_read with ${isWin2 ? 'Get-ChildItem -Recurse -Filter "*.py" | Select-String -Pattern "keyword"' : 'grep -rn "keyword" --include="*.py" .'}\n` +
                     `- Create/overwrite file: run_command with ${isWin2 ? 'Set-Content' : 'cat > file << EOF'}\n` +
                     `- Move/rename: run_command with ${isWin2 ? 'Move-Item old new' : 'mv old new'}\n` +
                     `- Delete: run_command with ${isWin2 ? 'Remove-Item path' : 'rm path'}`;
@@ -4250,7 +4898,60 @@ Do NOT assume you have no memory — check first.`;
                     throw new Error(`File "${rel}" already exists. Use get_file to read it first, then call edit_file with old_string set to the exact text you want to replace. If the file is corrupted (contains literal \\n characters), use force_overwrite=true with old_string="" and new_string=<full correct content>.`);
                 }
 
-                const original = fs.readFileSync(full, 'utf8');
+                // Guard: if the file doesn't exist, give a clear actionable error instead of a raw ENOENT.
+                // This prevents the agent from falling back to New-Item/Set-Content to "create" a file
+                // that should already exist — the real problem is it has the wrong path.
+                if (!fs.existsSync(full)) {
+                    const wsRoot4 = this.workspaceRoot.replace(/\\/g, '/');
+                    const env4 = detectShellEnvironment();
+                    const fileName4 = path.basename(rel);
+                    const searchCmd4 = env4.os === 'windows'
+                        ? `Get-ChildItem -Path '${wsRoot4}' -Recurse -Filter '${fileName4}' | Where-Object { $_.FullName -notmatch '__pycache__|htmlcov' } | Select-Object FullName`
+                        : `find '${wsRoot4}' -name '${fileName4}' -not -path '*__pycache__*'`;
+                    throw new Error(`edit_file: "${rel}" does not exist on disk. Do NOT create it — the file you want to edit is at a different path.\n\nSearch for it: shell_read with command="${searchCmd4}"\n\nThen re-read the correct file and retry edit_file with the actual path.`);
+                }
+
+                // Guard: block edits to stub HTML files — they have no real HTML structure
+                // and were created as agent placeholders. Editing them is never the right action.
+                if (/\.html$/i.test(rel) && fs.existsSync(full)) {
+                    const stubCheck = fs.readFileSync(full, 'utf8');
+                    const stubLineCount = stubCheck.split('\n').length;
+                    const hasRealHtmlMarkers = /<!DOCTYPE|<html|{%\s*extends|{%\s*block/i.test(stubCheck);
+                    if (stubLineCount < 15 && !hasRealHtmlMarkers) {
+                        const wsRootStub2 = this.workspaceRoot.replace(/\\/g, '/');
+                        const fileName6 = path.basename(rel);
+                        const envStub3 = detectShellEnvironment();
+                        // Extract a keyword from the stub to find the real file
+                        const stubKw = stubCheck.match(/\{\{\s*form\.(\w+)|id=["'](\w+)["']|name=["'](\w+)["']/)?.[1] ?? fileName6.replace(/\.\w+$/, '');
+                        const realSearchCmd2 = envStub3.os === 'windows'
+                            ? `Get-ChildItem -Path '${wsRootStub2}/app/templates' -Recurse -Include '*.html' | Where-Object { $_.FullName -notmatch '__pycache__' } | Select-String -Pattern '${stubKw}' | Select-Object Path,LineNumber,Line | Select-Object -First 10`
+                            : `grep -rn '${stubKw}' '${wsRootStub2}/app/templates' --include='*.html' | head -10`;
+                        throw new Error(`edit_file: BLOCKED — "${rel}" is a stub file (${stubLineCount} lines, no HTML structure). It is a placeholder, not the real template.\n\nDo NOT edit this stub. Find the real template:\nshell_read with command="${realSearchCmd2}"\n\nThen edit the real file instead.`);
+                    }
+                }
+
+                // Read file, auto-converting UTF-16 LE/BE to UTF-8 if BOM is detected.
+                // PowerShell Get-Content transparently decodes UTF-16, so the model sees clean text,
+                // but a raw utf8 readFileSync returns garbage. Detect and convert here so old_string matching works.
+                let original: string;
+                {
+                    const rawBuf = fs.readFileSync(full);
+                    if (rawBuf[0] === 0xFF && rawBuf[1] === 0xFE) {
+                        // UTF-16 LE BOM — convert to UTF-8
+                        original = rawBuf.toString('utf16le').replace(/^\uFEFF/, '');
+                        logInfo(`[edit_file] Detected UTF-16 LE file, converting to UTF-8: ${rel}`);
+                        // Auto-fix: rewrite the file as UTF-8 so future edits work normally
+                        fs.writeFileSync(full, original, 'utf8');
+                        logInfo(`[edit_file] Rewrote ${rel} as UTF-8`);
+                    } else if (rawBuf[0] === 0xFE && rawBuf[1] === 0xFF) {
+                        // UTF-16 BE BOM
+                        original = rawBuf.swap16().toString('utf16le').replace(/^\uFEFF/, '');
+                        logInfo(`[edit_file] Detected UTF-16 BE file, converting to UTF-8: ${rel}`);
+                        fs.writeFileSync(full, original, 'utf8');
+                    } else {
+                        original = rawBuf.toString('utf8');
+                    }
+                }
 
                 // Guard: block whole-file rewrites disguised as edit_file.
                 // If new_string is much larger than old_string and the result would be a near-complete
@@ -4260,7 +4961,8 @@ Do NOT assume you have no memory — check first.`;
                 const oldLineCount = oldString.split('\n').length;
                 const newLineCount = newString.split('\n').length;
                 const fileLineCount = original.split('\n').length;
-                if (newLineCount > oldLineCount * 3 && newLineCount > fileLineCount * 0.5 && oldLineCount < 15) {
+                // Skip guard for tiny files (≤10 lines) — replacing a stub/placeholder is legitimate.
+                if (fileLineCount > 10 && newLineCount > oldLineCount * 3 && newLineCount > fileLineCount * 0.5 && oldLineCount < 15) {
                     throw new Error(
                         `edit_file: new_string (${newLineCount} lines) is much larger than old_string (${oldLineCount} lines) ` +
                         `and would replace most of the file. This looks like a whole-file rewrite attempt, which is not allowed. ` +
@@ -4329,6 +5031,31 @@ Do NOT assume you have no memory — check first.`;
                         const hint = ` First line found at line ${nearLineIdx + 1}, but the full block didn't match — check indentation.`;
                         throw new Error(`edit_file: old_string not found in ${rel}.${hint} Re-read the file and try again.`);
                     }
+
+                    // ── Append-intent detection ─────────────────────────────────
+                    // If old_string not found AND new_string starts with a new class/method/function
+                    // definition AND old_string looks like it came from the end of the file,
+                    // this is almost certainly an "append new method" operation where the model
+                    // used stale/truncated content as the anchor. Instead of a generic error,
+                    // immediately inject the real last 30 lines of the file so the model can
+                    // use the correct anchor on the very next attempt — no wasted re-read turn.
+                    const newStringIsMethod = /^\s*(?:@\w+|\s*(?:def |async def |function |const |class |@classmethod|@staticmethod))/m.test(newString);
+                    const oldStringLooksLikeTail = oldLines.length <= 10;  // short anchor = likely last-lines pattern
+                    if (newStringIsMethod && oldStringLooksLikeTail) {
+                        const tail30 = fileLines.slice(-30);
+                        const tail30Numbered = tail30
+                            .map((l, i) => `${String(fileLines.length - 30 + i + 1).padStart(4, ' ')}: ${l}`)
+                            .join('\n');
+                        throw new Error(
+                            `edit_file: old_string not found in ${rel}. ` +
+                            `This looks like an append operation but the anchor text didn't match.\n\n` +
+                            `LAST 30 LINES OF FILE (use the final non-blank line as old_string):\n${tail30Numbered}\n\n` +
+                            `Set old_string to the EXACT last non-blank line shown above (no line-number prefix), ` +
+                            `and new_string to that same line PLUS a blank line PLUS your new method. ` +
+                            `Do NOT re-read the file — use the lines shown here.`
+                        );
+                    }
+
                     throw new Error(`edit_file: old_string not found in ${rel}. The first line of old_string was not found in the file. Re-read the file and try again.`);
                 }
 
@@ -4361,6 +5088,41 @@ Do NOT assume you have no memory — check first.`;
                 this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
                 this._editsThisRun++;
                 this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
+
+                // Auto-save a project memory note when a new named function or route is added
+                if (this.memory) {
+                    const fnMatch = newString.match(/(?:def|function|async function|const)\s+(\w+)\s*[\(\=]/);
+                    const routeMatch = newString.match(/@\w+_bp\.route\(['"]([^'"]+)['"]/);
+                    if (fnMatch || routeMatch) {
+                        const what = routeMatch
+                            ? `Route ${routeMatch[1]} added to ${rel}`
+                            : `Function ${fnMatch![1]}() added to ${rel}`;
+                        this.memory.isSemanticDuplicate(what, 0.85).then(isDupe => {
+                            if (!isDupe) {
+                                this.memory!.addEntry(2, what, ['auto-edit', 'structure']);
+                                logInfo(`[memory] Auto-saved edit fact: ${what}`);
+                            }
+                        }).catch(() => {});
+                    }
+                }
+                // Fix 5b: Record completed step in task state machine
+                if (this._activeTask) {
+                    const stepDesc = `Edited ${rel}`;
+                    if (!this._activeTask.stepsCompleted.includes(stepDesc)) {
+                        this._activeTask.stepsCompleted.push(stepDesc);
+                    }
+                    if (!this._activeTask.filesConfirmed.includes(rel)) {
+                        this._activeTask.filesConfirmed.push(rel);
+                    }
+                    // Mark matching pending steps as done (e.g. "HTML input ... added to cashier_dashboard.html")
+                    const relBase = path.basename(rel);
+                    this._activeTask.stepsPending = this._activeTask.stepsPending.filter(step => {
+                        const done = step.toLowerCase().includes(relBase.toLowerCase());
+                        if (done) { this._activeTask!.stepsCompleted.push(step); }
+                        return !done;
+                    });
+                }
+
                 const editResult = `Edited: ${rel} — ${oldString.split('\n').length} line(s) replaced with ${newString.split('\n').length} line(s)`;
                 // Auto-check: use py_compile for Python (Pylance diagnostics are stale/unreliable post-edit),
                 // use VSCode diagnostics for TypeScript/JS only
@@ -4386,6 +5148,98 @@ Do NOT assume you have no memory — check first.`;
                         return `${editResult}\n\n${icon} Tests (${relTest}):\n${output}`;
                     }
                 }
+
+                // SQLAlchemy model integrity check — fires when a models/*.py file is edited
+                // Catches: new FK with no relationship, ambiguous FK (2+ FKs to same table without foreign_keys=)
+                const isModelFile = /[\\/]models[\\/][^\\/]+\.py$/i.test(full);
+                if (isModelFile && isPyFile) {
+                    const modelSource = (() => { try { return fs.readFileSync(full, 'utf8'); } catch { return ''; } })();
+                    if (modelSource) {
+                        const modelIssues: string[] = [];
+
+                        // Check 1: every db.ForeignKey has a matching db.relationship or is referenced by one
+                        const fkMatches = [...modelSource.matchAll(/(\w+)\s*=\s*db\.Column\([^)]*db\.ForeignKey\(['"]([^'"]+)['"]\)/g)];
+                        const relMatches = [...modelSource.matchAll(/db\.relationship\s*\([^)]*foreign_keys\s*=\s*\[([^\]]+)\]/g)];
+                        const relFkCols = new Set(relMatches.flatMap(m => m[1].split(',').map(s => s.trim())));
+                        // Also count plain relationships (no foreign_keys arg) — OK when only one FK to that table
+
+                        // Build map: table → [col names with FK to it]
+                        const fkToTable = new Map<string, string[]>();
+                        for (const m of fkMatches) {
+                            const colName = m[1];
+                            const fkTarget = m[2].split('.')[0]; // e.g. 'transactions' from 'transactions.id'
+                            if (!fkToTable.has(fkTarget)) { fkToTable.set(fkTarget, []); }
+                            fkToTable.get(fkTarget)!.push(colName);
+                        }
+
+                        // Flag: multiple FKs to the same table without foreign_keys= on relationships
+                        for (const [table, cols] of fkToTable) {
+                            if (cols.length >= 2) {
+                                const hasForeignKeysArg = cols.some(c => relFkCols.has(c));
+                                if (!hasForeignKeysArg) {
+                                    modelIssues.push(
+                                        `⚠ Ambiguous FK: ${cols.length} columns reference '${table}' (${cols.join(', ')}) but no db.relationship uses foreign_keys=[]. SQLAlchemy will raise AmbiguousForeignKeysError. Add foreign_keys=[<col>] to each relationship that joins to '${table}'.`
+                                    );
+                                }
+                            }
+                        }
+
+
+
+                        if (modelIssues.length > 0) {
+                            return `${editResult}\n\n${modelIssues.join('\n')}\n\nFix these before continuing.`;
+                        }
+                    }
+                }
+
+                // Fix 3a+b: Post-edit verification — check if task-specific completion criteria are met
+                // Only fires for form field tasks where we know the full-stack surface.
+                const taskMsg = this._currentTaskMessage || '';
+                const isFormFieldEdit = /\badd\b.{0,40}\b(field|column|input)\b/i.test(taskMsg)
+                    || /\b(form|template|inline)\b/i.test(taskMsg);
+                if (isFormFieldEdit && /\.html$/i.test(rel)) {
+                    // Extract field name from the edit to verify across the full stack
+                    const addedInputMatch = newString.match(/name=["']([a-z_][a-z0-9_]*)["']/i)
+                        ?? newString.match(/id=["']([a-z_][a-z0-9_]*)["']/i);
+                    if (addedInputMatch) {
+                        const fieldName = addedInputMatch[1];
+                        const gaps: string[] = [];
+                        // Check JS submit handler contains this field
+                        const staticDir = path.join(root, 'app', 'static');
+                        if (fs.existsSync(staticDir)) {
+                            const jsFiles: string[] = [];
+                            const walkJs2 = (d: string) => {
+                                try { for (const f of fs.readdirSync(d)) {
+                                    const a = path.join(d, f);
+                                    try { if (fs.statSync(a).isDirectory()) { walkJs2(a); } else if (/\.js$/.test(f) && !/\.min\./.test(f)) { jsFiles.push(a); } } catch { /**/ }
+                                } } catch { /**/ }
+                            };
+                            walkJs2(staticDir);
+                            const jsHasField = jsFiles.some(jf => {
+                                try { return fs.readFileSync(jf, 'utf8').includes(fieldName); } catch { return false; }
+                            });
+                            if (!jsHasField) {
+                                gaps.push(`JS submit handler does not yet include \`${fieldName}\` — update the JS fetch/FormData block`);
+                            }
+                        }
+                        // Check backend route reads this field
+                        const routesDir2 = path.join(root, 'app', 'routes');
+                        if (fs.existsSync(routesDir2)) {
+                            const pyHasField = fs.readdirSync(routesDir2).filter(f => f.endsWith('.py')).some(rf => {
+                                try { return fs.readFileSync(path.join(routesDir2, rf), 'utf8').includes(fieldName); } catch { return false; }
+                            });
+                            if (!pyHasField) {
+                                gaps.push(`Backend route does not yet read \`request.form.get('${fieldName}')\` — update the POST handler`);
+                            }
+                        }
+                        if (gaps.length > 0) {
+                            return `${editResult}\n\n⚠ Verification: HTML field \`${fieldName}\` added, but task is NOT complete:\n${gaps.map(g => `- ${g}`).join('\n')}\n\nContinue with the remaining files now.`;
+                        } else {
+                            return `${editResult}\n\n✅ Verified: \`${fieldName}\` present in HTML, JS handler, and backend route.`;
+                        }
+                    }
+                }
+
                 return editResult;
             }
 
@@ -4540,6 +5394,66 @@ Do NOT assume you have no memory — check first.`;
                     }
                 }
 
+                // Auto-fix: Select-String does NOT support -Recurse on PowerShell.
+                // Only applies when -Recurse appears AFTER the pipe (i.e., as an argument to Select-String).
+                // Valid: "Get-ChildItem -Recurse | Select-String" — -Recurse belongs to Get-ChildItem, leave it alone.
+                // Invalid: "Select-String -Path '...' -Recurse -Pattern '...'" — rewrite to GCI | SS form.
+                {
+                    const pipeIdx = cmd.indexOf('|');
+                    const afterPipe = pipeIdx >= 0 ? cmd.slice(pipeIdx) : '';
+                    const selectStringIsFirstCmd = /^\s*Select-String\b/i.test(cmd);
+                    const recurseAfterPipe = afterPipe && /-Recurse\b/i.test(afterPipe);
+                    if (recurseAfterPipe || selectStringIsFirstCmd && /-Recurse\b/i.test(cmd)) {
+                        const ssPathMatch = cmd.match(/-Path\s+['"]([^'"]+)['"]/i);
+                        const ssPatternMatch = cmd.match(/-Pattern\s+['"]([^'"]+)['"]/i);
+                        if (ssPathMatch && ssPatternMatch) {
+                            const rawPath = ssPathMatch[1];
+                            const ssPattern = ssPatternMatch[1];
+                            const extMatch = rawPath.match(/\*\.(\w+)$/);
+                            const filterArg = extMatch ? ` -Filter '*.${extMatch[1]}'` : '';
+                            const baseDir = rawPath.replace(/[\\/]\*\*[\\/]\*\.\w+$/, '').replace(/[\\/]\*\.\w+$/, '') || rawPath;
+                            const trailingPipeMatch = cmd.match(/\|\s*(Select-Object.+)$/i);
+                            const trailingPipe = trailingPipeMatch ? ` | ${trailingPipeMatch[1]}` : ' | Select-Object Path,LineNumber,Line | Select-Object -First 30';
+                            cmd = `Get-ChildItem -Path '${baseDir}' -Recurse${filterArg} | Select-String -Pattern '${ssPattern}'${trailingPipe}`;
+                            logInfo(`[shell_read] Auto-fixed Select-String -Recurse → ${cmd}`);
+                        } else if (recurseAfterPipe) {
+                            // Strip -Recurse from the Select-String portion only
+                            const beforePipe = cmd.slice(0, pipeIdx);
+                            const fixedAfterPipe = afterPipe.replace(/\s+-Recurse\b/gi, '');
+                            cmd = beforePipe + fixedAfterPipe;
+                            logInfo(`[shell_read] Stripped -Recurse from Select-String portion: ${cmd}`);
+                        }
+                    }
+                }
+
+                // Auto-fix: Unix grep on Windows — convert to PowerShell Select-String.
+                // Also handles multi-word patterns like grep -rn "foo bar baz" which would never match
+                // any real file — extract the best single keyword instead.
+                if (process.platform === 'win32' && /\bgrep\b/i.test(cmd)) {
+                    const grepPatternMatch = cmd.match(/grep\s+(?:-[\w]+\s+)*["']([^"']+)["']/i);
+                    if (grepPatternMatch) {
+                        const rawPattern = grepPatternMatch[1];
+                        const isMultiWord = /\s/.test(rawPattern.trim());
+                        // If multi-word, pick the longest word > 3 chars as the actual search term.
+                        // Prefer domain-specific terms over generic verbs.
+                        const genericWords = new Set(['save','saved','trace','find','show','list','get','set','use','make','take','call','send','read','load','init','test','data','file','code','path','name','type','form','view','page','item','user','node','base','core','main','util','help','info','work','done']);
+                        const words = rawPattern.split(/\s+/).filter(w => w.length > 3 && !genericWords.has(w.toLowerCase()));
+                        const allWords = rawPattern.split(/\s+/).filter(w => w.length > 3);
+                        const bestWord = (words.sort((a, b) => b.length - a.length)[0] ?? allWords.sort((a, b) => b.length - a.length)[0]) ?? rawPattern;
+                        const includeMatch = cmd.match(/--include=['"*]?\*\.(\w+)/i);
+                        const includeExt = includeMatch ? includeMatch[1] : 'py';
+                        const wsRootGrep = this.workspaceRoot.replace(/\\/g, '/');
+                        const fixedCmd = `Get-ChildItem -Path '${wsRootGrep}' -Recurse -Filter '*.${includeExt}' | Where-Object { $_.FullName -notmatch '__pycache__|htmlcov|venv' } | Select-String -Pattern '${bestWord}' | Select-Object Path,LineNumber,Line | Select-Object -First 20`;
+                        logInfo(`[shell_read] Auto-converted Unix grep to PowerShell (pattern: "${rawPattern}" → keyword: "${bestWord}"): ${fixedCmd}`);
+                        cmd = fixedCmd;
+                        if (isMultiWord) {
+                            // Append a note to the result so the model doesn't split and re-search each word
+                            const origResult = await this.runShellRead(cmd, root, _toolId);
+                            return origResult + `\n\n[NOTE] Your original pattern "${rawPattern}" was a multi-word phrase — no file contains that exact string. Searched for "${bestWord}" instead. Do NOT repeat this search with the other words separately. If these results aren't what you need, search for a more specific identifier (e.g. a function name, class name, or API endpoint).`;
+                        }
+                    }
+                }
+
                 // Block commands that modify state
                 const WRITE_PATTERNS = [
                     /\brm\b/, /\bdel\b/, /\bmkdir\b/, /\brmdir\b/,
@@ -4640,6 +5554,63 @@ Do NOT assume you have no memory — check first.`;
                     }
                 }
 
+                // Auto-fix: Select-String does NOT support -Recurse.
+                // Only applies when -Recurse is an argument to Select-String, not when it's on a piped Get-ChildItem.
+                {
+                    const pipeIdx2 = cmd.indexOf('|');
+                    const afterPipe2 = pipeIdx2 >= 0 ? cmd.slice(pipeIdx2) : '';
+                    const ssIsFirst = /^\s*Select-String\b/i.test(cmd);
+                    const recurseAfterPipe2 = afterPipe2 && /-Recurse\b/i.test(afterPipe2);
+                    if (recurseAfterPipe2 || ssIsFirst && /-Recurse\b/i.test(cmd)) {
+                        const pathMatch = cmd.match(/-Path\s+['"]([^'"]+)['"]/i);
+                        const patternMatch = cmd.match(/-Pattern\s+['"]([^'"]+)['"]/i);
+                        if (pathMatch && patternMatch) {
+                            const rawPath = pathMatch[1];
+                            const pattern = patternMatch[1];
+                            const extMatch = rawPath.match(/\*\.(\w+)$/);
+                            const filterArg = extMatch ? ` -Filter '*.${extMatch[1]}'` : '';
+                            const baseDir = rawPath.replace(/[\\/]\*\*[\\/]\*\.\w+$/, '').replace(/[\\/]\*\.\w+$/, '') || rawPath;
+                            const trailingPipeMatch2 = cmd.match(/\|\s*(Select-Object.+)$/i);
+                            const trailingPipe2 = trailingPipeMatch2 ? ` | ${trailingPipeMatch2[1]}` : ' | Select-Object Path,LineNumber,Line | Select-Object -First 30';
+                            const fixed = `Get-ChildItem -Path '${baseDir}' -Recurse${filterArg} | Select-String -Pattern '${pattern}'${trailingPipe2}`;
+                            logInfo(`[run_command] Auto-fixed Select-String -Recurse → ${fixed}`);
+                            cmd = fixed;
+                        } else if (recurseAfterPipe2) {
+                            const beforePipe2 = cmd.slice(0, pipeIdx2);
+                            const fixedAfterPipe2 = afterPipe2.replace(/\s+-Recurse\b/gi, '');
+                            cmd = beforePipe2 + fixedAfterPipe2;
+                            logInfo(`[run_command] Stripped -Recurse from Select-String portion: ${cmd}`);
+                        }
+                    }
+                }
+
+                // Auto-fix: Set-Content and Out-File default to UTF-16 on Windows PowerShell 5.
+                // Inject -Encoding UTF8 if not already present to prevent creating UTF-16 source files.
+                if (/\b(Set-Content|Out-File|Add-Content)\b/i.test(cmd) && !/\-Encoding\b/i.test(cmd)) {
+                    cmd = cmd.replace(/\b(Set-Content|Out-File|Add-Content)\b/gi, '$1 -Encoding UTF8');
+                    logInfo(`[run_command] Auto-added -Encoding UTF8 to Set-Content/Out-File/Add-Content: ${cmd}`);
+                }
+
+                // Block New-Item -ItemType File on source files — the agent should use edit_file instead.
+                // When a file "doesn't exist", the real problem is usually a wrong path, not a missing file.
+                const newItemFileMatch = cmd.match(/New-Item\b.*-ItemType\s+File\b.*['"]([^'"]+\.(py|ts|js|html|css|rb|go|java|cs|php|json|yaml|yml))['"]/i)
+                    ?? cmd.match(/New-Item\b.*['"]([^'"]+\.(py|ts|js|html|css|rb|go|java|cs|php|json|yaml|yml))['"].*-ItemType\s+File\b/i);
+                if (newItemFileMatch) {
+                    const targetFile4 = newItemFileMatch[1];
+                    const wsRoot5 = this.workspaceRoot.replace(/\\/g, '/');
+                    const fileName5 = path.basename(targetFile4);
+                    return `[BLOCKED: New-Item cannot create source files]\n\nDo NOT create "${targetFile4}" with New-Item. The file you want to edit already exists somewhere in the project — you have the wrong path.\n\nSearch for it first:\nshell_read with command="Get-ChildItem -Path '${wsRoot5}' -Recurse -Filter '${fileName5}' | Where-Object { \\$_.FullName -notmatch '__pycache__|htmlcov' } | Select-Object FullName"\n\nIf the file genuinely needs to be created (e.g. a brand new feature file), use edit_file with old_string="" and new_string=<full content> instead.`;
+                }
+
+                // Block echo >> / echo > on source files — newlines are collapsed, producing broken code.
+                // Redirect to edit_file which handles multi-line content correctly.
+                const echoRedirectMatch = cmd.match(/\becho\b.+?(>>?)\s*['"]?([^\s'"]+\.(py|ts|js|html|css|rb|go|java|cs|php|json|yaml|yml))/i);
+                if (echoRedirectMatch) {
+                    const targetFile = echoRedirectMatch[2];
+                    const echoBlockMsg = `[BLOCKED: echo cannot write multi-line code]\n\nUsing echo to write source code to "${targetFile}" collapses all newlines into a single line, producing broken/unparseable code.\n\nTo create or append to this file, use edit_file instead:\n- To create a new file: edit_file with path="${targetFile}", old_string="" (empty), new_string=<full file content>\n- To append a function: edit_file with path="${targetFile}", old_string=<last line of file>, new_string=<last line + new function>\n\nDo NOT use echo, Add-Content, or any shell redirect to write source code files.`;
+                    return echoBlockMsg;
+                }
+
                 // Safety: reject obviously dangerous patterns
                 const DANGEROUS = [
                     /\brm\s+-rf\s+\//, /\bmkfs\b/, /\bdd\s+if=/,
@@ -4713,19 +5684,30 @@ Do NOT assume you have no memory — check first.`;
                 const limit = args.limit !== undefined ? Number(args.limit) : undefined;
                 
                 const results = await this.memory.searchMemory(query, tier, limit);
-                
+
                 if (results.length === 0) {
                     return `No relevant memories found for "${query}".`;
                 }
-                
+
+                // Record search_result access for every returned entry
+                for (const entry of results) {
+                    this.memory.recordAccess(entry.id, 'search_result');
+                }
+
+                // Track which entries were surfaced this turn so we can upgrade
+                // to search_hit if the model references their content in its response
+                for (const entry of results) {
+                    this._recentSearchResultIds.add(entry.id);
+                }
+
                 let output = `Semantic search results for "${query}" (${results.length} found):\n\n`;
                 results.forEach((entry, i) => {
                     const score = entry.relevanceScore ? ` (relevance: ${(entry.relevanceScore * 100).toFixed(0)}%)` : '';
                     const tags = entry.tags && entry.tags.length ? ` [${entry.tags.join(', ')}]` : '';
-                    output += `[${i + 1}] Tier ${entry.tier}${tags}${score}\n`;
+                    output += `[${i + 1}] id=${entry.id} Tier ${entry.tier}${tags}${score}\n`;
                     output += `${entry.content}\n\n`;
                 });
-                
+
                 return output.trim();
             }
 
@@ -4903,7 +5885,7 @@ Do NOT assume you have no memory — check first.`;
             const isPSCmd = process.platform === 'win32'
                 && /Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Measure-Object|Sort-Object|\$_|\$PSItem/.test(cmd);
             const child = isPSCmd
-                ? spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { cwd, env: { ...process.env } })
+                ? spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], { cwd, env: { ...process.env } })
                 : spawn(cmd, { cwd, env: { ...process.env }, shell: true });
             this.trackChild(child);
 
@@ -4967,7 +5949,7 @@ Do NOT assume you have no memory — check first.`;
             const isPowerShellCmd = process.platform === 'win32'
                 && /Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Out-Host|Measure-Object|Sort-Object|\$_|\$PSItem/.test(cmd);
             const spawnArgs: [string, string[], object] = isPowerShellCmd
-                ? ['powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', cmd], { cwd, env: { ...process.env } }]
+                ? ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], { cwd, env: { ...process.env } }]
                 : [cmd, [], { cwd, env: { ...process.env }, shell: true }];
             const child = spawn(...spawnArgs);
             this.trackChild(child);
@@ -6307,7 +7289,7 @@ Do NOT assume you have no memory — check first.`;
         return true;
     }
 
-    private async preProcessEditTask(userMessage: string, post: PostFn): Promise<{ injection: string; blocked: string | null }> {
+    private async preProcessEditTask(userMessage: string, post: PostFn): Promise<{ injection: string; blocked: string | null; pendingSteps: string[] }> {
         const root = this.workspaceRoot;
 
         // ── 1. Extract keywords ──────────────────────────────────────────────
@@ -6341,7 +7323,7 @@ Do NOT assume you have no memory — check first.`;
         const hasPy = fs.existsSync(path.join(root, 'pyproject.toml')) || fs.existsSync(path.join(root, 'requirements.txt')) || fs.existsSync(path.join(root, 'setup.py'));
         const extensions = hasPy ? ['.py'] : hasTs ? ['.ts', '.js', '.tsx', '.jsx'] : ['.py', '.ts', '.js', '.go', '.java', '.rs'];
 
-        if (filenameKeywords.length === 0) { return { injection: '', blocked: null }; }
+        if (filenameKeywords.length === 0) { return { injection: '', blocked: null, pendingSteps: [] }; }
 
         const fullServiceName = serviceMatch ? serviceMatch[1].toLowerCase() : undefined;
 
@@ -6389,7 +7371,7 @@ Do NOT assume you have no memory — check first.`;
 
             if (candidates.length === 0) {
                 logInfo('[pre-edit] No candidates found — falling through');
-                return { injection: '', blocked: null };
+                return { injection: '', blocked: null, pendingSteps: [] };
             }
 
             // Re-rank: if any candidate's basename exactly matches a filename keyword,
@@ -6426,7 +7408,81 @@ Do NOT assume you have no memory — check first.`;
 
         if (!targetRelPath || !targetContent) {
             logInfo('[pre-edit] Could not read target file — falling through');
-            return { injection: '', blocked: null };
+            return { injection: '', blocked: null, pendingSteps: [] };
+        }
+
+        // ── 3b. Proactive stub detection ──────────────────────────────────────
+        // If the resolved file is a stub (< 15 lines, no real HTML markers), find the real file
+        // and redirect the model BEFORE it ever sees the stub content.
+        const isHtmlTarget = /\.html$/i.test(targetRelPath);
+        let stubWarning = '';
+        let stubRealFile: { relPath: string; content: string } | null = null;
+        if (isHtmlTarget) {
+            const stubLineCount = targetContent.split('\n').length;
+            const hasRealMarkers = /<!DOCTYPE|<html|{%\s*extends|{%\s*block/i.test(targetContent);
+            if (stubLineCount < 15 && !hasRealMarkers) {
+                logInfo(`[pre-edit] Stub detected: ${targetRelPath} (${stubLineCount} lines, no HTML markers) — searching for real template`);
+                // Extract a keyword from the stub to drive the search
+                const stubKw = targetContent.match(/\{\{\s*form\.(\w+)|id=["'](\w+)["']|name=["'](\w+)["']/)?.[1]
+                    ?? path.basename(targetRelPath, '.html').replace(/[_-]/g, ' ');
+                // Walk app/templates recursively for large HTML files containing the keyword
+                const templatesDir = path.join(root, 'app', 'templates');
+                if (fs.existsSync(templatesDir)) {
+                    const walkHtml = (dir: string): string[] => {
+                        const results: string[] = [];
+                        try {
+                            for (const f of fs.readdirSync(dir)) {
+                                const abs = path.join(dir, f);
+                                try {
+                                    const st = fs.statSync(abs);
+                                    if (st.isDirectory()) { results.push(...walkHtml(abs)); }
+                                    else if (f.endsWith('.html') && st.size > 5_000) { results.push(abs); }
+                                } catch { /* skip */ }
+                            }
+                        } catch { /* skip */ }
+                        return results;
+                    };
+                    const htmlFiles = walkHtml(templatesDir);
+                    for (const absHtml of htmlFiles) {
+                        try {
+                            const c = fs.readFileSync(absHtml, 'utf8');
+                            if (/<!DOCTYPE|<html|{%\s*extends|{%\s*block/i.test(c) && c.toLowerCase().includes(stubKw.toLowerCase())) {
+                                const rel = path.relative(root, absHtml).replace(/\\/g, '/');
+                                stubRealFile = { relPath: rel, content: c };
+                                logInfo(`[pre-edit] Real template found: ${rel}`);
+                                break;
+                            }
+                        } catch { /* skip */ }
+                    }
+                }
+                if (stubRealFile) {
+                    const stubOrigPath = targetRelPath;
+                    stubWarning = `⚠ STUB REDIRECT: "${stubOrigPath}" is a stub placeholder (${stubLineCount} lines, no HTML structure). ` +
+                        `The real template is "${stubRealFile.relPath}". ` +
+                        `Do NOT edit the stub — all edits must go to the real file shown below.`;
+                    // Swap target to the real file
+                    targetRelPath = stubRealFile.relPath;
+                    targetContent = stubRealFile.content;
+                    logInfo(`[pre-edit] Redirected target from stub to: ${targetRelPath}`);
+                    // Update task state machine
+                    if (this._activeTask) {
+                        if (!this._activeTask.filesRuledOut.includes(stubOrigPath)) {
+                            this._activeTask.filesRuledOut.push(stubOrigPath);
+                        }
+                        if (!this._activeTask.filesConfirmed.includes(targetRelPath)) {
+                            this._activeTask.filesConfirmed.push(targetRelPath);
+                        }
+                    }
+                    // Save discovery to memory
+                    if (this.memory) {
+                        const memNote = `Stub redirect: stub at "${stubOrigPath}" → real template: "${stubRealFile.relPath}" (${stubRealFile.content.split('\n').length} lines).`;
+                        this.memory.addEntry(2, memNote, ['stub', 'template', 'auto-discovery']).catch(() => {});
+                    }
+                } else {
+                    stubWarning = `⚠ STUB WARNING: "${targetRelPath}" appears to be a stub placeholder (${stubLineCount} lines, no HTML structure). ` +
+                        `Search app/templates/ for the real template before editing.`;
+                }
+            }
         }
 
         // ── 4. Research phase — gather grounded context ──────────────────────
@@ -6532,6 +7588,141 @@ Do NOT assume you have no memory — check first.`;
                 const names = (importMatch[1] || importMatch[2] || '')
                     .split(',').map(s => s.trim().replace(/\s+as\s+\w+/, '').trim()).filter(Boolean);
                 importedNames.push(...names);
+            }
+        }
+
+        // ── 4c. Column/field existence check (Fix 1c) ────────────────────────
+        // When task is "add X field/column to form/template", check whether the column
+        // already exists in the model file. If it does, redirect: model job is form+JS only.
+        let columnExistsNote = '';
+        const isAddFieldTask = /\badd\b.{0,40}\b(field|column|input|attribute)\b/i.test(userMessage)
+            || /\b(field|column)\b.{0,40}\b(form|template|inline)\b/i.test(userMessage);
+        if (isAddFieldTask && hasPy) {
+            // Extract the field name from the user message
+            const fieldMatch = userMessage.match(
+                /\badd\s+(?:a\s+|an\s+)?(?:new\s+)?[`"']?([a-z][a-z0-9_]*(?:[\s_][a-z0-9_]+){0,3})[`"']?\s+(?:field|column|input|attribute)/i
+            ) ?? userMessage.match(/[`"']([a-z][a-z0-9_]+)[`"']/i);
+            const rawFieldName = fieldMatch?.[1]?.trim().toLowerCase().replace(/\s+/g, '_') ?? '';
+            if (rawFieldName.length > 2) {
+                // Look in every model file for this column
+                const modelsDir = path.join(root, 'app', 'models');
+                if (fs.existsSync(modelsDir)) {
+                    for (const mf of fs.readdirSync(modelsDir).filter(f => f.endsWith('.py'))) {
+                        try {
+                            const mc = fs.readFileSync(path.join(modelsDir, mf), 'utf8');
+                            // Match: field_name = db.Column(... or field_name = Column(...
+                            const colRe = new RegExp(`^\\s{4,}(${rawFieldName})\\s*=\\s*(?:db\\.|sa\\.)?Column\\s*\\(`, 'im');
+                            const colMatch = mc.match(colRe);
+                            if (colMatch) {
+                                columnExistsNote = `✓ Column \`${colMatch[1]}\` already exists in \`app/models/${mf}\`. ` +
+                                    `Do NOT add it to the model again. Your task is to add the form field to the HTML template and the JS submit handler only.`;
+                                logInfo(`[pre-edit] Column exists: ${colMatch[1]} in ${mf}`);
+                                // Save to memory
+                                if (this.memory) {
+                                    const memNote = `Column \`${colMatch[1]}\` confirmed in app/models/${mf} (checked ${new Date().toLocaleDateString()}).`;
+                                    this.memory.addEntry(2, memNote, ['schema', 'auto-discovery']).catch(() => {});
+                                }
+                                break;
+                            }
+                        } catch { /* skip */ }
+                    }
+                }
+            }
+        }
+
+        // ── 4d. Full-stack breadcrumb for form tasks (Fix 1a) ─────────────────
+        // When task involves a form field (add/update field in form/template),
+        // proactively find the JS submit handler and the backend route that processes the POST.
+        // Inject all three file locations so the model knows the full surface area.
+        interface FormFile { relPath: string; lineHint: number; snippet: string }
+        let formJsHandler: FormFile | null = null;
+        let formBackendRoute: FormFile | null = null;
+        const isFormTask = /\b(form|template|inline|frontend|html)\b/i.test(userMessage)
+            || /\badd\b.{0,40}\b(field|column|input)\b/i.test(userMessage);
+        if (isFormTask && hasPy) {
+            // Extract entity keyword (e.g. "transaction", "customer") from user message
+            const entityKw = userMessage.toLowerCase().match(
+                /\b(transaction|customer|cashier|product|inventory|order|invoice|sale|item|vehicle|employee|staff)\b/
+            )?.[1] ?? contentKws[0] ?? '';
+
+            // Search JS files for a submit/fetch/ajax call referencing this entity
+            const staticDir = path.join(root, 'app', 'static');
+            const walkJs = (dir: string): string[] => {
+                const out: string[] = [];
+                try {
+                    for (const f of fs.readdirSync(dir)) {
+                        const abs = path.join(dir, f);
+                        try {
+                            if (fs.statSync(abs).isDirectory()) { out.push(...walkJs(abs)); }
+                            else if (/\.(js|ts)$/.test(f) && !/\.min\.js$/.test(f)) { out.push(abs); }
+                        } catch { /* skip */ }
+                    }
+                } catch { /* skip */ }
+                return out;
+            };
+            const jsFiles = fs.existsSync(staticDir) ? walkJs(staticDir) : [];
+            for (const jsAbs of jsFiles) {
+                try {
+                    const jsContent = fs.readFileSync(jsAbs, 'utf8');
+                    const jsLines = jsContent.split('\n');
+                    // Look for fetch/XMLHttpRequest/$.ajax referencing the entity AND form data
+                    const submitIdx = jsLines.findIndex((l, i) => {
+                        const lower = l.toLowerCase();
+                        return (lower.includes('fetch(') || lower.includes('xmlhttprequest') || lower.includes('$.ajax') || lower.includes('formdata'))
+                            && (entityKw ? jsContent.toLowerCase().includes(entityKw) : true)
+                            && (jsLines.slice(Math.max(0, i - 5), i + 10).some(ll => /append|formdata|body.*json|submit/i.test(ll)));
+                    });
+                    if (submitIdx >= 0) {
+                        const snippet = jsLines.slice(Math.max(0, submitIdx - 2), Math.min(jsLines.length, submitIdx + 8)).join('\n');
+                        formJsHandler = {
+                            relPath: path.relative(root, jsAbs).replace(/\\/g, '/'),
+                            lineHint: submitIdx + 1,
+                            snippet,
+                        };
+                        logInfo(`[pre-edit] JS submit handler: ${formJsHandler.relPath} ~line ${submitIdx + 1}`);
+                        if (this.memory) {
+                            this.memory.addEntry(2,
+                                `JS submit handler for ${entityKw || 'form'}: ${formJsHandler.relPath} ~line ${submitIdx + 1}`,
+                                ['js-handler', 'form', 'auto-discovery']
+                            ).catch(() => {});
+                        }
+                        break;
+                    }
+                } catch { /* skip */ }
+            }
+
+            // Search Python routes for a POST handler referencing the entity
+            const routesDir = path.join(root, 'app', 'routes');
+            const routesDirAlt = path.join(root, 'app', 'views');
+            const routesSearch = [routesDir, routesDirAlt].filter(d => fs.existsSync(d));
+            outer: for (const rDir of routesSearch) {
+                for (const rf of fs.readdirSync(rDir).filter(f => f.endsWith('.py'))) {
+                    try {
+                        const rc = fs.readFileSync(path.join(rDir, rf), 'utf8');
+                        const rcLines = rc.split('\n');
+                        const postIdx = rcLines.findIndex((l, i) => {
+                            return /['"]POST['"]/i.test(l)
+                                && (entityKw ? rc.toLowerCase().includes(entityKw) : true)
+                                && rcLines.slice(Math.max(0, i - 1), i + 3).some(ll => /@\w+\.route/.test(ll));
+                        });
+                        if (postIdx >= 0) {
+                            const snippet = rcLines.slice(Math.max(0, postIdx - 1), Math.min(rcLines.length, postIdx + 8)).join('\n');
+                            formBackendRoute = {
+                                relPath: path.relative(root, path.join(rDir, rf)).replace(/\\/g, '/'),
+                                lineHint: postIdx + 1,
+                                snippet,
+                            };
+                            logInfo(`[pre-edit] Backend POST route: ${formBackendRoute.relPath} ~line ${postIdx + 1}`);
+                            if (this.memory) {
+                                this.memory.addEntry(2,
+                                    `Backend POST route for ${entityKw || 'form'}: ${formBackendRoute.relPath} ~line ${postIdx + 1}`,
+                                    ['route', 'form', 'auto-discovery']
+                                ).catch(() => {});
+                            }
+                            break outer;
+                        }
+                    } catch { /* skip */ }
+                }
             }
         }
 
@@ -6685,9 +7876,20 @@ Do NOT assume you have no memory — check first.`;
                         || d.toLowerCase().replace(/_/g, '') === hit.toLowerCase().replace(/_/g, ''));
                     const msg = `Already exists: \`${matchedDef ?? hit}\` is already defined in \`${targetRelPath}\`. No change needed.`;
                     logInfo(`[pre-edit] Programmatic duplicate block: ${msg}`);
-                    return { injection: '', blocked: msg };
+                    return { injection: '', blocked: msg, pendingSteps: [] };
                 }
             }
+        }
+
+        // ── 4f. Auto-save target file resolution to memory (Fix 4a) ─────────────
+        if (this.memory && targetRelPath) {
+            const lineCount = targetContent.split('\n').length;
+            const memNote = `Target file for "${userMessage.slice(0, 60)}": ${targetRelPath} (${lineCount} lines, resolved ${new Date().toLocaleDateString()})`;
+            this.memory.isSemanticDuplicate(targetRelPath, 0.9).then(isDupe => {
+                if (!isDupe) {
+                    this.memory!.addEntry(2, memNote, ['file-resolution', 'auto-discovery']).catch(() => {});
+                }
+            }).catch(() => {});
         }
 
         // ── 6. Assemble the injection ────────────────────────────────────────
@@ -6695,6 +7897,31 @@ Do NOT assume you have no memory — check first.`;
 
         sections.push(`[PRE-LOADED CONTEXT for your task]`);
         sections.push(`Line numbers are for edit_file_at_line only — they are NOT part of the file.\n`);
+
+        // Stub redirect warning — shown first so model cannot miss it
+        if (stubWarning) {
+            sections.push(`## ⚠ ${stubWarning}\n`);
+        }
+
+        // Column existence note — shown before file content so model knows the job scope upfront
+        if (columnExistsNote) {
+            sections.push(`## ✓ Schema check\n${columnExistsNote}\n`);
+        }
+
+        // Full-stack form breadcrumb — all surfaces the model needs to touch
+        if (formJsHandler || formBackendRoute) {
+            sections.push(`## Full-stack form surface — you must update ALL of these`);
+            sections.push(`The task requires changes across multiple files. Do NOT stop after editing one.`);
+            if (formJsHandler) {
+                sections.push(`**JS submit handler:** \`${formJsHandler.relPath}\` ~line ${formJsHandler.lineHint}`);
+                sections.push(`\`\`\`js\n${formJsHandler.snippet}\n\`\`\``);
+            }
+            if (formBackendRoute) {
+                sections.push(`**Backend POST route:** \`${formBackendRoute.relPath}\` ~line ${formBackendRoute.lineHint}`);
+                sections.push(`\`\`\`python\n${formBackendRoute.snippet}\n\`\`\``);
+            }
+            sections.push('');
+        }
 
         // Models inventory FIRST — model must see what's available before reading the file
         if (modelsInventory.length > 0) {
@@ -6766,6 +7993,35 @@ Do NOT assume you have no memory — check first.`;
             || /\b(no\s+error|no\s+try)\b/i.test(userMessage)
             || /\b(add|fix).{0,30}\b(all|every|each|any)\b/i.test(userMessage);
 
+        // ── Fix 6b: Task-specific completion checklist ───────────────────────
+        // Build a concrete "done when" checklist based on what we discovered.
+        // The model must check every item before declaring the task complete.
+        const completionChecks: string[] = [];
+        if (isFormTask && !isSweepTask) {
+            // Extract the specific field name if we found it
+            const fieldNameForChecklist = columnExistsNote.match(/`([a-z_]+)`/)?.[1] ?? contentKws[0] ?? 'the field';
+            completionChecks.push(`[ ] HTML input for \`${fieldNameForChecklist}\` added to \`${targetRelPath}\``);
+            if (formJsHandler) {
+                completionChecks.push(`[ ] JS submit handler in \`${formJsHandler.relPath}\` includes \`${fieldNameForChecklist}\` key`);
+            }
+            if (formBackendRoute) {
+                completionChecks.push(`[ ] Backend route in \`${formBackendRoute.relPath}\` reads \`request.form.get('${fieldNameForChecklist}')\``);
+            }
+            if (!columnExistsNote) {
+                // Column doesn't exist yet — migration needed
+                completionChecks.push(`[ ] Column \`${fieldNameForChecklist}\` added to model file`);
+                completionChecks.push(`[ ] User informed: "Run flask db migrate && flask db upgrade"`);
+            }
+        } else if (/\badd\b.{0,30}\broute\b/i.test(userMessage) && !isSweepTask) {
+            completionChecks.push(`[ ] Route function added to \`${targetRelPath}\``);
+            completionChecks.push(`[ ] Route is registered on the correct blueprint (not a duplicate path)`);
+            completionChecks.push(`[ ] Syntax check passes (no import errors, no undefined names)`);
+        } else if (/\bfix\b/i.test(userMessage) && !isSweepTask) {
+            completionChecks.push(`[ ] edit_file called and confirmed`);
+            completionChecks.push(`[ ] Error pattern no longer present in file`);
+            completionChecks.push(`[ ] Syntax check passes`);
+        }
+
         // Instructions
         sections.push(`\n## Your task`);
         if (isSweepTask) {
@@ -6826,6 +8082,16 @@ Do NOT assume you have no memory — check first.`;
             }
         }
 
+        // Fix 6b: Completion checklist appended after task instructions
+        if (completionChecks.length > 0) {
+            sections.push(`\n## TASK COMPLETE WHEN ALL ARE DONE`);
+            sections.push(`Do not declare the task complete until every item is checked:`);
+            sections.push(completionChecks.join('\n'));
+            if (formJsHandler || formBackendRoute) {
+                sections.push(`\nThis task touches multiple files. Edit ALL of them before responding to the user.`);
+            }
+        }
+
         // Post reasoning card to UI
         post({
             type: 'reasoningCard',
@@ -6834,13 +8100,13 @@ Do NOT assume you have no memory — check first.`;
             functions: definedFunctions,
             fields: definedFields,
             modelCount: modelsInventory.length,
-            warnings: preValidationWarnings,
+            warnings: [...preValidationWarnings, ...(stubWarning ? [stubWarning] : []), ...(columnExistsNote ? [columnExistsNote] : [])],
             hasPattern: !!patternExample,
             isSweep: isSweepTask,
         });
 
         const injection = sections.join('\n');
-        logInfo(`[pre-edit] Injected ${injection.length} chars — file: ${targetRelPath}, models: ${modelsInventory.length}, routes: ${definedRoutes.length}, callers: ${callerReport.reduce((a, c) => a + c.callers.length, 0)} (${callerReport.reduce((a, c) => Math.max(a, c.hopCount), 0)} hops), warnings: ${preValidationWarnings.length}`);
-        return { injection, blocked: null };
+        logInfo(`[pre-edit] Injected ${injection.length} chars — file: ${targetRelPath}, models: ${modelsInventory.length}, routes: ${definedRoutes.length}, callers: ${callerReport.reduce((a, c) => a + c.callers.length, 0)} (${callerReport.reduce((a, c) => Math.max(a, c.hopCount), 0)} hops), warnings: ${preValidationWarnings.length}, stub: ${!!stubWarning}, colExists: ${!!columnExistsNote}, jsHandler: ${!!formJsHandler}, backendRoute: ${!!formBackendRoute}`);
+        return { injection, blocked: null, pendingSteps: completionChecks };
     }
 }

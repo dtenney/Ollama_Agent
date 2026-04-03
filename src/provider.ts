@@ -2,7 +2,8 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { Agent, PostFn } from './agent';
 import { fetchModels, rawGet, streamChatRequest, generateChatTitle } from './ollamaClient';
-import { getConfig } from './config';
+import { getConfig, getOpenClawConfig } from './config';
+import { dispatchTask, checkConnection } from './openClawClient';
 import { getActiveContext, buildContextString } from './context';
 import { logInfo, logError, channel, toErrorMessage } from './logger';
 import { ChatStorage, ChatSession, StoredMessage, deriveTitle, relativeTime } from './chatStorage';
@@ -221,7 +222,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
         webviewView.webview.options = { enableScripts: true };
 
-        const post = (m: object) => webviewView.webview.postMessage(m);
+        const post = (m: object) => this._view?.webview.postMessage(m);
 
         this._messageListener?.dispose();
         this._messageListener = webviewView.webview.onDidReceiveMessage(async (raw: WebviewMsg) => {
@@ -248,6 +249,37 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     this._running = true;
 
                     logInfo(`[user] ${text.slice(0, 120)}${text.length > 120 ? '…' : ''}`);
+
+                    // ── /openclaw <query> ─────────────────────────────────
+                    if (/^\/openclaw\b/i.test(text)) {
+                        this._running = false;
+                        const query = text.replace(/^\/openclaw\s*/i, '').trim();
+                        const ocCfg = getOpenClawConfig();
+                        this.appendToSession({ role: 'user', content: text, timestamp: Date.now() });
+                        if (!ocCfg.baseUrl) {
+                            post({ type: 'error', text: 'OpenCLAW is not configured. Set `ollamaAgent.openClaw.baseUrl` in VS Code settings.' });
+                            break;
+                        }
+                        if (!query) {
+                            post({ type: 'error', text: 'Usage: /openclaw <your task or question>' });
+                            break;
+                        }
+                        const taskId = `oc_${Date.now()}`;
+                        post({ type: 'openClawDispatched', taskId, query });
+                        logInfo(`[openclaw] Task dispatched: ${query.slice(0, 80)}`);
+                        dispatchTask(query, ocCfg, (result) => {
+                            if (result.error) {
+                                post({ type: 'openClawResult', taskId, error: result.error, durationMs: result.durationMs });
+                                this.appendToSession({ role: 'error', content: `OpenCLAW error: ${result.error}`, timestamp: Date.now() });
+                            } else {
+                                post({ type: 'openClawResult', taskId, content: result.content, durationMs: result.durationMs });
+                                const saved = `**OpenCLAW result** *(${Math.round(result.durationMs / 1000)}s)*\n\n${result.content}`;
+                                this.appendToSession({ role: 'assistant', content: saved, timestamp: Date.now() });
+                            }
+                            this.persistSession();
+                        });
+                        break;
+                    }
 
                     // Record user message (display text only, no injected context)
                     this.appendToSession({ role: 'user', content: text, timestamp: Date.now() });

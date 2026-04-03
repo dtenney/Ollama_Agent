@@ -621,7 +621,8 @@ Any model available in Ollama works with this extension. Models known to work we
 
 | Model | Size | Notes |
 |---|---|---|
-| `qwen2.5-coder:7b` | ~4 GB | ⭐ Recommended — excellent at coding, native tools, large context |
+| `qwen3.5:27b` | ~16 GB | ⭐⭐ Best results — 262k context, thinking mode, excellent multi-file agentic tasks |
+| `qwen2.5-coder:7b` | ~4 GB | ⭐ Recommended for 8GB VRAM — excellent at coding, native tools, large context |
 | `qwen2.5-coder:1.5b` | ~1 GB | Fastest, good for quick tasks |
 | `llama3.1:8b` | ~5 GB | General purpose, high quality |
 | `phi3:mini` | ~2 GB | Very fast, good for simple tasks |
@@ -630,6 +631,8 @@ Any model available in Ollama works with this extension. Models known to work we
 | `deepseek-coder:6.7b` | ~4 GB | Strong at code tasks |
 | `deepseek-r1:8b` | ~5 GB | Reasoning model, excellent for complex refactors |
 | `llama2` | ~4 GB | Classic, text-mode fallback activated automatically |
+
+> **Thinking models:** `qwen3.5`, `deepseek-r1`, and similar reasoning models work best with `ollamaAgent.enableThinking: true`. The agent will show a collapsible "Thought process" block before each response.
 
 > **Token limits:** The token counter in the footer automatically adapts to the known context window of your selected model. If your model is not in the built-in list, a safe default of 8 192 tokens is assumed.
 

@@ -397,6 +397,9 @@ function renderMarkdown(text) {
     // 4. Escape remaining HTML
     text = escHtml(text);
 
+    // 4b. Collapse blank lines between consecutive list items
+    text = text.replace(/^(\s*[-*\d].*)\n\n(?=\s*[-*\d])/gm, '$1\n');
+
     // 5. Block-level markdown
     text = text.replace(/^#{4} (.+)$/gm, '<h4>$1</h4>');
     text = text.replace(/^#{3} (.+)$/gm, '<h3>$1</h3>');
@@ -916,6 +919,55 @@ function friendlyErrorMsg(raw) {
     return `⚠ ${escHtml(raw)}`;
 }
 
+function addOpenClawPending(taskId, query) {
+    finalizeMessage();
+    const div = document.createElement('div');
+    div.className = 'message openclaw-card';
+    div.dataset.taskId = taskId;
+    div.innerHTML =
+        `<div class="msg-header">` +
+            `<span class="msg-role" style="color:var(--vscode-terminal-ansiCyan,#5af)">⚙ OpenCLAW</span>` +
+            `<time class="msg-time">${getTimeStr()}</time>` +
+        `</div>` +
+        `<div class="openclaw-query">${escHtml(query)}</div>` +
+        `<div class="openclaw-status">` +
+            `<span class="openclaw-spinner">◌</span> Working — you can keep coding…` +
+        `</div>`;
+    messagesEl.insertBefore(div, scrollBtn);
+    // Spin the spinner
+    const spinner = div.querySelector('.openclaw-spinner');
+    const frames = ['◌','◎','●','◎'];
+    let fi = 0;
+    const interval = setInterval(() => {
+        if (!div.isConnected) { clearInterval(interval); return; }
+        if (!div.querySelector('.openclaw-spinner')) { clearInterval(interval); return; }
+        spinner.textContent = frames[fi++ % frames.length];
+    }, 300);
+    div._spinnerInterval = interval;
+    scrollBottom(true);
+}
+
+function resolveOpenClawCard(taskId, content, error, durationMs) {
+    const div = messagesEl.querySelector(`.openclaw-card[data-task-id="${CSS.escape(taskId)}"]`);
+    if (!div) { return; }
+    if (div._spinnerInterval) { clearInterval(div._spinnerInterval); }
+    const secs = durationMs ? `${Math.round(durationMs / 1000)}s` : '';
+    const statusEl = div.querySelector('.openclaw-status');
+    if (error) {
+        if (statusEl) { statusEl.innerHTML = `<span style="color:var(--vscode-errorForeground,#f48771)">✗ Failed: ${escHtml(error)}</span>`; }
+    } else {
+        if (statusEl) { statusEl.innerHTML = `<span style="opacity:0.6">✓ Done${secs ? ` in ${secs}` : ''}</span>`; }
+        const resultEl = document.createElement('div');
+        resultEl.className = 'msg-content openclaw-result';
+        resultEl.innerHTML = renderMarkdown(content ?? '');
+        div.appendChild(resultEl);
+        if (typeof hljs !== 'undefined') {
+            resultEl.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
+        }
+    }
+    scrollBottom(true);
+}
+
 function addErrorMessage(text) {
     finalizeMessage();
     const div = document.createElement('div');
@@ -1269,38 +1321,85 @@ function addFileToastSimple(icon, text) {
 function addConfirmCard(id, action, detail, toolName) {
     const icons = { run: '⚡', write: '💾', rename: '🔄', delete: '🗑️', edit: '✏️' };
     const icon = icons[action] || '❓';
-    const div = document.createElement('div');
-    div.className = 'confirm-card';
-    div.id = `confirm-${id}`;
-    div.innerHTML =
-        `<div class="confirm-header">` +
-            `<span class="confirm-icon">${icon}</span>` +
-            `<span class="confirm-detail">${escHtml(detail)}</span>` +
-        `</div>` +
-        `<div class="confirm-actions">` +
-            `<button class="confirm-btn accept">Accept</button>` +
-            `<button class="confirm-btn accept-all" title="Accept this and all future ${escHtml(toolName || action)} calls">Accept All</button>` +
-            `<button class="confirm-btn reject">Reject</button>` +
-        `</div>`;
-    const acceptBtn = div.querySelector('.confirm-btn.accept');
-    const acceptAllBtn = div.querySelector('.confirm-btn.accept-all');
-    const rejectBtn = div.querySelector('.confirm-btn.reject');
-    acceptBtn.addEventListener('click', () => {
-        vscode.postMessage({ command: 'confirmResponse', id, accepted: true });
-        div.classList.add('accepted');
-        div.querySelector('.confirm-actions').innerHTML = '<span class="confirm-resolved">✅ Accepted</span>';
-    });
-    acceptAllBtn.addEventListener('click', () => {
-        vscode.postMessage({ command: 'confirmResponseAll', id, toolName: toolName || action });
-        div.classList.add('accepted');
-        div.querySelector('.confirm-actions').innerHTML = '<span class="confirm-resolved">✅ Accepted All ' + escHtml(toolName || action) + '</span>';
-    });
-    rejectBtn.addEventListener('click', () => {
-        vscode.postMessage({ command: 'confirmResponse', id, accepted: false });
-        div.classList.add('rejected');
-        div.querySelector('.confirm-actions').innerHTML = '<span class="confirm-resolved">❌ Rejected</span>';
-    });
-    messagesEl.insertBefore(div, scrollBtn);
+    const pendingBar = document.getElementById('pending-confirm-bar');
+
+    function makeCard(forBar) {
+        const div = document.createElement('div');
+        div.className = 'confirm-card';
+        if (!forBar) div.id = `confirm-${id}`;
+        div.innerHTML =
+            `<div class="confirm-header">` +
+                `<span class="confirm-icon">${icon}</span>` +
+                `<span class="confirm-detail">${escHtml(detail)}</span>` +
+            `</div>` +
+            `<div class="confirm-actions">` +
+                `<button class="confirm-btn accept">Accept</button>` +
+                `<button class="confirm-btn accept-all" title="Accept this and all future ${escHtml(toolName || action)} calls">Accept All</button>` +
+                `<button class="confirm-btn reject">Reject</button>` +
+            `</div>`;
+        return div;
+    }
+
+    // Card in chat history (scrolls with messages)
+    const historyCard = makeCard(false);
+    // Card pinned in sticky bar (always visible above input)
+    const stickyCard = makeCard(true);
+
+    let resolved = false;
+    let cardObserver = null;
+
+    function resolveAll(accepted, label) {
+        if (resolved) return;
+        resolved = true;
+        if (cardObserver) { cardObserver.disconnect(); cardObserver = null; }
+        // Update history card
+        historyCard.classList.add(accepted ? 'accepted' : 'rejected');
+        historyCard.querySelector('.confirm-actions').innerHTML = `<span class="confirm-resolved">${label}</span>`;
+        // Clear sticky bar
+        if (pendingBar) {
+            pendingBar.style.display = 'none';
+            pendingBar.innerHTML = '';
+        }
+    }
+
+    function wireButtons(card) {
+        card.querySelector('.confirm-btn.accept').addEventListener('click', () => {
+            if (resolved) return;
+            vscode.postMessage({ command: 'confirmResponse', id, accepted: true });
+            resolveAll(true, '✅ Accepted');
+        });
+        card.querySelector('.confirm-btn.accept-all').addEventListener('click', () => {
+            if (resolved) return;
+            vscode.postMessage({ command: 'confirmResponseAll', id, toolName: toolName || action });
+            resolveAll(true, '✅ Accepted All ' + escHtml(toolName || action));
+        });
+        card.querySelector('.confirm-btn.reject').addEventListener('click', () => {
+            if (resolved) return;
+            vscode.postMessage({ command: 'confirmResponse', id, accepted: false });
+            resolveAll(false, '❌ Rejected');
+        });
+    }
+
+    wireButtons(historyCard);
+    wireButtons(stickyCard);
+
+    messagesEl.insertBefore(historyCard, scrollBtn);
+
+    // Show sticky bar only when history card is scrolled out of view
+    if (pendingBar) {
+        pendingBar.innerHTML = '';
+        pendingBar.appendChild(stickyCard);
+        // Start hidden — IntersectionObserver will show it if card scrolls out of view
+        pendingBar.style.display = 'none';
+
+        cardObserver = new IntersectionObserver((entries) => {
+            if (resolved) { cardObserver.disconnect(); cardObserver = null; return; }
+            const visible = entries[0].isIntersecting;
+            pendingBar.style.display = visible ? 'none' : 'block';
+        }, { threshold: 0.1 });
+        cardObserver.observe(historyCard);
+    }
+
     scrollBottom();
 }
 
@@ -1530,7 +1629,9 @@ function pushInputHistory(text) {
 promptEl.addEventListener('keydown', (e) => {
     // Only activate when mention dropdown is hidden
     if (mentionDropdown.style.display !== 'none') { return; }
-    if (e.key === 'ArrowUp' && promptEl.value === '' && inputHistory.length) {
+    if (e.key === 'ArrowUp' && inputHistory.length && inputHistoryIdx !== 0) {
+        // Only hijack ArrowUp when navigating history (idx >= 0) or input is empty
+        if (inputHistoryIdx === -1 && promptEl.value !== '') { return; }
         e.preventDefault();
         if (inputHistoryIdx === -1) { inputHistoryDraft = promptEl.value; inputHistoryIdx = inputHistory.length; }
         if (inputHistoryIdx > 0) {
@@ -1564,6 +1665,7 @@ const SLASH_COMMANDS = {
     '/explain':  { label: '/explain',  desc: 'Explain how this code works',             prompt: 'Explain the following code step by step in plain language.\n\n' },
     '/refactor': { label: '/refactor', desc: 'Refactor for clarity and maintainability', prompt: 'Refactor the following code to improve readability, maintainability, and performance. Show the changes.\n\n' },
     '/optimize': { label: '/optimize', desc: 'Optimize for performance',                prompt: 'Optimize the following code for performance. Explain the improvements.\n\n' },
+    '/openclaw': { label: '/openclaw', desc: 'Dispatch a background task to OpenCLAW',  prompt: null },
 };
 
 const slashDropdown = document.createElement('div');
@@ -1602,8 +1704,8 @@ function updateSlashHighlight() {
 function selectSlashItem(idx) {
     const cmd = slashResults[idx];
     if (!cmd) { return; }
-    // Replace the /command text with the expanded prompt
-    promptEl.value = cmd.prompt;
+    // Replace the /command text with the expanded prompt (or just the command label if no prompt)
+    promptEl.value = cmd.prompt ?? (cmd.label + ' ');
     autoResize();
     hideSlashDropdown();
     promptEl.focus();
@@ -1631,7 +1733,7 @@ function openCommandsPanel() {
             `<span class="cmd-item-label">${escHtml(cmd.label)}</span>` +
             `<span class="cmd-item-desc">${escHtml(cmd.desc)}</span>`;
         item.addEventListener('click', () => {
-            promptEl.value = cmd.prompt;
+            promptEl.value = cmd.prompt ?? (cmd.label + ' ');
             autoResize();
             updateTokenIndicator();
             closeCommandsPanel();
@@ -2153,6 +2255,14 @@ window.addEventListener('message', (event) => {
             updateToolCard(msg.id, msg.success, msg.preview ?? '', msg.fullResult ?? '');
             break;
 
+        case 'openClawDispatched':
+            addOpenClawPending(msg.taskId, msg.query);
+            break;
+
+        case 'openClawResult':
+            resolveOpenClawCard(msg.taskId, msg.content, msg.error, msg.durationMs);
+            break;
+
         case 'error':
             addErrorMessage(msg.text);
             agentActive = false;
@@ -2395,6 +2505,9 @@ window.addEventListener('message', (event) => {
                 const actions = card.querySelector('.confirm-actions');
                 if (actions) { actions.innerHTML = '<span class="confirm-resolved">⏹ Dismissed</span>'; }
             });
+            // Clear sticky bar
+            const pendingBarDismiss = document.getElementById('pending-confirm-bar');
+            if (pendingBarDismiss) { pendingBarDismiss.style.display = 'none'; pendingBarDismiss.innerHTML = ''; }
             break;
         }
     }
