@@ -492,6 +492,13 @@
           "minimum": 100,
           "maximum": 5000,
           "markdownDescription": "Milliseconds to wait after typing stops before generating a completion. Higher values reduce API calls but increase latency."
+        },
+        "ollamaAgent.maxTurnsPerSession": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 200,
+          "markdownDescription": "Maximum number of agent tool-call turns per session. `0` (default) uses built-in limits per task type (sweep=50, merge=60, plan=50, normal=40, small-model=8). Set to a lower value (e.g. `24`) to cap resource usage for large models."
         }
       }
     }

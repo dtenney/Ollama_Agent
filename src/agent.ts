@@ -2743,7 +2743,9 @@ export class Agent {
             logInfo(`[agent] Sweep task with ${this.history.length} prior messages — clearing history for a fresh start`);
             this.history = [];
         }
-        const MAX_TURNS = isSweepTask ? 50 : this._mergeMode ? 60 : (this._isSmallModel ? 8 : isPlanTask ? 50 : 40);
+        const configuredMax = getConfig().maxTurnsPerSession;
+        const MAX_TURNS = configuredMax > 0 ? configuredMax
+            : isSweepTask ? 50 : this._mergeMode ? 60 : (this._isSmallModel ? 8 : isPlanTask ? 50 : 40);
         this.modeSwitchRetries = 0;
         let loopExhausted = true;
 

@@ -52,6 +52,8 @@ export interface OllamaConfig {
     autoCompactContext: boolean;
     /** When true, pass think:true to Ollama for models that support chain-of-thought reasoning (e.g. qwen3). */
     enableThinking: boolean;
+    /** Maximum agent turns per session (0 = use built-in defaults per task type). */
+    maxTurnsPerSession: number;
 }
 
 export function getConfig(): OllamaConfig {
@@ -76,6 +78,7 @@ export function getConfig(): OllamaConfig {
         autoSaveMemory:       c.get<boolean>('memory.autoSave',      false),
         autoCompactContext:   c.get<boolean>('autoCompactContext',   true),
         enableThinking:       c.get<boolean>('enableThinking',       false),
+        maxTurnsPerSession:   c.get<number> ('maxTurnsPerSession',   0),
     };
 }
 
