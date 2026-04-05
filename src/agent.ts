@@ -4202,7 +4202,10 @@ Do NOT assume you have no memory — check first.`;
 
                     // Track edit_file failures per (path, old_string) to catch repeated identical failures.
                     if (name === 'edit_file') {
-                        const editSig = `${String(args.path ?? '')}::${String(args.old_string ?? '').slice(0, 240)}`;
+                        // Normalize whitespace before hashing so whitespace-variant retries still count
+                        const rawOldStr = String(args.old_string ?? '');
+                        const normalizedOld = rawOldStr.split('\n').map(l => l.trim()).join('\n').slice(0, 240);
+                        const editSig = `${String(args.path ?? '')}::${normalizedOld}`;
                         const editFailCount = (this._failedEditSignatures.get(editSig) ?? 0) + 1;
                         this._failedEditSignatures.set(editSig, editFailCount);
                         if (editFailCount >= this.MAX_SAME_EDIT_FAILURES) {
@@ -5030,8 +5033,20 @@ Do NOT assume you have no memory — check first.`;
                                 }
                             }
                         }
-                        const hint = ` First line found at line ${nearLineIdx + 1}, but the full block didn't match — check indentation.`;
-                        throw new Error(`edit_file: old_string not found in ${rel}.${hint} Re-read the file and try again.`);
+                        // Inject surrounding context so the model can build a correct old_string
+                        // without a wasted re-read round-trip.
+                        const ctxStart = Math.max(0, nearLineIdx - 2);
+                        const ctxEnd = Math.min(fileLines.length - 1, nearLineIdx + oldLines.length + 4);
+                        const ctxBlock = fileLines.slice(ctxStart, ctxEnd + 1)
+                            .map((l, i) => `${String(ctxStart + i + 1).padStart(4, ' ')}: ${l}`)
+                            .join('\n');
+                        throw new Error(
+                            `edit_file: old_string not found in ${rel}. ` +
+                            `First line matched at line ${nearLineIdx + 1}, but the full block didn't match.\n\n` +
+                            `ACTUAL FILE LINES AROUND THAT LOCATION:\n${ctxBlock}\n\n` +
+                            `Set old_string to the EXACT lines from the file above (without the NNNN: prefix). ` +
+                            `Do NOT re-read the file — use the lines shown here.`
+                        );
                     }
 
                     // ── Append-intent detection ─────────────────────────────────
