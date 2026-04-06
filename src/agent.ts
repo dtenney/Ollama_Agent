@@ -5033,6 +5033,45 @@ Do NOT assume you have no memory — check first.`;
                                 }
                             }
                         }
+                        // ── Trailing-whitespace strip recovery ─────────────────
+                        // Python files edited by various tools often have trailing
+                        // spaces on otherwise-blank lines (e.g. "    \n" instead
+                        // of "\n"). The model's old_string uses bare \n for blank
+                        // lines, so it never matches. Try matching after stripping
+                        // trailing whitespace from every file line.
+                        const strippedOriginal = fileLines.map(l => l.trimEnd()).join('\n');
+                        const strippedOldString = oldLines.map(l => l.trimEnd()).join('\n');
+                        if (strippedOriginal.includes(strippedOldString)) {
+                            // Find the exact region in the original (with trailing spaces) to replace
+                            const strippedIdx = strippedOriginal.indexOf(strippedOldString);
+                            // Count chars before that point in the stripped version to find line index
+                            const linesBefore = strippedOriginal.slice(0, strippedIdx).split('\n').length - 1;
+                            const linesInMatch = strippedOldString.split('\n').length;
+                            const originalLines = original.split('\n');
+                            const exactOriginalBlock = originalLines.slice(linesBefore, linesBefore + linesInMatch).join('\n');
+                            const occurrencesStripped = (original.split(exactOriginalBlock).length - 1);
+                            if (occurrencesStripped === 1) {
+                                const newContent3 = original.replace(exactOriginalBlock, newString);
+                                const isAutoApproved3 = this._autoApprovedTools.has('edit_file');
+                                if (!isAutoApproved3) {
+                                    await this.diffViewManager.showDiffPreview(full, original, newContent3);
+                                }
+                                const accepted3 = await this.requestConfirmation('edit', `Edit "${rel}" — ${oldLines.length} line(s) changed (auto-corrected trailing whitespace)`, 'edit_file');
+                                if (!isAutoApproved3) { this.diffViewManager.closeDiffPreview(); }
+                                if (!accepted3) { return 'Edit cancelled by user.'; }
+                                fs.writeFileSync(full, newContent3, 'utf8');
+                                this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
+                                this._editsThisRun++;
+                                this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
+                                const editResult3 = `Edited: ${rel} — ${oldLines.length} line(s) replaced (trailing whitespace auto-corrected)`;
+                                const editDiags3 = this.getDiagnostics(root, rel);
+                                if (editDiags3 !== 'No errors or warnings found.') {
+                                    return `${editResult3}\n\nDiagnostics after edit:\n${editDiags3}`;
+                                }
+                                return editResult3;
+                            }
+                        }
+
                         // Inject surrounding context so the model can build a correct old_string
                         // without a wasted re-read round-trip.
                         const ctxStart = Math.max(0, nearLineIdx - 2);
