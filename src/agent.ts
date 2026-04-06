@@ -267,14 +267,14 @@ export const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'edit_file',
-            description: 'Make a targeted edit to an existing file by replacing old_string with new_string. ONLY use this when you do NOT have line numbers. If you have line numbers from a previous shell_read, use edit_file_at_line instead — it is more reliable. The old_string must match exactly (including whitespace/indentation). For corrupted files (containing literal \\n characters), set force_overwrite=true and old_string="" to completely replace the file with new_string.',
+            description: 'Make a targeted edit to an existing file by replacing old_string with new_string. ONLY use this when you do NOT have line numbers. If you have line numbers from a previous shell_read, use edit_file_at_line instead — it is more reliable. The old_string must match exactly (including whitespace/indentation). For complete file rewrites (e.g. replacing an entire HTML template) OR corrupted files (containing literal \\n characters), set force_overwrite=true and old_string="" to replace the entire file with new_string.',
             parameters: {
                 type: 'object',
                 properties: {
                     path:            { type: 'string', description: 'Path relative to workspace root' },
                     old_string:      { type: 'string', description: 'Exact string to replace. Must be unique in the file. Use empty string with force_overwrite=true to replace the entire file.' },
                     new_string:      { type: 'string', description: 'Replacement string.' },
-                    force_overwrite: { type: 'boolean', description: 'If true, overwrite the entire file with new_string, ignoring old_string. Use ONLY for corrupted files that cannot be edited normally.' },
+                    force_overwrite: { type: 'boolean', description: 'If true, overwrite the entire file with new_string, ignoring old_string. Use for: (1) corrupted files containing literal \\n characters, or (2) complete rewrites of template/HTML/CSS files where you intend to replace the entire contents.' },
                 },
                 required: ['path', 'old_string', 'new_string'],
             },
@@ -4881,7 +4881,7 @@ Do NOT assume you have no memory — check first.`;
                     if (!isAutoApprovedOvr) {
                         await this.diffViewManager.showDiffPreview(full, originalForOverwrite, newString);
                     }
-                    const acceptedOvr = await this.requestConfirmation('edit', `Overwrite "${rel}" entirely (force_overwrite — fixing corrupted file)`, 'edit_file');
+                    const acceptedOvr = await this.requestConfirmation('edit', `Overwrite "${rel}" entirely (force_overwrite)`, 'edit_file');
                     if (!isAutoApprovedOvr) { this.diffViewManager.closeDiffPreview(); }
                     if (!acceptedOvr) { return 'Edit cancelled by user.'; }
                     fs.mkdirSync(path.dirname(full), { recursive: true });
@@ -4900,7 +4900,7 @@ Do NOT assume you have no memory — check first.`;
                         fs.writeFileSync(full, newString, 'utf8');
                         return `Created new file: ${rel} (${newString.split('\n').length} lines)`;
                     }
-                    throw new Error(`File "${rel}" already exists. Use get_file to read it first, then call edit_file with old_string set to the exact text you want to replace. If the file is corrupted (contains literal \\n characters), use force_overwrite=true with old_string="" and new_string=<full correct content>.`);
+                    throw new Error(`File "${rel}" already exists. Use get_file to read it first, then call edit_file with old_string set to the exact text you want to replace. To completely replace the file (e.g. full HTML template rewrite), use force_overwrite=true with old_string="" and new_string=<full new content>.`);
                 }
 
                 // Guard: if the file doesn't exist, give a clear actionable error instead of a raw ENOENT.
