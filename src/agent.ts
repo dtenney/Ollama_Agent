@@ -182,6 +182,8 @@ Use Windows-native PowerShell commands — NOT Unix commands (find, grep, cat, m
 - Finding files by name: shell_read with "Get-ChildItem -Path '${ws}' -Recurse -Filter '*transaction*' | Select-Object FullName"
 - Searching code for a symbol: shell_read with "Get-ChildItem -Path '${ws}/app' -Recurse -Filter '*.py' | Select-String -Pattern 'def fetch_user' | Select-Object Path,LineNumber,Line | Select-Object -First 20"
 - Viewing files: shell_read with "Get-Content 'C:/full/path/to/file.py'"
+- Reading a specific line range (e.g. lines 474–580): shell_read with "(Get-Content 'C:/full/path/file.py' | Select-Object -Skip 473 -First 107)"
+  NOTE: Select-Object -Index does NOT accept ranges like 473..580 — use -Skip/-First instead. Skip = first line - 1, First = count of lines to read.
 - Git operations: shell_read with "git status", "git log --oneline -20", "git diff"
 PREFER grep/Select-String over directory listing — it finds what you need in one step instead of two.
 ALWAYS use full paths from search results — never guess relative paths.`;
@@ -220,6 +222,10 @@ If path is wrong, search: Get-ChildItem -Recurse -Filter '*checkout*' | Select-O
 
 EXAMPLE - User says "show me the files under app/routes":
 <tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem '${ws}/app/routes' | Select-Object Name"}}</tool>
+
+EXAMPLE - User needs to read lines 474–580 of a file:
+<tool>{"name": "shell_read", "arguments": {"command": "(Get-Content 'C:/full/path/file.py' | Select-Object -Skip 473 -First 107)"}}</tool>
+NOTE: Select-Object -Index does NOT accept ranges (473..580 fails). Use -Skip (line number minus 1) and -First (number of lines) instead.
 
 CRITICAL: Prefer targeted reads over broad directory sweeps. If you know the likely path (e.g. app/services/email_service.py), read it directly — do NOT list the whole directory first.
 
@@ -830,10 +836,17 @@ After building or modifying a feature:
 Don't write tests unless asked or unless they already exist and your change broke them.
 
 ## When you're stuck — stop and surface it
-If you've failed at the same problem twice (two edit_file failures, two approaches that didn't work, two tool calls with bad results):
+If you've failed at the same problem twice — two edit_file failures, two shell commands with errors, two approaches that didn't work:
 - Stop immediately. Do not try a third variation.
 - Tell the developer: what you tried, what happened, what you think the blocker is.
 - Ask one focused question that would unblock you.
+
+This applies to shell commands too. If a command fails once, try one corrected alternative. If that also fails, stop and explain — do not keep guessing syntax variations.
+
+Common PowerShell traps to avoid on first attempt (not after failing):
+- Reading a line range: use -Skip N -First M, NOT -Index N..M (ranges don't work with -Index)
+- Reading a file section: (Get-Content 'file.py' | Select-Object -Skip 473 -First 107)
+- Counting lines: (Get-Content 'file.py').Count
 
 Burning turns on variations the developer can't see is the worst outcome. Surfacing the problem early keeps them in control.
 
