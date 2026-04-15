@@ -41,25 +41,25 @@ node_modules/**
 !node_modules/jose/**
 !node_modules/pkce-challenge/**
 
-# dist/ — include ALL tsc-compiled files (tsc produces one file per module)
-# (previously only dist/main.js was needed when esbuild produced a single bundle)
-
-# Dev docs
+# Internal dev docs
+docs/internal/**
+CONTRIBUTING.md
+MANUAL_TESTS.md
+CODE_REVIEW.md
+GAP_ANALYSIS.md
 IMPLEMENTATION_PLAN.md
+MEMORY_IMPROVEMENTS.md
+NEXT_FEATURES.md
 SESSION_FINAL_STATE.md
 SESSION_STATE.md
-CHANGELOG.md
-CONTRIBUTING.md
-CONTEXT_MANAGEMENT_TODO.md
-PYTHON_TOOLING_TODO.md
-SYNERGY_AUDIT.md
-NEXT_FEATURES.md
-GAP_ANALYSIS.md
-MANUAL_TESTS.md
-MEMORY_IMPROVEMENTS.md
-.ollamapilot/**
 DESIGN_VISION.md
 PROJECT_STATUS.md
+RECOMMENDATIONS.md
+VIBE_CODING_DESIGN.md
+SYNERGY_AUDIT.md
+CONTEXT_MANAGEMENT_TODO.md
+PYTHON_TOOLING_TODO.md
+.ollamapilot/**
 
 # Build artefacts
 *.vsix
@@ -73,6 +73,7 @@ coverage/**
 # Git
 .gitignore
 .git/**
+.claude/**
 
 # Logs / temp
 *.log
@@ -87,6 +88,9 @@ Thumbs.db
 # dist/**           ← tsc-compiled extension files
 # webview/**        ← chat UI (HTML + JS + vendor hljs)
 # images/**         ← logo, banner, sidebar icon, demo gif
+# docs/CHANGELOG.md ← user-facing release notes
 # package.json      ← manifest
 # README.md         ← Marketplace description
+# settings.example.json
+# mcp.example.json
 # LICENSE

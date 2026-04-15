@@ -7,8 +7,6 @@ A fully local, offline AI coding assistant for VS Code — powered by Ollama.
 
 ### A fully local, offline AI coding assistant for VS Code — powered by Ollama
 
-[![VS Code Marketplace](https://img.shields.io/visual-studio-marketplace/v/kchikech.ollamapilot?label=Marketplace&color=007ACC&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
-[![Installs](https://img.shields.io/visual-studio-marketplace/i/kchikech.ollamapilot?label=Installs&color=007ACC)](https://marketplace.visualstudio.com/items?itemName=kchikech.ollamapilot)
 [![Version](https://img.shields.io/badge/version-0.4.0-blue.svg)](https://github.com/dtenney/Ollama_Agent/releases)
 [![VS Code](https://img.shields.io/badge/VS%20Code-%5E1.80.0-007ACC.svg)](https://code.visualstudio.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -39,6 +37,7 @@ OllamaPilot is a free, open-source VS Code extension that brings a **Cursor-like
 - 📊 **Token estimation** — see context usage before sending, with model-aware limits
 - 🧠 **Multi-tiered memory** — intelligent 6-tier memory system with semantic search
 - 🔌 **MCP support** — connect to external tools via Model Context Protocol
+- 🌐 **Web search** — optional SearXNG integration gives the agent real-time web search and page fetch capabilities
 - 🎯 **Auto-save memory** — AI proactively captures important project information
 - 📊 **Memory UI panel** — browse, manage, and organize memory entries visually
 - 🔀 **Git diff context** — optionally inject uncommitted changes for change-aware assistance
@@ -134,14 +133,11 @@ cd Ollama_Agent
 # 2. Install dependencies
 npm install
 
-# 3. Build the extension
-npm run build
+# 3. Package as .vsix (compiles automatically)
+npm run package
 
-# 4. Package as .vsix
-npx vsce package
-
-# 5. Install the extension
-code --install-extension ollamapilot-0.4.0.vsix
+# 4. Install the extension
+code --install-extension ollamapilot-*.vsix
 ```
 
 ---
@@ -188,7 +184,7 @@ That's it. The agent will start responding immediately.
 
 ### 🤖 AI Agent
 - Multi-turn **agentic tool loop** — the AI can call tools, read results, then continue reasoning
-- Supports **21 workspace tools** (see [Agent Tools](#-agent-tools) below)
+- Supports **23 workspace tools** including web search and web fetch (see [Agent Tools](#-agent-tools) below)
 - **Live command output** — terminal output streams directly into the chat
 - **Diff preview** before applying file edits
 - **Confirmation dialogs** for all destructive actions (write, delete, run command)
@@ -329,6 +325,8 @@ The AI can autonomously call the following tools during a conversation:
 | `read_terminal` | Read recent output from VS Code integrated terminals | — |
 | `get_diagnostics` | Get VS Code errors/warnings for a file or workspace | — |
 | `refactor_multi_file` | Coordinated changes across multiple files with preview | ✅ |
+| `web_search` | Search the web via SearXNG (requires `ollamaAgent.search.url` to be configured) | — |
+| `web_fetch` | Fetch and read any web page as plain text | — |
 
 > **Safety:** All file modifications and command executions require explicit confirmation via a VS Code dialog. Paths are validated to stay within the workspace root. Dangerous command patterns (`rm -rf /`, `mkfs`, etc.) are blocked before the confirmation dialog even appears.
 
@@ -511,6 +509,19 @@ Open `Settings` (`Ctrl+,` / `Cmd+,`) and search for **"Ollama"** to see all opti
 }
 ```
 
+### Example: Enable web search via SearXNG
+
+The agent can search the web and fetch pages when you point it at a [SearXNG](https://searxng.github.io/searxng/) instance:
+
+```json
+{
+  "ollamaAgent.search.url": "http://your-searxng-host:8888",
+  "ollamaAgent.search.resultsLimit": 5
+}
+```
+
+Once configured, the agent will automatically use `web_search` when asked to find examples, libraries, documentation, or anything requiring current information. Leave `search.url` empty to keep the agent fully offline.
+
 ---
 
 ## ⌨️ Keyboard Shortcuts
@@ -621,9 +632,9 @@ Any model available in Ollama works with this extension. Models known to work we
 
 | Model | Size | Notes |
 |---|---|---|
-| `qwen3.5:27b` | ~16 GB | ⭐⭐ Best results — 262k context, thinking mode, excellent multi-file agentic tasks |
-| `qwen2.5-coder:7b` | ~4 GB | ⭐ Recommended for 8GB VRAM — excellent at coding, native tools, large context |
-| `qwen2.5-coder:1.5b` | ~1 GB | Fastest, good for quick tasks |
+| `qwen2.5-coder:7b` | ~4 GB | ⭐ Recommended starting point — excellent at coding, native tools, large context |
+| `qwen3:14b` | ~9 GB | ⭐⭐ Best results for most setups — thinking mode, strong agentic reasoning |
+| `qwen2.5-coder:1.5b` | ~1 GB | Fastest, good for quick tasks and low-VRAM machines |
 | `llama3.1:8b` | ~5 GB | General purpose, high quality |
 | `phi3:mini` | ~2 GB | Very fast, good for simple tasks |
 | `codellama:7b` | ~4 GB | Specialized for code generation |

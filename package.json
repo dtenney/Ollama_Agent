@@ -17,7 +17,7 @@
   },
   "homepage": "https://github.com/dtenney/Ollama_Agent#readme",
   "sponsor": {
-    "url": "https://github.com/sponsors/kchikech"
+    "url": "https://github.com/sponsors/dtenney"
   },
   "keywords": [
     "ollama",
@@ -48,7 +48,8 @@
     "bundle": "npm run vendor && node esbuild.js",
     "bundle:prod": "npm run vendor && node esbuild.js --production",
     "build": "npm run deploy",
-    "vscode:prepublish": "npx tsc",
+    "package": "npm run compile && npx vsce package --no-dependencies",
+    "vscode:prepublish": "npm run compile",
     "test": "npm run compile && vscode-test",
     "test:unit": "npm run compile && mocha dist/test/unit/**/*.test.js",
     "test:harness": "npm run compile && mocha --require dist/test/vscode-mock.js --timeout 30000 dist/test/unit/agentHarness.test.js",
