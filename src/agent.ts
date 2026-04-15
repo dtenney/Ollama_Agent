@@ -2,10 +2,12 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as http from 'http';
+import * as https from 'https';
 import { spawn, execSync } from 'child_process';
 
 import { streamChatRequest, OllamaMessage, OllamaToolCall, StreamResult, ToolsNotSupportedError } from './ollamaClient';
-import { getConfig } from './config';
+import { getConfig, getSearchConfig } from './config';
 import { logInfo, logError, logWarn, toErrorMessage } from './logger';
 import { buildWorkspaceSummary, clearWorkspaceSummaryCache, SKIP_DIRS, detectPythonEnvironment, formatPythonEnvironment, PythonEnvironment } from './workspace';
 import { TieredMemoryManager } from './memoryCore';
@@ -18,6 +20,8 @@ import { analyzeFile, executeSplit } from './fileSplitter';
 import { findSimilarInDirectory, findFilesLike, formatSimilarityReport } from './similarityAnalyzer';
 import { GARBAGE_PATTERNS } from './docScanner';
 import type { ChildProcess } from 'child_process';
+import { appendSessionLog, GuardEvent, ToolCallRecord } from './sessionLog';
+import type { ActiveTaskState } from './chatStorage';
 
 // ── Shell environment detection ───────────────────────────────────────────────
 
@@ -447,6 +451,35 @@ export const TOOL_DEFINITIONS = [
     {
         type: 'function',
         function: {
+            name: 'web_search',
+            description: 'Search the web using SearXNG. Use this to find examples, documentation, libraries, tutorials, or current information relevant to a task. Returns titles, URLs, and snippets. Requires SearXNG to be configured in settings (ollamaAgent.search.url).',
+            parameters: {
+                type: 'object',
+                properties: {
+                    query: { type: 'string', description: 'Search query (be specific — e.g. "flask chartjs analytics dashboard example" not just "analytics")' },
+                    limit: { type: 'number', description: 'Max results to return (default: 5, max: 20)' },
+                },
+                required: ['query'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'web_fetch',
+            description: 'Fetch a web page and return its content as plain text. Use this to read documentation, GitHub READMEs, or any URL the user provides. Strips HTML tags and returns readable text capped at 8000 chars.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    url: { type: 'string', description: 'Full URL to fetch (must start with http:// or https://)' },
+                },
+                required: ['url'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
             name: 'refactor_multi_file',
             description: 'Propose coordinated changes across multiple files. Use this when a refactoring affects multiple files (e.g., renaming a function used in many places, restructuring modules). Shows a preview of all changes before applying.',
             parameters: {
@@ -540,12 +573,62 @@ async function buildProjectTypeGuidanceAsync(workspaceRoot: string): Promise<str
     return _cachedProjectGuidance;
 }
 
-async function buildSystemPromptAsync(autoSaveMemory: boolean, workspaceRoot?: string): Promise<string> {
-    const guidance = workspaceRoot ? await buildProjectTypeGuidanceAsync(workspaceRoot) : '';
-    return buildSystemPrompt(autoSaveMemory, workspaceRoot, guidance);
+// ── Hierarchical context file scanning ───────────────────────────────────────
+// Scans the workspace for AGENTS.md, CLAUDE.md, or .ollamapilot.md files at
+// the root and up to 2 directory levels deep. Content is injected into the
+// system prompt so the model has per-directory conventions without manual ingestion.
+//
+// File priority (highest wins on conflict): .ollamapilot.md > AGENTS.md > CLAUDE.md
+// Only files ≤ 8000 chars are included to prevent context bloat.
+const CONTEXT_FILE_NAMES = ['.ollamapilot.md', 'AGENTS.md', 'CLAUDE.md'];
+const MAX_CONTEXT_FILE_BYTES = 8000;
+
+async function loadHierarchicalContext(workspaceRoot: string): Promise<string> {
+    const sections: string[] = [];
+    try {
+        // Scan: root + each immediate subdirectory (depth 1 only — avoids node_modules noise)
+        const candidates: string[] = [workspaceRoot];
+        try {
+            const entries = fs.readdirSync(workspaceRoot, { withFileTypes: true });
+            for (const e of entries) {
+                if (!e.isDirectory()) { continue; }
+                if (SKIP_DIRS.has(e.name) || e.name.startsWith('.')) { continue; }
+                candidates.push(path.join(workspaceRoot, e.name));
+            }
+        } catch { /* can't list root — just use root */ }
+
+        const seen = new Set<string>(); // deduplicate by canonical path
+        for (const dir of candidates) {
+            for (const fname of CONTEXT_FILE_NAMES) {
+                const fpath = path.join(dir, fname);
+                if (seen.has(fpath)) { continue; }
+                try {
+                    const stat = fs.statSync(fpath);
+                    if (!stat.isFile()) { continue; }
+                    const content = fs.readFileSync(fpath, 'utf8').slice(0, MAX_CONTEXT_FILE_BYTES);
+                    const rel = path.relative(workspaceRoot, fpath).replace(/\\/g, '/');
+                    sections.push(`### ${rel}\n${content.trim()}`);
+                    seen.add(fpath);
+                    logInfo(`[context-files] Loaded ${rel} (${content.length} chars)`);
+                    break; // highest-priority file wins for this directory
+                } catch { /* file doesn't exist or can't be read — skip */ }
+            }
+        }
+    } catch { /* never let context scanning break agent startup */ }
+
+    if (sections.length === 0) { return ''; }
+    return `## Project Context Files\nThe following files define project conventions, architecture, and guidelines:\n\n${sections.join('\n\n')}`;
 }
 
-function buildSystemPrompt(autoSaveMemory: boolean, workspaceRoot?: string, projectGuidance?: string): string {
+async function buildSystemPromptAsync(autoSaveMemory: boolean, workspaceRoot?: string): Promise<string> {
+    const [guidance, hierarchicalCtx] = await Promise.all([
+        workspaceRoot ? buildProjectTypeGuidanceAsync(workspaceRoot) : Promise.resolve(''),
+        workspaceRoot ? loadHierarchicalContext(workspaceRoot) : Promise.resolve(''),
+    ]);
+    return buildSystemPrompt(autoSaveMemory, workspaceRoot, guidance, hierarchicalCtx);
+}
+
+function buildSystemPrompt(autoSaveMemory: boolean, workspaceRoot?: string, projectGuidance?: string, hierarchicalCtx?: string): string {
     // Inject current date/time and active file language for context awareness (Rec 2.3)
     const now = new Date();
     const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
@@ -592,6 +675,10 @@ Rules:
         : '';
 
     const workspaceInfo = workspaceRoot ? `Workspace: ${workspaceRoot}` : '';
+    const searchCfg = getSearchConfig();
+    const webSearchLine = searchCfg.url
+        ? `  web_search         — search the web via SearXNG (${searchCfg.url}); use for examples, docs, libraries\n  web_fetch          — fetch and read a web page by URL`
+        : '';
     return `You are an expert AI coding assistant integrated into VS Code.
 Current date: ${dateStr}, ${timeStr}.${activeLanguage ? ` Active file: ${activeFile} (${activeLanguage}).` : ''}${workspaceInfo ? `\n${workspaceInfo}` : ''}
 
@@ -613,7 +700,7 @@ Tools:
   memory_tier_write  — save to specific tier (0=infra, 1=frameworks, 2=current work, 3=conventions, 4=solutions)
   memory_delete      — remove a stale note (call memory_list first to get real IDs)
   read_terminal      — read VS Code terminal output
-  get_diagnostics    — VS Code errors/warnings for a file
+  get_diagnostics    — VS Code errors/warnings for a file${webSearchLine ? `\n${webSearchLine}` : ''}
 
 ## Shell patterns
 ${buildShellExamples(detectShellEnvironment(), workspaceRoot)}
@@ -633,7 +720,45 @@ ${memoryGuidelines}
 - Vague/high-level requests (merge X, add reporting, track Y): EXPLORE → CONFIRM → WAIT → BUILD
 - CONFIRM message format: what you found | what you'll change | what you won't touch | one question. SHORT.
 - "go ahead" is a valid trigger to build IF you already presented a plan. If not, present the plan first.
-- Scope: write code files only. Do NOT run migrations, pip install, or start servers — tell the user to do those.
+- Scope: write code files only. Do NOT run migrations, pip install, or start servers — tell the user the exact commands to run.
+
+## Deploy / apply / run tasks — environment-first protocol
+When the user asks you to apply, run, deploy, execute, or migrate something (not write code — actually *run* it):
+DO NOT explore the codebase. Instead, immediately do this in order:
+
+1. memory_search("<topic> host connection deploy") — check what you already know
+2. Read .env, deploy.sh, Makefile, or docs/DEPLOYMENT*.md if memory has nothing
+3. Determine: is the target local or remote? Do you know the host, user, and method?
+4. If YES — give the user the exact commands for that environment (SSH first if remote)
+5. If NO — ask ONE question: "Where does this run — local machine or a remote server? If remote, what's the SSH host/user?"
+
+Never assume localhost. Never assume the database or server is local just because the code is local.
+Never start exploring models, docs, or SQL files — that is the wrong direction for an "apply" task.
+
+## Unknown environment — always investigate, never assume
+Anything that depends on WHERE or HOW something runs requires verification before you give commands.
+
+- **Database host:** Before giving any migration, psql, or flask db command — check if you know the DB host. If the .env shows localhost but a deploy script or docs reference a remote host, the remote wins. Ask if still unclear.
+- **Deployment target:** Before giving deploy/restart/reload commands — find deploy.sh or ask.
+- **Services/ports:** Before giving start/stop commands for web server, queue, or cache — verify local vs remote.
+- **Credentials/paths:** If a path, user, or key isn't visible in the codebase — ask, never invent.
+
+When you find the answer from memory, .env, deploy scripts, or docs — use it directly. Only ask if you genuinely cannot determine it.
+
+## Creative / discovery mode
+Triggered by: "brainstorm", "what could we build", "find examples", "let's build X", "suggest ideas", "what if we", "get creative", "explore options".
+
+In this mode your job is to be a product-minded engineer, not just a code executor. You should:
+
+1. **Explore first** — read the actual models, routes, and templates to understand what data already exists. Use shell_read freely. Do NOT skip this step and answer from assumptions.
+2. **Propose concrete options grounded in the real project** — not generic ideas. Name actual fields, models, and routes. Example: "We could add a transaction volume chart using Transaction.created_at and total_amount — the data is already there."
+3. **Give 3-5 distinct options** ranked by value and effort. For each: what it does, what data/code it uses, rough complexity (small/medium/large).
+4. **State your recommendation** — pick one and say why. Be opinionated.
+5. **Offer to start immediately** — end with "Want me to start with [recommended option]?" not a generic "let me know."
+
+After the user says yes/go ahead/start/pick one — build it directly. No second confirmation needed.
+
+Format your proposals clearly with a header per option, not a wall of text. Be enthusiastic but specific — vague ideas are useless.
 
 ## Explore before implementing (vague requests)
 When the request lacks technical detail, in this order:
@@ -646,7 +771,7 @@ Prefer existing data over new columns. Never add a column without user confirmat
 
 ## Compliance/security questions
 When asked about PII, encryption, retention, or security: read the docs file first (docs/*.md), then cross-check against actual source code. Report mismatches with ⚠️.
-${projectGuidance ?? (workspaceRoot ? buildProjectTypeGuidance(workspaceRoot) : '')}`;
+${projectGuidance ?? (workspaceRoot ? buildProjectTypeGuidance(workspaceRoot) : '')}${hierarchicalCtx ? `\n\n${hierarchicalCtx}` : ''}`;
 }
 
 // ── Small-model tool set (read-then-act mode) ─────────────────────────────────
@@ -1513,6 +1638,7 @@ export class Agent {
     /** Track consecutive calls to the same tool name (even with different args) */
     private lastToolName = '';
     private consecutiveSameToolCalls = 0;
+    /** Total shell_read calls this run — used to cap plan-task exploration regardless of interleaving */
     /** Higher limit for action tools (rename, run_command) during batch operations */
     private readonly MAX_CONSECUTIVE_SAME_TOOL_ACTION = 20;
     /** Lower limit for read/info tools (more likely to be loops) */
@@ -1571,10 +1697,24 @@ export class Agent {
     private _mergeMode: boolean = false;
     /** When true, allow schema-changing edits (db.Column additions) to model files — set after user confirms */
     private _schemaChangeConfirmed: boolean = false;
-    /** How many times the feature-write guard has fired this run — break loop after 2 blocks */
-    private _featureGuardBlockCount: number = 0;
     /** shell_read calls this run when userWantsAction and no edit attempted yet — cap exploration */
     private _exploreShellReadCount: number = 0;
+    /** Average log-probability of the most recent model response (null if model didn't return logprobs) */
+    private _lastResponseAvgLogprob: number | null = null;
+    /** Accumulates every tool call made during the current run — reset at run start */
+    private _toolCallsThisRun: ToolCallRecord[] = [];
+    /** Accumulates every guardrail event that fired during the current run — reset at run start */
+    private _guardEvents: GuardEvent[] = [];
+    /** Relative paths of files successfully written during the current run — reset at run start */
+    private _filesChangedThisRun: string[] = [];
+    /** Number of model turns completed in the current run */
+    private _runTurnCount: number = 0;
+    /** How the current run ended — set by stop() or error path, reset at run start */
+    private _runOutcome: 'done' | 'error' | 'stopped' = 'done';
+    /** Critic model for the current run (resolved from routing config at run start) */
+    private _routedCriticModel: string = '';
+    /** Base model for the current run (passed into run()) */
+    private _currentRunModel: string = '';
     /** Tracks whether edit_file was called since the last delete in merge mode */
     private _mergeEditedSinceLastDelete: boolean = false;
     /** Consecutive edit_file failures in merge mode — triggers append hint */
@@ -1670,6 +1810,34 @@ export class Agent {
     restoreHistory(history: OllamaMessage[]): void {
         this.history = [...history];
         logInfo(`[agent] History restored — ${this.history.length} messages`);
+    }
+
+    /** Current active task state — safe to serialize into ChatSession. */
+    get activeTask(): ActiveTaskState | null { return this._activeTask; }
+
+    /** Restore active task state from a previously saved session. */
+    restoreActiveTask(task: ActiveTaskState | null): void {
+        this._activeTask = task;
+        logInfo(`[agent] Active task restored — type: ${task?.type ?? 'none'}, confirmed: ${task?.filesConfirmed.length ?? 0} files`);
+    }
+
+    /** Per-run stats for the session log — call after run() completes. */
+    get runStats(): {
+        turns: number;
+        toolCalls: ToolCallRecord[];
+        guardEvents: GuardEvent[];
+        filesChanged: string[];
+        avgLogprob: number | null;
+        outcome: 'done' | 'error' | 'stopped';
+    } {
+        return {
+            turns:       this._runTurnCount,
+            toolCalls:   [...this._toolCallsThisRun],
+            guardEvents: [...this._guardEvents],
+            filesChanged: [...this._filesChangedThisRun],
+            avgLogprob:  this._lastResponseAvgLogprob,
+            outcome:     this._runOutcome,
+        };
     }
 
     get lastUserMessage(): string | undefined {
@@ -1974,11 +2142,38 @@ export class Agent {
         } else {
             this._schemaChangeConfirmed = false;
         }
-        this._featureGuardBlockCount = 0;
         this._exploreShellReadCount = 0;
         this._lastEditedFilePath = '';
-        
+        // Per-run session log accumulators
+        this._toolCallsThisRun = [];
+        this._guardEvents = [];
+        this._filesChangedThisRun = [];
+        this._runTurnCount = 0;
+        this._runOutcome = 'done';
+        this._currentRunModel = model;
+        { const rc = getConfig(); this._routedCriticModel = rc.modelRoutingEnabled ? (rc.criticModel || model) : model; }
+
         logInfo(`Agent run — model: ${model}, mode: ${this.toolMode}, history: ${this.history.length}`);
+
+        // ── Deploy/apply/run preflight — environment verification ─────────
+        // When the user asks to apply, run, deploy, or execute something (not write code),
+        // inject a preflight instruction so the model's FIRST action is to check where the
+        // target runs — not to explore models, docs, or SQL files.
+        const isDeployRunTask = /\b(apply|run|execute|deploy|migrate|upgrade|start|restart|reload|push)\b/i.test(userMessage)
+            && !/\b(add|write|create|implement|build|fix|update|modify|refactor)\b/i.test(userMessage);
+        if (isDeployRunTask) {
+            // Only inject if this isn't already a follow-up to an environment answer
+            const recentHistory = this.history.slice(-4);
+            const alreadyHasEnvAnswer = recentHistory.some(m =>
+                m.role === 'user' && /\b(ssh|host|server|remote|local|postgres|localhost|10\.\d+\.\d+\.\d+|192\.\d+)\b/i.test(String(m.content))
+            );
+            if (!alreadyHasEnvAnswer) {
+                this.history.push({
+                    role: 'user',
+                    content: `[PREFLIGHT] Before doing anything else: this task requires knowing WHERE to run the command. Do NOT explore code files, SQL files, or docs. Instead:\n1. Call memory_search("database host deploy server connection") immediately\n2. If memory has the answer, give the user the exact commands for that environment\n3. If memory has nothing, read .env and deploy.sh (shell_read only — no other files)\n4. If the target is still unclear, ask: "Is this running locally or on a remote server? If remote, what is the SSH host and user?"\nDo not assume localhost. Do not suggest 'flask db upgrade' without knowing if the DB is local or remote.`
+                });
+            }
+        }
 
         // ── Programmatic pre-processing pipeline ─────────────────────────
         // For complex multi-step tasks (like updating imports after reorganization),
@@ -2270,13 +2465,17 @@ export class Agent {
         // Review/audit tasks produce a written report — not action-oriented, suppress action guardrails.
         const isReviewTask = /\b(review|audit|check|analyse|analyze|look for|find (bugs?|issues?|problems?|errors?|race conditions?|inconsistencies)|code review|spot|identify (bugs?|issues?|problems?))\b/i.test(userMessage)
             && !/\b(and fix|then fix|fix them|fix (all|it|those)|also fix|apply (the )?fix)\b/i.test(userMessage);
+        // Creative/discovery tasks: brainstorm, find examples, suggest ideas, let's build X.
+        // Agent explores the project, generates grounded proposals, then offers to build.
+        const isCreativeTask = /\b(brainstorm|creative|ideate|suggest|what (could|can|should) we (build|add|create|do)|let'?s (build|create|design|explore|think about)|find (examples?|inspiration|ideas?)|what (ideas?|options?|possibilities)|how (might|could) we|what (would|if we)|explore (ideas?|options?|possibilities)|pitch|envision|imagine|what (features?|things?) (could|can|should)|get (creative|building|started))\b/i.test(userMessage)
+            && !/\b(implement now|do it now|go ahead|proceed|fix|rename|delete|remove)\b/i.test(userMessage);
 
         const isEditTask = /\b(add|insert|append|implement|fix|modify|update|change|remove|delete|refactor|rename|replace|wrap|extract|move|convert|migrate)\b/i.test(userMessage)
             && !/\b(import\s+\w+|from\s+\w+\s+import|path)\b/i.test(userMessage)
             && !isMultiFileRestructure
             && !isFindSimilar
             && !isExplainQuery
-            && !isPlanTask && !isReviewTask
+            && !isPlanTask && !isReviewTask && !isCreativeTask
             && !isNewFileTask
             && !preProcessedContext;  // already handled by preProcessPathUpdate
 
@@ -2745,7 +2944,7 @@ export class Agent {
         }
         const configuredMax = getConfig().maxTurnsPerSession;
         const MAX_TURNS = configuredMax > 0 ? configuredMax
-            : isSweepTask ? 50 : this._mergeMode ? 60 : (this._isSmallModel ? 8 : isPlanTask ? 50 : 40);
+            : isSweepTask ? 50 : this._mergeMode ? 60 : (this._isSmallModel ? 8 : (isPlanTask || isCreativeTask) ? 50 : 40);
         this.modeSwitchRetries = 0;
         let loopExhausted = true;
 
@@ -2787,6 +2986,161 @@ Do NOT assume you have no memory — check first.`;
             } catch { /* skip if memory unavailable */ }
         }
 
+        // ── Prior-work existence check ────────────────────────────────────────
+        // For implement/create/add tasks: search memory for matching completed-feature
+        // entries BEFORE the model starts exploring. If found, inject a prominent
+        // [PRIOR WORK DETECTED] block so the model verifies first instead of re-doing.
+        const isImplementTask = /\b(implement|create|add|build|make|set up|write)\b/i.test(userMessage)
+            && !/\b(plan|discuss|design|proposal)\b/i.test(userMessage);
+        if (this.memory && isImplementTask) {
+            try {
+                // Extract 2-4 keywords from the task to drive the search
+                const kwMatch = userMessage.match(/\b([a-z][a-z0-9_]{3,})\b/gi) ?? [];
+                const stopWords = new Set(['the','this','that','with','from','into','for','and','create','make','build','add','implement','write','should','would','could','please','just','need','want']);
+                const searchKws = kwMatch.filter(w => !stopWords.has(w.toLowerCase())).slice(0, 5);
+                if (searchKws.length >= 2) {
+                    const searchQuery = searchKws.join(' ');
+                    const priorHits = await this.memory.searchMemory(searchQuery, undefined, 5);
+                    const completedHits = priorHits.filter(h =>
+                        h.tags?.includes('completed-feature') || h.tags?.includes('session-end') || h.tags?.includes('completed')
+                    );
+                    if (completedHits.length > 0) {
+                        const hitLines = completedHits.map(h => `  - ${h.content.slice(0, 150)}`).join('\n');
+                        baseSystemWithMemory += `\n\n## [PRIOR WORK DETECTED]\nMemory contains entries suggesting this feature may already be implemented:\n${hitLines}\n\nBEFORE writing any code:\n1. Call memory_search("${searchKws.slice(0,3).join(' ')}") to review the full details\n2. Check the relevant file(s) to confirm whether the feature exists\n3. If it already exists, tell the user what was found and ask if they want changes\n4. Only proceed with new code if the feature is genuinely missing`;
+                        logInfo(`[prior-work] Injected existence check: ${completedHits.length} hit(s) for "${searchQuery}"`);
+                    }
+                }
+            } catch { /* skip if memory unavailable */ }
+        }
+
+        // ── File-system existence scan (all models) ───────────────────────────
+        // For add/implement/create tasks: scan app/routes, app/services, app/views
+        // programmatically for routes and functions matching the task keywords.
+        // Runs BEFORE the model is called so it never wastes turns discovering this.
+        // This is the same logic as preProcessEditTask's fs-scan but runs for ALL models.
+        if (isImplementTask) {
+            try {
+                const hasPyFs = fs.existsSync(path.join(this.workspaceRoot, 'requirements.txt'))
+                    || fs.existsSync(path.join(this.workspaceRoot, 'pyproject.toml'))
+                    || fs.existsSync(path.join(this.workspaceRoot, 'setup.py'));
+                const STOP_FS = new Set(['add','insert','fix','update','change','modify','implement',
+                    'the','a','an','to','in','on','of','for','that','this','and','or','with',
+                    'from','into','should','would','could','will','can','all','returns',
+                    'return','json','please','just','need']);
+                const fsKws = userMessage.toLowerCase().split(/\W+/)
+                    .filter(w => w.length > 3 && !STOP_FS.has(w)).slice(0, 6);
+
+                logInfo(`[fs-scan] hasPyFs=${hasPyFs} fsKws=${JSON.stringify(fsKws)} isImplementTask=${isImplementTask}`);
+                if (hasPyFs && fsKws.length >= 1) {
+                    const scanDirs = ['app/routes', 'app/services', 'app/views', 'app/blueprints']
+                        .map(d => path.join(this.workspaceRoot, d))
+                        .filter(d => fs.existsSync(d));
+
+                    interface FsScanHit { relPath: string; matchedRoutes: string[]; matchedFunctions: string[] }
+                    const fsHits: FsScanHit[] = [];
+
+                    for (const scanDir of scanDirs) {
+                        let pyFiles: string[];
+                        try { pyFiles = fs.readdirSync(scanDir).filter(f => f.endsWith('.py') && f !== '__init__.py'); }
+                        catch { continue; }
+
+                        for (const pf of pyFiles) {
+                            const pfAbs = path.join(scanDir, pf);
+                            let pfContent: string;
+                            try { pfContent = fs.readFileSync(pfAbs, 'utf8'); }
+                            catch { continue; }
+
+                            const pfLower = pfContent.toLowerCase();
+                            if (fsKws.filter(kw => pfLower.includes(kw)).length < 2) { continue; }
+
+                            const matchedRoutes: string[] = [];
+                            const matchedFunctions: string[] = [];
+                            for (const line of pfContent.split('\n')) {
+                                const rm = line.match(/^\s*@\w+\.route\(['"]([^'"]+)['"]/);
+                                if (rm) { matchedRoutes.push(rm[1]); }
+                                const fm = line.match(/^\s*(?:async\s+)?def\s+(\w+)\s*\(/);
+                                if (fm && !fm[1].startsWith('_')) { matchedFunctions.push(fm[1]); }
+                            }
+
+                            const relevantRoutes = matchedRoutes.filter(r => fsKws.some(kw => r.toLowerCase().includes(kw)));
+                            const relevantFns = matchedFunctions.filter(fn => fsKws.some(kw => fn.toLowerCase().includes(kw)));
+
+                            if (relevantRoutes.length > 0 || relevantFns.length > 0) {
+                                const rel = path.relative(this.workspaceRoot, pfAbs).replace(/\\/g, '/');
+                                fsHits.push({ relPath: rel, matchedRoutes: relevantRoutes, matchedFunctions: relevantFns });
+                                logInfo(`[fs-scan] Hit: ${rel} (routes: ${relevantRoutes.join(', ')}, fns: ${relevantFns.join(', ')})`);
+                            }
+                        }
+                    }
+
+                    // If the user named an explicit target file that doesn't exist on disk,
+                    // hits in OTHER files are not "already done" — they're related code elsewhere.
+                    // Only warn when hits are in the same file the user targeted (or no explicit target).
+                    const explicitFileMatch = userMessage.match(/\b([\w./\\-]+\.(?:py|ts|js|go|java|rs|rb|php))\b/i);
+                    const explicitRelPath = explicitFileMatch ? explicitFileMatch[1].replace(/\\/g, '/') : null;
+                    const explicitAbsPath = explicitRelPath ? path.resolve(this.workspaceRoot, explicitRelPath) : null;
+                    const explicitFileIsMissing = explicitAbsPath ? !fs.existsSync(explicitAbsPath) : false;
+                    const filteredHits = explicitFileIsMissing
+                        ? fsHits.filter(h => h.relPath.replace(/\\/g, '/') === explicitRelPath)
+                        : fsHits;
+
+                    if (filteredHits.length > 0) {
+                        const hitLines = filteredHits.map(h => {
+                            const parts = [`  File: \`${h.relPath}\``];
+                            if (h.matchedRoutes.length > 0) { parts.push(`  Routes: ${h.matchedRoutes.map(r => `\`${r}\``).join(', ')}`); }
+                            if (h.matchedFunctions.length > 0) { parts.push(`  Functions: ${h.matchedFunctions.map(f => `\`${f}\``).join(', ')}`); }
+                            return parts.join('\n');
+                        }).join('\n\n');
+                        baseSystemWithMemory += `\n\n## [FEATURE ALREADY EXISTS — FILE SYSTEM SCAN]\n\nBefore writing any code, a programmatic scan of the project found existing code matching this task:\n\n${hitLines}\n\nYou MUST:\n1. Read the file(s) listed above\n2. Tell the user exactly what already exists\n3. Only write NEW code if the requested feature is genuinely absent from those files\n4. Do NOT re-implement anything that already exists`;
+                        logInfo(`[fs-scan] Injected existence warning: ${filteredHits.length} hit(s) for [${fsKws.join(', ')}]`);
+                    } else if (explicitFileIsMissing && fsHits.length > 0) {
+                        // Hits exist in other files — inform the model but don't block creation.
+                        // Also inject a sibling file as a structural template so the model
+                        // writes correct imports on the first try instead of guessing.
+                        const targetDirAbs = explicitAbsPath ? path.dirname(explicitAbsPath) : null;
+                        let siblingTemplate = '';
+                        if (targetDirAbs && fs.existsSync(targetDirAbs)) {
+                            try {
+                                const siblingEntry = fs.readdirSync(targetDirAbs)
+                                    .filter(e => e.endsWith('.py') && !e.startsWith('__'))
+                                    .map(e => path.join(targetDirAbs, e))
+                                    .find(f => { try { return fs.statSync(f).size < 30_000; } catch { return false; } });
+                                if (siblingEntry) {
+                                    const sibContent = fs.readFileSync(siblingEntry, 'utf8').slice(0, 3000);
+                                    const sibRel = path.relative(this.workspaceRoot, siblingEntry).replace(/\\/g, '/');
+                                    siblingTemplate = `\n\n[SIBLING TEMPLATE — copy these imports/structure for the new file]\nFile: ${sibRel}\n\`\`\`python\n${sibContent}\n\`\`\``;
+                                    logInfo(`[fs-scan] Injected sibling template from ${sibRel}`);
+                                }
+                            } catch { /* non-fatal */ }
+                        }
+                        baseSystemWithMemory += `\n\n## [NEW FILE REQUIRED]\n\nThe target file \`${explicitRelPath}\` does not exist yet — CREATE it.\n\nRelated routes in other files (reference only — do not modify them):\n${fsHits.map(h => `  \`${h.relPath}\`: ${h.matchedRoutes.join(', ')}`).join('\n')}${siblingTemplate}\n\nUse edit_file with:\n- path="${explicitRelPath}"\n- old_string="" (empty — creates new file)\n- new_string=<complete Python module content>\n\nCopy the import style from the sibling template above. Do NOT use run_command or New-Item.`;
+                        logInfo(`[fs-scan] New-file task: suppressed existence block, ${fsHits.length} related hit(s) noted as reference`);
+                    } else if (explicitFileIsMissing) {
+                        // No related hits at all — pure new file
+                        const targetDirAbs2 = explicitAbsPath ? path.dirname(explicitAbsPath) : null;
+                        let siblingTemplate2 = '';
+                        if (targetDirAbs2 && fs.existsSync(targetDirAbs2)) {
+                            try {
+                                const siblingEntry2 = fs.readdirSync(targetDirAbs2)
+                                    .filter(e => e.endsWith('.py') && !e.startsWith('__'))
+                                    .map(e => path.join(targetDirAbs2, e))
+                                    .find(f => { try { return fs.statSync(f).size < 30_000; } catch { return false; } });
+                                if (siblingEntry2) {
+                                    const sibContent2 = fs.readFileSync(siblingEntry2, 'utf8').slice(0, 3000);
+                                    const sibRel2 = path.relative(this.workspaceRoot, siblingEntry2).replace(/\\/g, '/');
+                                    siblingTemplate2 = `\n\n[SIBLING TEMPLATE]\nFile: ${sibRel2}\n\`\`\`python\n${sibContent2}\n\`\`\``;
+                                    logInfo(`[fs-scan] Injected sibling template (no hits) from ${sibRel2}`);
+                                }
+                            } catch { /* non-fatal */ }
+                        }
+                        if (siblingTemplate2) {
+                            baseSystemWithMemory += `\n\n## [NEW FILE REQUIRED]\n\nThe target file \`${explicitRelPath}\` does not exist yet — CREATE it.${siblingTemplate2}\n\nUse edit_file with old_string="" (empty) and new_string=<complete file content based on sibling template>.`;
+                        }
+                    }
+                }
+            } catch { /* non-fatal */ }
+        }
+
         // Fix 6a: Task-type-specific system prompt suffix
         // Small, focused instructions beat long generic ones for 7B models.
         // Only appended when we know the task type (edit task with pre-loaded context).
@@ -2808,8 +3162,17 @@ Do NOT assume you have no memory — check first.`;
         let lastToolMode: 'native' | 'text' | null = null;
         let systemContent = '';
 
+        // ── Multi-model routing ────────────────────────────────────────────────
+        // Track whether the previous turn was purely read-only (shell_read, memory_*)
+        // so we can downshift to the fast model when no writes have happened yet.
+        const READ_ONLY_TOOLS = new Set(['shell_read', 'memory_search', 'memory_list', 'memory_tier_list', 'memory_stats']);
+        let prevTurnWasReadOnly = isPlanTask || isCreativeTask; // plan/creative tasks start in read mode
+        const routedFastModel = cfg.modelRoutingEnabled ? (cfg.fastModel || model) : model;
+        const routedCriticModel = cfg.modelRoutingEnabled ? (cfg.criticModel || model) : model;
+
         for (let turn = 0; turn < MAX_TURNS; turn++) {
-            if (this.stopRef.stop) { break; }
+            if (this.stopRef.stop) { this._runOutcome = 'stopped'; break; }
+            this._runTurnCount = turn + 1;
             this._focusedGrepInjectedThisTurn = false; // Reset per-turn to prevent double-injection
             this._recentSearchResultIds.clear();        // Reset per-turn search_hit tracking
 
@@ -3042,10 +3405,17 @@ Do NOT assume you have no memory — check first.`;
 
             post({ type: 'streamStart' });
 
+            // Route to fast model when the previous turn was purely reads and no edits yet
+            const effectiveModel = (prevTurnWasReadOnly && this._editsThisRun === 0)
+                ? routedFastModel : model;
+            if (effectiveModel !== model) {
+                logInfo(`[routing] Using fast model "${effectiveModel}" for read-only turn`);
+            }
+
             let result: StreamResult;
             try {
                 result = await streamChatRequest(
-                    model,
+                    effectiveModel,
                     [{ role: 'system', content: systemContent }, ...this.history, ...(memoryNudgeMsg ? [memoryNudgeMsg] : [])],
                     tools,
                     (token) => post({ type: 'token', text: token }),
@@ -3075,6 +3445,9 @@ Do NOT assume you have no memory — check first.`;
             }
 
             post({ type: 'streamEnd' });
+
+            // Store logprob confidence for use in tool handlers (e.g. edit_file warning)
+            this._lastResponseAvgLogprob = result.avgLogprob;
 
             // Log full content for debugging
             logInfo(`[agent] Full response content (${result.content.length} chars): ${result.content}`);
@@ -3181,15 +3554,21 @@ Do NOT assume you have no memory — check first.`;
                     // Detect a correct EXPLORE→CONFIRM stop: model explored with tools (turn > 0),
                     // produced a structured plan (has ## headers or numbered list), and asked a
                     // single closing question. This is intentional — do NOT retry it.
-                    const isConfirmStop = turn > 0
-                        && /(?:##|\n\d+\.\s|\*\*).{20,}/i.test(resp)   // has plan structure
-                        && /does this match|sound right|shall i proceed|should i proceed|want me to proceed|like me to proceed|would you like me to (start|begin|implement|proceed)|ready to (implement|proceed|start|begin)|should we proceed|want to proceed/i.test(resp);
-                    const isAskingPermission = !isConfirmStop
-                        && /would you like me to|shall i|do you want me to|want me to proceed|like me to continue|is there anything specific/i.test(resp);
                     // userWantsAction: message must be imperative (not a question) and use strong action verbs
                     // Exclude: questions (?), explain/describe/show/tell/what/why/how requests
                     const isQuestion = /\?/.test(userMessage) || /^\s*(what|why|how|can you|could you|would you|do you|is|are|explain|describe|show me|tell me|what is|what are)\b/i.test(userMessage);
                     const userWantsAction = !isQuestion && !isExplainQuery && /\b(find|search|look|locate|show|implement|apply|execute|move|rename|reorganize|restructure|create|build|migrate|edit|update|fix|modify|refactor|rewrite|convert|transform|add|remove|delete|deploy|install|split|separate|extract|merge|track|store|record|save|run the|do the|do it|make the|need to|we need|want to)\b/.test(lastMsg);
+                    // isConfirmStop: model explored with tools, built a plan, and asked a single closing question.
+                    // Only valid as a stop if: (a) model has actually done edits (not just reads), OR
+                    // (b) the task is not a pure action task (e.g. it's a review/explain).
+                    // Prevents the pattern: read 3 files → output plan + questions → wait for user.
+                    const hasEditsThisSession = this._lastEditedFilePath !== '';
+                    const isConfirmStop = turn > 0
+                        && /(?:##|\n\d+\.\s|\*\*).{20,}/i.test(resp)   // has plan structure
+                        && /does this match|sound right|shall i proceed|should i proceed|want me to proceed|like me to proceed|would you like me to (start|begin|implement|proceed)|ready to (implement|proceed|start|begin)|should we proceed|want to proceed/i.test(resp)
+                        && (!userWantsAction || hasEditsThisSession || isReviewTask);
+                    const isAskingPermission = !isConfirmStop
+                        && /would you like me to|shall i|do you want me to|want me to proceed|like me to continue|is there anything specific|does this match what you|one question:|should (the endpoint|i include|we include|i proceed|i register|i add|i update)|which fields should|should i proceed|shall i proceed|will you handle|handle that separately|or will you|do you want me|want me to also/i.test(resp);
                     const hasCodeBlockButNoTool = /```/.test(resp) && !toolCalls.length;
                     // Detect validation stops: model reviewed the code and decided not to act
                     const isValidationStop = this._editContextInjected && !toolCalls.length
@@ -3265,10 +3644,17 @@ Do NOT assume you have no memory — check first.`;
                     const userAskedForPlan = /\b(plan|design|document|write.*doc|create.*file|save.*plan|discuss|proposal|how.*can|is it possible)\b/i.test(this._currentTaskMessage);
                     const responseHasToolBlock = result.content.includes('<tool>');
                     // Detect task-completion responses — model correctly concluded nothing more needed
-                    const isTaskCompletion = /\b(no (further |more |additional |other )?changes? (are |is )?(needed|required|necessary)|no (further |more )?edits? (are |is )?(needed|required)|already (implemented|fully implemented|in place|connected|wired up|present|exists?|correct)|implementation (is |looks )?(complete|correct|already|done)|task (is |appears )?(complete|done|finished)|nothing (else |more |further |additional )?(is |are |was )?(needed|required|to do)|fully (connected|wired|implemented|functional)|no (action|update|change|edit) (is |are )?(needed|required|necessary))\b/i.test(resp);
+                    // Also detect completion when edits were already made this run and model produces a summary (even with code blocks or "fix" language)
+                    const editsAlreadyMade = this._editsThisRun > 0 && !toolCalls.length && turn > 0;
+                    const isTaskCompletion = editsAlreadyMade
+                        || /\b(no (further |more |additional |other )?changes? (are |is )?(needed|required|necessary)|no (further |more )?edits? (are |is )?(needed|required)|already (implemented|fully implemented|in place|connected|wired up|present|exists?|correct)|implementation (is |looks )?(complete|correct|already|done)|task (is |appears )?(complete|done|finished)|nothing (else |more |further |additional )?(is |are |was )?(needed|required|to do)|fully (connected|wired|implemented|functional)|no (action|update|change|edit) (is |are )?(needed|required|necessary))\b/i.test(resp)
+                        || /✅|task complete|no errors or warnings found|following (our |the )?project conventions?/i.test(resp);
                     const isPlanningInsteadOfDoing = turn > 0 && !toolCalls.length && resp.length > 300
                         && !userAskedForPlan && !responseHasToolBlock && !isTaskCompletion
-                        && /\b(you would|you could|you can|you need to|would need to|we would need to|this (would|will|change will|change would)|to (split|refactor|separate|reorganize|restructure|move|create|migrate)|to (find|check|inspect|verify|look at) (which|each|every|all))\b/i.test(resp);
+                        && /\b(you would|you could|you can|you need to|would need to|we would need to|this (would|will|change will|change would)|to (split|refactor|separate|reorganize|restructure|move|create|migrate)|to (find|check|inspect|verify|look at) (which|each|every|all))\b/i.test(resp)
+                        || (turn > 0 && !toolCalls.length && userWantsAction && !isTaskCompletion
+                            && /what i('ll| will) (create|do|add|make|build|write)|here'?s? (my plan|what i('ll| will)|the plan)|what i found:/i.test(resp)
+                            && /\?/.test(resp.slice(-300)));
                     // Detect: model read a file, found a bug, but output a code snippet instead of calling edit_file
                     // Pattern: turn > 0 (file was already read), no tool calls, uses advisory language about a fix
                     // Does NOT require a fenced code block — inline code or plain text advisories also count
@@ -3277,7 +3663,10 @@ Do NOT assume you have no memory — check first.`;
                     // Also catches schema dump: response describes a db.Column addition with a code block but doesn't call edit_file
                     const isSchemaCodeDump = turn > 0 && !toolCalls.length && userWantsAction
                         && /```[\s\S]*?db\.Column[\s\S]*?```/.test(resp);
+                    // Only trigger isSuggestedFixDump when no edits have been made yet this run.
+                    // If _editsThisRun > 0, the model already applied its fixes — a code-containing summary is a completion, not a stall.
                     const isSuggestedFixDump = turn > 0 && !toolCalls.length && (userWantsAction || isBugReport)
+                        && this._editsThisRun === 0
                         && (/\b(suggested fix|immediate fix|for example[,:]|fix:|here'?s? (the|a|my) fix|apply (this|the) fix|example fix|proposed fix|recommended fix|to fix this|the fix is|corrected line|specific line to fix|add (a )?null check|add (a )?guard|wrap.*in.*try|replace.*with|update (the|this) (log|line|code|statement) to use|change .* to )\b/i.test(resp)
                         || isSchemaCodeDump);
                     // Don't retry explain/read tasks that already received tool results and produced a substantive answer.
@@ -3308,7 +3697,7 @@ Do NOT assume you have no memory — check first.`;
                     const isSummaryWithQuestion = !toolCalls.length
                         && !modelAlreadyAnswered
                         && !isHedgingWithoutReading
-                        && !isPlanTask && !isReviewTask
+                        && !isPlanTask && !isReviewTask && !isCreativeTask
                         && !isTaskCompletion
                         && !isConfirmStop
                         && !isSubstantiveAnalysis
@@ -3482,16 +3871,45 @@ Do NOT assume you have no memory — check first.`;
                     });
                 }
 
-                // ── Fix M3: Session-end save to Tier 3 ───────────────────
-                // When a session completes successfully (model gave final answer after ≥1 tool call),
-                // save a durable summary of what was accomplished to Tier 3 (Collaboration).
+                // ── Session-end save to Tier 3 ───────────────────────────
+                // When a session completes successfully (model gave final answer after ≥1 edit),
+                // save a structured "completed feature" entry to Tier 3 so future sessions
+                // can detect it via the prior-work existence check above.
                 if (this.memory && this._editsThisRun > 0) {
                     const sessionFacts: string[] = [];
-                    if (this._currentTaskMessage) { sessionFacts.push(`Task: ${this._currentTaskMessage.slice(0, 80)}`); }
-                    if (this._lastEditedFilePath) { sessionFacts.push(`Last edited: ${this._lastEditedFilePath}`); }
-                    sessionFacts.push(`Edits this session: ${this._editsThisRun}`);
-                    sessionFacts.push(`Completed: ${new Date().toLocaleDateString()}`);
-                    // Include any Tier 2 auto-discoveries from this session
+                    const taskMsg = this._currentTaskMessage ?? '';
+                    if (taskMsg) { sessionFacts.push(`Task: ${taskMsg.slice(0, 100)}`); }
+
+                    // Collect all files touched this session from fileChanged events
+                    // (_filesAutoReadThisRun tracks reads; collect edited paths from tool history)
+                    const editedPaths: string[] = [];
+                    if (this._lastEditedFilePath) { editedPaths.push(this._lastEditedFilePath); }
+                    // Walk history for edit_file tool calls that succeeded
+                    for (const msg of this.history) {
+                        if (msg.role !== 'assistant') { continue; }
+                        const toolBlocks = [...(msg.content?.matchAll(/"name"\s*:\s*"edit_file"[\s\S]{0,200}"path"\s*:\s*"([^"]+)"/g) ?? [])];
+                        for (const m of toolBlocks) {
+                            const p = m[1];
+                            if (p && !editedPaths.includes(p)) { editedPaths.push(p); }
+                        }
+                    }
+                    if (editedPaths.length > 0) {
+                        sessionFacts.push(`Files modified: ${editedPaths.slice(0, 6).join(', ')}`);
+                    }
+
+                    sessionFacts.push(`Edits: ${this._editsThisRun}`);
+                    sessionFacts.push(`Date: ${new Date().toLocaleDateString()}`);
+
+                    // Extract feature keywords from the task message for future searchability
+                    const stopWords = new Set(['the','this','that','with','from','into','for','and','create','make','build','add','implement','write','should','would','could','please','just','need','want','a','an','to','in','on','of','is','are','was','were','be','been','being','have','has','had','do','does','did','will','can']);
+                    const featureKws = (taskMsg.match(/\b([a-z][a-z0-9_]{3,})\b/gi) ?? [])
+                        .filter(w => !stopWords.has(w.toLowerCase()))
+                        .slice(0, 8);
+                    if (featureKws.length > 0) {
+                        sessionFacts.push(`Keywords: ${featureKws.join(', ')}`);
+                    }
+
+                    // Include Tier 2 auto-discoveries from this session
                     try {
                         const tier2Recent = this.memory.getTier(2)
                             .filter(e => e.tags?.includes('auto-discovery') || e.tags?.includes('file-resolution'))
@@ -3499,13 +3917,13 @@ Do NOT assume you have no memory — check first.`;
                             .map(e => e.content.slice(0, 100));
                         if (tier2Recent.length) { sessionFacts.push(`Discoveries: ${tier2Recent.join(' | ')}`); }
                     } catch { /* skip */ }
+
                     const sessionNote = sessionFacts.join('\n');
-                    this.memory.isSemanticDuplicate(sessionNote, 0.9).then(isDupe => {
-                        if (!isDupe) {
-                            this.memory!.addEntry(3, sessionNote, ['session-end', 'completed']).catch(() => {});
-                            logInfo(`[memory] Session-end: saved to Tier 3`);
-                        }
-                    }).catch(() => {});
+                    // Write unconditionally — skip isSemanticDuplicate to avoid blocking
+                    // on an embedding call while Ollama is busy unloading the main model.
+                    // Tier 3 duplicates are harmless and get evicted naturally.
+                    this.memory!.addEntry(3, sessionNote, ['session-end', 'completed', 'completed-feature']).catch(() => {});
+                    logInfo(`[memory] Session-end: saved completed-feature to Tier 3 (${editedPaths.length} files, ${featureKws.length} keywords)`);
                 }
 
                 // ── search_hit upgrade ───────────────────────────────────
@@ -3563,6 +3981,10 @@ Do NOT assume you have no memory — check first.`;
                 const toolId = `t_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
                 logInfo(`Tool [${this.toolMode}]: ${name}  args=${JSON.stringify(args)}`);
                 post({ type: 'toolCall', id: toolId, name, args });
+
+                // Record tool call for session log
+                const tcPath = String(args.path ?? args.file_path ?? args.command ?? '') || undefined;
+                this._toolCallsThisRun.push({ name, path: tcPath });
 
                 // Detect repeated identical tool calls
                 const toolSig = `${name}_${JSON.stringify(args)}`;
@@ -3646,10 +4068,9 @@ Do NOT assume you have no memory — check first.`;
                 // Plan tasks legitimately call shell_read many times while exploring the codebase.
                 // Skip the same-tool consecutive limit in both cases to avoid breaking mid-exploration.
                 const skipSameToolLimit = (this._isSweepTask && (name === 'edit_file' || name === 'shell_read'))
-                    || (isPlanTask && name === 'shell_read');
+                    || ((isPlanTask || isCreativeTask) && name === 'shell_read');
                 if (!skipSameToolLimit && this.consecutiveSameToolCalls >= sameToolLimit) {
                     logWarn(`[agent] Breaking same-tool loop: ${name} called ${this.consecutiveSameToolCalls} times consecutively (limit: ${sameToolLimit})`);
-                    // Tell the model to try a different approach — not just summarize and give up
                     const hint = `You have called ${name} ${this.consecutiveSameToolCalls} times in a row. Try a different approach — use a different tool or different arguments.`;
                     if (isTextMode) {
                         this.history.push({ role: 'user', content: `[SYSTEM: ${hint}]` });
@@ -3685,7 +4106,7 @@ Do NOT assume you have no memory — check first.`;
                 // Get-ChildItem/ls/find calls are "listing" reads — limit to 3 before warning.
                 // Get-Content/cat calls are "content" reads — these are valuable, don't count them.
                 const exploreTaskWantsAction = /\b(implement|apply|add|build|create|track|store|record|save|need to|we need|want to|should get|should send|should have)\b/i.test(this._currentTaskMessage);
-                if (name === 'shell_read' && exploreTaskWantsAction && !isPlanTask && !isReviewTask && !this._schemaChangeConfirmed && this._editsThisRun === 0 && !isSweepTask) {
+                if (name === 'shell_read' && exploreTaskWantsAction && !isPlanTask && !isReviewTask && !isCreativeTask && !this._schemaChangeConfirmed && this._editsThisRun === 0 && !isSweepTask) {
                     // A "listing" command is one whose PRIMARY purpose is to list files/dirs.
                 // Get-ChildItem piped into Select-String is a GREP (content search) — don't count it.
                 const cmdStr2 = String(args.command ?? '');
@@ -3762,7 +4183,7 @@ Do NOT assume you have no memory — check first.`;
                         || /\bpip3\s+install\b/i.test(cmdStr0);
                     if (isMigrationCmd || isPipInstall) {
                         const scopeMsg = isMigrationCmd
-                            ? `[BLOCKED: Scope boundary] You must NOT run database migrations. Your job is to write code only. Tell the user: "The column has been added to the model. You'll need to run a migration: flask db migrate -m '<description>' && flask db upgrade" — then STOP. Do not run any commands.`
+                            ? `[BLOCKED: Scope boundary] You must NOT run database migrations directly. Your job is to write code only. Before telling the user how to apply the migration, you must first determine WHERE the database runs: check memory_search("database host server"), read .env, or read deploy.sh. If the DB is on a remote server, give the user SSH-based commands. If local, give local commands. If you don't know, ask: "Is the database local or on a remote server?" — then STOP. Do not run any commands.`
                             : `[BLOCKED: Scope boundary] You must NOT run pip install. Your job is to write code only. Report the missing module to the user and stop. Do not attempt to install packages.`;
                         if (isTextMode) {
                             this.history.push({ role: 'user', content: `[tool:run_command] ${scopeMsg}` });
@@ -3788,6 +4209,7 @@ Do NOT assume you have no memory — check first.`;
                             || (/\bpass\b/.test(cmdStr) && /\#.*from\s+\w+\.py/i.test(cmdStr));
                         if (hasAddContentStub) {
                             logWarn(`[merge-guard] Blocked stub Add-Content — contains placeholder comments`);
+                            this._guardEvents.push({ type: 'merge-guard', reason: 'Add-Content contains stub/placeholder code' });
                             const stubMsg = `[BLOCKED] Your Add-Content contains placeholder/stub comments like "# Implementation details..." or "pass". You MUST paste the REAL, VERBATIM code from the source file.\n\n1. Use shell_read with "Get-Content '<source_file>' | Out-String" to read the FULL source file\n2. Copy the ACTUAL method implementation exactly as it appears\n3. Use Add-Content with the real code — no summaries, no stubs, no placeholders`;
                             if (isTextMode) {
                                 this.history.push({ role: 'user', content: `[tool:run_command] ${stubMsg}` });
@@ -3831,6 +4253,7 @@ Do NOT assume you have no memory — check first.`;
                             }
                             if (!isStubFile && !editExhausted) {
                                 logWarn(`[merge-guard] Blocked delete without edit_file: ${cmdStr.slice(0, 80)}`);
+                                this._guardEvents.push({ type: 'merge-guard', reason: 'delete blocked — must merge content first' });
                                 const deletingFile = pathMatch?.[1] ?? 'the file';
                                 const blockedResult = `[BLOCKED] You tried to delete "${deletingFile}" without merging its content first.\n\nYou MUST:\n1. Read "${deletingFile}" with shell_read\n2. Identify any methods/functions in it that do NOT exist in the surviving (larger) file\n3. Use edit_file to append those methods to the END of the surviving file\n4. ONLY THEN delete "${deletingFile}"\n\nDo NOT try to delete again until step 3 succeeds. Start by reading "${deletingFile}" now.`;
                                 this.history.push({ role: 'user', content: `[tool:run_command] ${blockedResult}` });
@@ -3895,6 +4318,7 @@ Do NOT assume you have no memory — check first.`;
                         }
                         post({ type: 'toolResult', id: toolId, name, success: false, preview: `(schema change blocked — awaiting confirmation)` });
                         logInfo(`[schema-guard] Blocked db.Column addition to model file: ${targetPath}`);
+                        this._guardEvents.push({ type: 'schema-guard', reason: 'db.Column addition requires migration confirmation', file: targetPath });
                         continue;
                     }
                 }
@@ -3926,58 +4350,11 @@ Do NOT assume you have no memory — check first.`;
                                     }
                                     post({ type: 'toolResult', id: toolId, name, success: false, preview: `(blocked — ${missing.join(', ')} not defined)` });
                                     logWarn(`[undef-guard] Blocked call to undefined: ${missing.join(', ')} in ${ufPath}`);
+                                    this._guardEvents.push({ type: 'undef-guard', reason: `undefined references: ${missing.join(', ')}`, file: ufPath });
                                     continue;
                                 }
                             } catch { /* file read failed — skip guard */ }
                         }
-                    }
-                }
-
-                // ── Feature-write guard: require confirmation before adding new functions ──
-                // Fires when: edit_file adds a substantial new function AND the task message is exploratory/vague
-                // (not a targeted bug fix). Does NOT fire if _schemaChangeConfirmed is already set.
-                if ((name === 'edit_file' || name === 'edit_file_at_line') && !this._schemaChangeConfirmed) {
-                    const targetPath2 = String(args.path ?? args.file_path ?? '');
-                    const newStr2 = String(args.new_string ?? '');
-                    const normPath2 = targetPath2.replace(/\\/g, '/');
-                    // Any source file (not a config/template/test) — language-agnostic
-                    const isModelFile2 = normPath2.includes('/models/') && normPath2.endsWith('.py');
-                    const isSourceFile = !isModelFile2 && /\.(py|ts|js|rb|go|java|cs|php)$/.test(normPath2)
-                        && !/\.(test|spec|config|lock|min)\./i.test(normPath2);
-                    // Exploratory task = vague high-level request, not a pinpoint fix
-                    const isExploratory = /\b(what else|could|might|benefit|improve|enhance|review|suggest|recommend|consider|explore|refactor|look at|what can)\b/i.test(this._currentTaskMessage)
-                        || /\b(let'?s? work on|i like this|sounds good|go ahead with)\b/i.test(this._currentTaskMessage);
-                    const isServiceOrRoute = isSourceFile && (isExploratory || exploreTaskWantsAction);
-                    const addsNewMethod = /^\s*(@\w+\s*\n\s*)?(?:async\s+)?(?:def|function|func|fn)\s+\w+/m.test(newStr2)
-                        || /^\s*(?:export\s+)?(?:async\s+)?(?:function|const\s+\w+\s*=\s*(?:async\s+)?\()/m.test(newStr2);
-                    // Only block when the new_string is substantial (>100 chars) and adds a new method
-                    // This filters out small targeted fixes (typo, variable rename, one-liner)
-                    const isSubstantialAdd = newStr2.length > 100 && addsNewMethod;
-                    if (isServiceOrRoute && isSubstantialAdd) {
-                        this._featureGuardBlockCount++;
-                        const fileName = targetPath2.replace(/\\/g, '/').split('/').pop() ?? targetPath2;
-                        const methodMatch = newStr2.match(/def\s+(\w+)\s*\(/);
-                        const methodName = methodMatch ? methodMatch[1] : 'new method';
-                        const featureMsg = `[BLOCKED: Unconfirmed feature write]\n\nYou are about to add a new function "${methodName}" to ${fileName} without first presenting a plan.\n\nFor feature requests, you MUST:\n1. Finish EXPLORE (check all relevant files)\n2. Present a CONFIRM summary: what you found, what files you'll create/modify, what you will NOT do\n3. End with "Does this match what you want?" and STOP\n4. Only write code after the user confirms\n\nPresent your findings and plan to the user NOW. Do not call edit_file until confirmed.`;
-                        if (isTextMode) {
-                            this.history.push({ role: 'user', content: `[tool:edit_file] ${featureMsg}` });
-                        } else {
-                            this.history.push({ role: 'tool', content: featureMsg });
-                        }
-                        post({ type: 'toolResult', id: toolId, name, success: false, preview: `(feature write blocked — present plan first)` });
-                        logInfo(`[feature-guard] Blocked unconfirmed feature write to service/route file: ${targetPath2} (block #${this._featureGuardBlockCount})`);
-                        // After 2 blocks, force-break the tool loop so the model must respond to the user
-                        if (this._featureGuardBlockCount >= 2) {
-                            logWarn(`[feature-guard] Blocked ${this._featureGuardBlockCount} times — breaking tool loop to force plan presentation`);
-                            const confirmFormatMsg = `[SYSTEM: You have been blocked from writing code twice. You MUST now present a CONFIRM plan to the user as plain text — NO code blocks allowed.\n\nFormat your response exactly like this:\n\nEXPLORE complete. Here is what I found:\n- [list each file you read and the key relevant facts]\n\nHere is my plan:\n1. File: [file path] — [what you will add/change, in plain English, no code]\n2. File: [file path] — [what you will add/change]\n\nI will NOT:\n- [things you explicitly will not do]\n\nDoes this match what you want?\n\nDo NOT include code blocks. Do NOT use \`\`\` fences. Describe the logic in plain English only. End with exactly "Does this match what you want?" and stop.]`;
-                            if (isTextMode) {
-                                this.history.push({ role: 'user', content: confirmFormatMsg });
-                            } else {
-                                this.history.push({ role: 'tool', content: confirmFormatMsg });
-                            }
-                            break;
-                        }
-                        continue;
                     }
                 }
 
@@ -3994,6 +4371,7 @@ Do NOT assume you have no memory — check first.`;
                         || (/\bpass\b/.test(newStr) && /\#.*from\s+\w+\.py/i.test(newStr));
                     if (hasStub) {
                         logWarn(`[merge-guard] Blocked stub edit_file — new_string contains placeholder comments`);
+                        this._guardEvents.push({ type: 'merge-guard', reason: 'edit_file new_string contains stub/placeholder code', file: String(args.path ?? '') });
                         const stubMsg = `[BLOCKED] Your new_string contains stub/placeholder code like "# Implementation from X.py\\npass" or "# Additional methods would be inserted here" instead of real code.\n\nYou MUST copy the ACTUAL method bodies verbatim from the source file.\n\nStep 1: Run shell_read with: Get-Content '<source_file>' | Out-String\nStep 2: Find the specific method in the output\nStep 3: Copy the ENTIRE method body — every line, verbatim, with correct indentation\nStep 4: Use that copied code as the new_string in edit_file\n\nDo NOT write placeholder comments or pass statements. Do NOT summarize. Copy real code only.`;
                         if (isTextMode) {
                             this.history.push({ role: 'user', content: `[tool:edit_file] ${stubMsg}` });
@@ -4134,7 +4512,8 @@ Do NOT assume you have no memory — check first.`;
                         && !isSweepMessage
                         && !this._isEditTask
                         && !isReviewTask
-                        && !isPlanTask) {
+                        && !isPlanTask
+                        && !isCreativeTask) {
                         const interceptCmd = String(args.command ?? '');
                         const interceptPathMatch = interceptCmd.match(/['"](.*?)['"]/);
                         const interceptPath = interceptPathMatch?.[1] ?? '';
@@ -4279,16 +4658,13 @@ Do NOT assume you have no memory — check first.`;
                                     : `awk 'NR>=${startLine} && NR<=${endLine} {printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`;
                                 logInfo(`[agent] edit_file failed at line ${lineNum} — reading lines ${startLine}-${endLine}`);
                             } else {
-                                // Search for the first line of the failed old_string so we find the
-                                // actual location and can show the model the real surrounding context.
-                                const firstLineOfOld = String(args.old_string ?? '').split('\n')[0].trim();
-                                // Escape special regex chars in the first line
-                                const escapedFirst = firstLineOfOld.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 80);
-                                const fallbackPattern = escapedFirst.length > 3 ? escapedFirst : 'def |class |return ';
+                                // No line number in error — read the full file with Get-Content so the model
+                                // gets exact raw bytes (no Select-String prefix mangling, no encoding issues).
+                                // This is critical for files with non-ASCII or corrupted bytes in strings.
                                 grepFailCmd = envFail.os === 'windows'
-                                    ? `Get-Content "${absFailPath}" | Select-String -Pattern "${fallbackPattern}" -Context 5,5 | Select-Object -First 30`
-                                    : `grep -n -A 5 -B 5 -E "${fallbackPattern}" "${absFailPath}" | head -100`;
-                                logInfo(`[agent] edit_file old_string failed (first line not found) — searching for: ${fallbackPattern}`);
+                                    ? `Get-Content "${absFailPath}"`
+                                    : `cat "${absFailPath}"`;
+                                logInfo(`[agent] edit_file old_string failed (no line hint) — injecting full file for exact byte matching`);
                             }
                             const failGrepId = `t_failgrep_${Date.now()}`;
                             post({ type: 'toolCall', id: failGrepId, name: 'shell_read', args: { command: grepFailCmd } });
@@ -4426,7 +4802,7 @@ Do NOT assume you have no memory — check first.`;
                                 nudge = `Edit succeeded. Before making another edit to this file, you MUST re-read it first: use shell_read with Get-Content on "${editedPath}" to see the current state. Your mental model of the file may be out of date after the last edit.`;
                             } else {
                                 this._lastEditedFilePath = editedPath;
-                                nudge = 'Edit applied. Before declaring done: re-read the full file and check for other issues in the same file (unused imports, resource leaks, dead code, other functions with the same problem). Fix everything you see in the file before responding. Do NOT show code as a text block — use edit_file for each fix.';
+                                nudge = 'Edit applied. Check for other issues in the same file (e.g. similar bugs, related functions that need the same fix). If you see another issue, call edit_file again. If the task is complete, say so.';
                             }
                         } else {
                             nudge = 'The edit_file FAILED — old_string did not match. Re-read the file with shell_read to get the exact current content, then retry with the correct old_string.';
@@ -4627,13 +5003,27 @@ Do NOT assume you have no memory — check first.`;
                                         nudge = `The path "${bestPath}" was found but returned empty. The file at "${String(args.command ?? '').match(/['"][^'"]*['"]/)?.[0] ?? 'the path you tried'}" does not exist. Use the path from the search result: ${searchResult.slice(0, 200)}`;
                                     }
                                 } else {
-                                    // File not found by exact name — tell the agent to search by content/keyword instead
-                                    const wsRoot3 = this.workspaceRoot.replace(/\\/g, '/');
-                                    const env3b = detectShellEnvironment();
-                                    const broadSearchCmd = env3b.os === 'windows'
-                                        ? `Get-ChildItem -Path '${wsRoot3}' -Recurse -Include '*.html','*.py','*.ts','*.js' | Where-Object { $_.FullName -notmatch '__pycache__|htmlcov' } | Select-Object FullName | Select-Object -First 30`
-                                        : `find '${wsRoot3}' -type f \\( -name '*.html' -o -name '*.py' \\) -not -path '*__pycache__*' | head -30`;
-                                    nudge = `[FILE NOT FOUND] "${fileName}" does not exist at that path and was not found anywhere in the project.\n\nDo NOT create this file. The feature you are looking for is likely implemented inline in an existing file.\n\nSearch for it by content — run this to list all templates and routes:\n${broadSearchCmd}\n\nThen look for the form/section that handles this feature inside those existing files using Select-String.`;
+                                    // File not found by exact name.
+                                    // If the user explicitly named this file in their task, they want it CREATED.
+                                    // Otherwise, tell the agent to search for the feature in existing files.
+                                    const taskMsg = this._currentTaskMessage;
+                                    const userNamedThisFile = fileName && (
+                                        taskMsg.includes(fileName) ||
+                                        // also match path fragments like "app/routes/customers.py"
+                                        (fileNameMatch?.[1] && taskMsg.replace(/\\/g, '/').includes(fileNameMatch[1].replace(/\\/g, '/')))
+                                    );
+                                    if (userNamedThisFile && /\.py|\.ts|\.js/.test(fileName)) {
+                                        // User wants to create this file — guide the model to use edit_file with old_string=""
+                                        const relFromCmd = fileNameMatch?.[1]?.replace(/\\/g, '/') ?? fileName;
+                                        nudge = `[NEW FILE] "${relFromCmd}" does not exist yet — you need to CREATE it.\n\nUse edit_file with:\n- path="${relFromCmd}"\n- old_string="" (empty string — this creates a new file)\n- new_string=<complete file content>\n\nWrite a complete Python module with the proper Flask Blueprint setup and the requested route. Use a sibling file from the same directory as a template for imports and structure.`;
+                                    } else {
+                                        const wsRoot3 = this.workspaceRoot.replace(/\\/g, '/');
+                                        const env3b = detectShellEnvironment();
+                                        const broadSearchCmd = env3b.os === 'windows'
+                                            ? `Get-ChildItem -Path '${wsRoot3}' -Recurse -Include '*.html','*.py','*.ts','*.js' | Where-Object { $_.FullName -notmatch '__pycache__|htmlcov' } | Select-Object FullName | Select-Object -First 30`
+                                            : `find '${wsRoot3}' -type f \\( -name '*.html' -o -name '*.py' \\) -not -path '*__pycache__*' | head -30`;
+                                        nudge = `[FILE NOT FOUND] "${fileName}" does not exist at that path and was not found anywhere in the project.\n\nDo NOT create this file. The feature you are looking for is likely implemented inline in an existing file.\n\nSearch for it by content — run this to list all templates and routes:\n${broadSearchCmd}\n\nThen look for the form/section that handles this feature inside those existing files using Select-String.`;
+                                    }
                                 }
                             } else {
                                 nudge = `The file you tried to read returned almost no content (${toolResult.length} chars) — it may be at the wrong path. Use shell_read with Get-ChildItem -Recurse -Filter to find the correct absolute path first.`;
@@ -4758,6 +5148,8 @@ Do NOT assume you have no memory — check first.`;
                     this.history.push({ role: 'tool', content: toolResultForHistory });
                 }
             }
+            // Update routing hint for next turn: was this turn purely read-only?
+            prevTurnWasReadOnly = allReadOnly && READ_ONLY_TOOLS.has(callsToExecute[0]?.function?.name ?? '');
         }
 
         // If we exhausted all turns without the model producing a final answer, tell the user
@@ -4795,6 +5187,87 @@ Do NOT assume you have no memory — check first.`;
             this._lastPlanStepOutput = '';
             post({ type: 'planComplete' });
             logInfo('[multi-plan] All steps complete');
+        }
+    }
+
+    // ── Critic pass ───────────────────────────────────────────────────────────
+
+    /**
+     * Run a lightweight second-pass review of a completed edit.
+     * Only fires when routing is enabled AND a distinct critic model is configured.
+     * Returns a non-empty string with issues found, or empty string if clean.
+     *
+     * The critic sees only the diff (removed/added lines), not the whole file,
+     * to keep the call fast and focused.
+     */
+    private async runCriticPass(
+        criticModel: string,
+        baseModel: string,
+        rel: string,
+        original: string,
+        newContent: string
+    ): Promise<string> {
+        // Skip if routing is disabled, no critic model configured, or same model as base
+        if (criticModel === baseModel) { return ''; }
+        try {
+            // Build a minimal unified diff (changed lines only, ±3 context lines)
+            const origLines = original.split('\n');
+            const newLines  = newContent.split('\n');
+            const diffLines: string[] = [];
+            const windowSize = 3;
+            const changed = new Set<number>();
+            const maxLen = Math.max(origLines.length, newLines.length);
+            for (let i = 0; i < maxLen; i++) {
+                if (origLines[i] !== newLines[i]) { changed.add(i); }
+            }
+            if (changed.size === 0) { return ''; }
+            const shown = new Set<number>();
+            for (const idx of changed) {
+                for (let k = Math.max(0, idx - windowSize); k <= Math.min(maxLen - 1, idx + windowSize); k++) {
+                    shown.add(k);
+                }
+            }
+            for (const i of [...shown].sort((a, b) => a - b)) {
+                if (i < origLines.length && origLines[i] !== (newLines[i] ?? '')) {
+                    diffLines.push(`- ${origLines[i]}`);
+                }
+                if (i < newLines.length && newLines[i] !== (origLines[i] ?? '')) {
+                    diffLines.push(`+ ${newLines[i]}`);
+                }
+                if (origLines[i] === newLines[i]) {
+                    diffLines.push(`  ${origLines[i]}`);
+                }
+            }
+            const diff = diffLines.slice(0, 120).join('\n'); // cap at 120 lines
+
+            const prompt = `You are a code reviewer. A coding agent just edited \`${rel}\`. Review ONLY the diff below for these specific issues:
+1. Hallucinated identifiers — variable/function names in added lines (+) that don't exist in the context lines
+2. Missing imports — new symbols used that aren't imported
+3. Syntax problems — obviously broken syntax in added lines
+
+Diff (- removed, + added, context lines unprefixed):
+\`\`\`
+${diff}
+\`\`\`
+
+If you find real issues, respond with a SHORT bulleted list (max 3 bullets, 1 line each).
+If the code looks correct, respond with exactly: OK`;
+
+            let response = '';
+            await streamChatRequest(
+                criticModel,
+                [{ role: 'user', content: prompt }],
+                [],
+                (token) => { response += token; },
+                this.stopRef
+            );
+            response = response.trim();
+            logInfo(`[critic] ${rel}: ${response.slice(0, 100)}`);
+            if (response === 'OK' || response.toLowerCase().startsWith('ok')) { return ''; }
+            return response;
+        } catch (err) {
+            logWarn(`[critic] Skipped — ${toErrorMessage(err)}`);
+            return '';
         }
     }
 
@@ -4889,6 +5362,7 @@ Do NOT assume you have no memory — check first.`;
                     this._lastFileOp = { path: rel, originalContent: originalForOverwrite, action: 'edited' };
                     this._editsThisRun++;
                     this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
+                    if (!this._filesChangedThisRun.includes(rel)) { this._filesChangedThisRun.push(rel); }
                     return `Overwrote: ${rel} (${newString.split('\n').length} lines written, corrupted file fixed)`;
                 }
 
@@ -4906,10 +5380,17 @@ Do NOT assume you have no memory — check first.`;
                 // Guard: if the file doesn't exist, give a clear actionable error instead of a raw ENOENT.
                 // This prevents the agent from falling back to New-Item/Set-Content to "create" a file
                 // that should already exist — the real problem is it has the wrong path.
+                // Exception: if the user explicitly named this file in their task, allow creation via old_string="".
                 if (!fs.existsSync(full)) {
+                    const taskMsg4 = this._currentTaskMessage;
+                    const fileName4 = path.basename(rel);
+                    const userNamedThisFile4 = taskMsg4.replace(/\\/g, '/').includes(rel.replace(/\\/g, '/'))
+                        || taskMsg4.includes(fileName4);
+                    if (userNamedThisFile4) {
+                        throw new Error(`edit_file: "${rel}" does not exist yet. To CREATE a new file, call edit_file with old_string="" (empty string) and new_string=<complete file content>. Do not use New-Item or Set-Content.`);
+                    }
                     const wsRoot4 = this.workspaceRoot.replace(/\\/g, '/');
                     const env4 = detectShellEnvironment();
-                    const fileName4 = path.basename(rel);
                     const searchCmd4 = env4.os === 'windows'
                         ? `Get-ChildItem -Path '${wsRoot4}' -Recurse -Filter '${fileName4}' | Where-Object { $_.FullName -notmatch '__pycache__|htmlcov' } | Select-Object FullName`
                         : `find '${wsRoot4}' -name '${fileName4}' -not -path '*__pycache__*'`;
@@ -4959,15 +5440,18 @@ Do NOT assume you have no memory — check first.`;
                 }
 
                 // Guard: block whole-file rewrites disguised as edit_file.
-                // If new_string is much larger than old_string and the result would be a near-complete
-                // replacement of the file, the model is hallucinating the file contents rather than
-                // making a targeted edit. This is especially dangerous for sweep tasks where it would
-                // produce a completely different file from what's actually on disk.
+                // If new_string is much larger than old_string AND the resulting file would be
+                // roughly the same size as the original (i.e. old content was replaced, not inserted),
+                // the model is hallucinating the file contents rather than making a targeted edit.
                 const oldLineCount = oldString.split('\n').length;
                 const newLineCount = newString.split('\n').length;
                 const fileLineCount = original.split('\n').length;
+                const resultLineCount = fileLineCount - oldLineCount + newLineCount;
+                // An insertion (resultLineCount >> fileLineCount) is always legitimate.
+                // Only block when the result stays near the original size (i.e. a replacement).
                 // Skip guard for tiny files (≤10 lines) — replacing a stub/placeholder is legitimate.
-                if (fileLineCount > 10 && newLineCount > oldLineCount * 3 && newLineCount > fileLineCount * 0.5 && oldLineCount < 15) {
+                const isInsertion = resultLineCount > fileLineCount * 1.3;
+                if (fileLineCount > 10 && !isInsertion && newLineCount > oldLineCount * 3 && newLineCount > fileLineCount * 0.5 && oldLineCount < 15) {
                     throw new Error(
                         `edit_file: new_string (${newLineCount} lines) is much larger than old_string (${oldLineCount} lines) ` +
                         `and would replace most of the file. This looks like a whole-file rewrite attempt, which is not allowed. ` +
@@ -5024,6 +5508,7 @@ Do NOT assume you have no memory — check first.`;
                                     this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
                                     this._editsThisRun++;
                                     this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
+                                    if (!this._filesChangedThisRun.includes(rel)) { this._filesChangedThisRun.push(rel); }
                                     const editResult2 = `Edited: ${rel} — ${oldLines.length} line(s) replaced (indentation auto-corrected)`;
                                     const editDiags2 = this.getDiagnostics(root, rel);
                                     if (editDiags2 !== 'No errors or warnings found.') {
@@ -5063,6 +5548,7 @@ Do NOT assume you have no memory — check first.`;
                                 this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
                                 this._editsThisRun++;
                                 this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
+                                if (!this._filesChangedThisRun.includes(rel)) { this._filesChangedThisRun.push(rel); }
                                 const editResult3 = `Edited: ${rel} — ${oldLines.length} line(s) replaced (trailing whitespace auto-corrected)`;
                                 const editDiags3 = this.getDiagnostics(root, rel);
                                 if (editDiags3 !== 'No errors or warnings found.') {
@@ -5144,6 +5630,7 @@ Do NOT assume you have no memory — check first.`;
                 this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
                 this._editsThisRun++;
                 this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
+                if (!this._filesChangedThisRun.includes(rel)) { this._filesChangedThisRun.push(rel); }
 
                 // Auto-save a project memory note when a new named function or route is added
                 if (this.memory) {
@@ -5153,12 +5640,10 @@ Do NOT assume you have no memory — check first.`;
                         const what = routeMatch
                             ? `Route ${routeMatch[1]} added to ${rel}`
                             : `Function ${fnMatch![1]}() added to ${rel}`;
-                        this.memory.isSemanticDuplicate(what, 0.85).then(isDupe => {
-                            if (!isDupe) {
-                                this.memory!.addEntry(2, what, ['auto-edit', 'structure']);
-                                logInfo(`[memory] Auto-saved edit fact: ${what}`);
-                            }
-                        }).catch(() => {});
+                        // Write unconditionally — skip isSemanticDuplicate to avoid
+                        // contending with Ollama while it's mid-generation.
+                        this.memory!.addEntry(2, what, ['auto-edit', 'structure']).catch(() => {});
+                        logInfo(`[memory] Auto-saved edit fact: ${what}`);
                     }
                 }
                 // Fix 5b: Record completed step in task state machine
@@ -5179,7 +5664,22 @@ Do NOT assume you have no memory — check first.`;
                     });
                 }
 
-                const editResult = `Edited: ${rel} — ${oldString.split('\n').length} line(s) replaced with ${newString.split('\n').length} line(s)`;
+                // Low-confidence warning: if the model's average token logprob for this response
+                // was below the threshold, the model was statistically uncertain about what it wrote.
+                // Append a nudge so it double-checks names/signatures in new_string.
+                // Threshold: avg logprob < -1.5 ≈ avg per-token perplexity > 4.5 (meaningfully uncertain).
+                // Only fires when logprobs were actually returned (not null) and new_string is non-trivial.
+                const LOW_LOGPROB_THRESHOLD = -1.5;
+                const avgLp = this._lastResponseAvgLogprob;
+                let logprobWarning = '';
+                if (avgLp !== null && avgLp < LOW_LOGPROB_THRESHOLD && newString.length > 50) {
+                    const pct = Math.round(Math.exp(avgLp) * 100);
+                    logWarn(`[logprob] Low confidence edit: avg logprob=${avgLp.toFixed(3)} (≈${pct}% avg token prob)`);
+                    this._guardEvents.push({ type: 'logprob', reason: `avg token prob ≈${pct}% — verify identifiers`, file: rel });
+                    logprobWarning = `\n\n⚠ Low-confidence edit (avg token probability ≈${pct}%): verify that all identifiers, field names, and function signatures in the new code were read from the file rather than guessed.`;
+                }
+
+                const editResult = `Edited: ${rel} — ${oldString.split('\n').length} line(s) replaced with ${newString.split('\n').length} line(s)${logprobWarning}`;
                 // Auto-check: use py_compile for Python (Pylance diagnostics are stale/unreliable post-edit),
                 // use VSCode diagnostics for TypeScript/JS only
                 const isPyFile = path.extname(full).toLowerCase() === '.py';
@@ -5192,6 +5692,7 @@ Do NOT assume you have no memory — check first.`;
                 const syntaxErr = this.syntaxCheck(full);
                 if (syntaxErr) {
                     logWarn(`[syntax-check] ${rel}: ${syntaxErr.slice(0, 100)}`);
+                    this._guardEvents.push({ type: 'syntax-error', reason: syntaxErr.slice(0, 120), file: rel });
                     return `${editResult}\n\n⚠ Syntax error detected after edit:\n${syntaxErr}\n\nFix this by calling edit_file again with corrected code.`;
                 }
                 if (this.shouldRunTests()) {
@@ -5296,6 +5797,18 @@ Do NOT assume you have no memory — check first.`;
                     }
                 }
 
+                // ── Critic pass ───────────────────────────────────────────────
+                // If routing is enabled and a critic model is configured, run a quick
+                // second-pass review of the diff before returning the result.
+                // The critic only looks at the changed lines — it does not re-read the whole file.
+                const criticResult = await this.runCriticPass(
+                    this._routedCriticModel, this._currentRunModel, rel, original, newContent
+                );
+                if (criticResult) {
+                    this._guardEvents.push({ type: 'scope-guard', reason: `critic: ${criticResult.slice(0, 80)}`, file: rel });
+                    return `${editResult}\n\n🔍 Critic review:\n${criticResult}`;
+                }
+
                 return editResult;
             }
 
@@ -5377,6 +5890,7 @@ Do NOT assume you have no memory — check first.`;
                 fs.writeFileSync(full2, newFile, 'utf8');
                 this._lastFileOp = { path: rel2, originalContent: original2, action: 'edited' };
                 this.postFn({ type: 'fileChanged', path: rel2, action: 'edited' });
+                if (!this._filesChangedThisRun.includes(rel2)) { this._filesChangedThisRun.push(rel2); }
                 const editResult3 = action === 'insert'
                     ? `Inserted ${newLines.length} line(s) at line ${startLine} in ${rel2}`
                     : `Replaced lines ${startLine}-${endLine} with ${newLines.length} line(s) in ${rel2}`;
@@ -5390,6 +5904,7 @@ Do NOT assume you have no memory — check first.`;
                 const syntaxErr3 = this.syntaxCheck(full2);
                 if (syntaxErr3) {
                     logWarn(`[syntax-check] ${rel2}: ${syntaxErr3.slice(0, 100)}`);
+                    this._guardEvents.push({ type: 'syntax-error', reason: syntaxErr3.slice(0, 120), file: rel2 });
                     return `${editResult3}\n\n⚠ Syntax error detected after edit:\n${syntaxErr3}\n\nFix this by calling edit_file again with corrected code.`;
                 }
                 if (this.shouldRunTests()) {
@@ -5647,6 +6162,15 @@ Do NOT assume you have no memory — check first.`;
                     logInfo(`[run_command] Auto-added -Encoding UTF8 to Set-Content/Out-File/Add-Content: ${cmd}`);
                 }
 
+                // Block large Set-Content/Out-File writes on plan/doc files — large generations
+                // cause Ollama to timeout before completing. Redirect to incremental edit_file writes.
+                const largeWriteDocMatch = cmd.match(/['"]([^'"]+\.(?:md|txt|rst))['"]/i);
+                const largeWriteIsFileWrite = /\b(Set-Content|Out-File)\b/i.test(cmd);
+                if (largeWriteDocMatch && largeWriteIsFileWrite && cmd.length > 1000) {
+                    const relDocFile = largeWriteDocMatch[1].replace(/\\/g, '/');
+                    return `[BLOCKED: Large file write via Set-Content will timeout]\n\nWriting large documents in a single Set-Content call causes the model to timeout before generating all the content.\n\nInstead, write the file in sections using edit_file:\n1. First section — create the file:\n   edit_file path="${relDocFile}" old_string="" new_string="# Title\\n\\n## Section 1\\n...first ~50 lines..."\n2. Append next section:\n   edit_file path="${relDocFile}" old_string="...last line of section 1..." new_string="...last line...\\n\\n## Section 2\\n...next ~50 lines..."\n3. Continue until complete.\n\nKeep each new_string under 60 lines. Do NOT use Set-Content or Out-File for documents longer than ~30 lines.`;
+                }
+
                 // Block New-Item -ItemType File on source files — the agent should use edit_file instead.
                 // When a file "doesn't exist", the real problem is usually a wrong path, not a missing file.
                 const newItemFileMatch = cmd.match(/New-Item\b.*-ItemType\s+File\b.*['"]([^'"]+\.(py|ts|js|html|css|rb|go|java|cs|php|json|yaml|yml))['"]/i)
@@ -5805,12 +6329,26 @@ Do NOT assume you have no memory — check first.`;
                     return `Filtered: content matches a known low-value pattern. Save only specific, actionable facts.`;
                 }
 
-                // Semantic dedup: reject if too similar to existing memory
+                // Semantic dedup: reject if too similar to existing memory.
+                // If the full content is a dupe, try once with a truncated version — the model
+                // often retries with identical content on rejection, so truncating breaks the loop.
                 try {
                     const isDupe = await this.memory.isSemanticDuplicate(content, 0.80);
                     if (isDupe) {
+                        // Try truncated version before giving up
+                        if (content.length > 300) {
+                            const truncated = content.slice(0, 300).trimEnd() + '…';
+                            const isDupeTrunc = await this.memory.isSemanticDuplicate(truncated, 0.80).catch(() => true);
+                            if (!isDupeTrunc) {
+                                const note = await this.memory.addEntry(tier as 0|1|2|3|4|5, truncated, tags);
+                                this.memoryWritesThisResponse++;
+                                const tierName2 = ['Critical', 'Essential', 'Operational', 'Collaboration', 'References', 'Archive'][tier];
+                                logInfo(`[memory] Saved truncated (full was duplicate): "${truncated.slice(0, 60)}"`);
+                                return `Note saved (truncated to avoid duplicate) to Tier ${tier} (${tierName2}) with id: ${note.id}.`;
+                            }
+                        }
                         logInfo(`[memory] Semantic-deduped: "${content.slice(0, 60)}"`);
-                        return `Duplicate: a semantically similar entry already exists in memory.`;
+                        return `Duplicate: a semantically similar entry already exists in memory. Entry not saved — this is not an error.`;
                     }
                 } catch {
                     // Qdrant unavailable — skip semantic check, allow save
@@ -5864,6 +6402,109 @@ Do NOT assume you have no memory — check first.`;
             case 'get_diagnostics': {
                 const rel = args.path ? String(args.path) : undefined;
                 return this.getDiagnostics(root, rel);
+            }
+
+            // ── web_search ─────────────────────────────────────────────────────
+            case 'web_search': {
+                const searchCfg = getSearchConfig();
+                if (!searchCfg.url) {
+                    return '(web_search unavailable: no SearXNG URL configured. Set ollamaAgent.search.url in VS Code settings, e.g. "http://192.168.1.100:8888")';
+                }
+                const query = String(args.query ?? '').trim();
+                if (!query) { throw new Error('query is required'); }
+                const limit = Math.min(Math.max(1, Number(args.limit ?? searchCfg.resultsLimit)), 20);
+                const encodedQuery = encodeURIComponent(query);
+                const searchUrl = `${searchCfg.url}/search?q=${encodedQuery}&format=json`;
+
+                return new Promise<string>((resolve) => {
+                    const parsed = new URL(searchUrl);
+                    const httpMod = parsed.protocol === 'https:' ? https : http;
+                    const reqOpts = {
+                        hostname: parsed.hostname,
+                        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+                        path: parsed.pathname + parsed.search,
+                        method: 'GET',
+                        headers: { 'Accept': 'application/json', 'User-Agent': 'OllamaPilot/1.0' },
+                        timeout: 15000,
+                    };
+                    const req = httpMod.request(reqOpts, (res: any) => {
+                        let raw = '';
+                        res.on('data', (chunk: any) => { raw += chunk; });
+                        res.on('end', () => {
+                            try {
+                                const data = JSON.parse(raw);
+                                const results = (data.results ?? []).slice(0, limit);
+                                if (results.length === 0) {
+                                    resolve(`No results found for "${query}".`);
+                                    return;
+                                }
+                                let out = `Web search results for "${query}" (${results.length} of ${data.results?.length ?? 0} total):\n\n`;
+                                results.forEach((r: any, i: number) => {
+                                    out += `[${i + 1}] ${r.title ?? '(no title)'}\n`;
+                                    out += `    URL: ${r.url ?? ''}\n`;
+                                    if (r.content) { out += `    ${r.content.slice(0, 200).replace(/\n/g, ' ')}\n`; }
+                                    out += '\n';
+                                });
+                                resolve(out.trim());
+                            } catch (e) {
+                                resolve(`web_search: failed to parse SearXNG response — ${toErrorMessage(e)}`);
+                            }
+                        });
+                    });
+                    req.on('error', (e: any) => resolve(`web_search: request failed — ${toErrorMessage(e)}`));
+                    req.on('timeout', () => { req.destroy(); resolve('web_search: request timed out after 15s'); });
+                    req.end();
+                });
+            }
+
+            // ── web_fetch ──────────────────────────────────────────────────────
+            case 'web_fetch': {
+                const fetchUrl = String(args.url ?? '').trim();
+                if (!fetchUrl) { throw new Error('url is required'); }
+                if (!/^https?:\/\//i.test(fetchUrl)) { throw new Error('url must start with http:// or https://'); }
+
+                return new Promise<string>((resolve) => {
+                    const parsed = new URL(fetchUrl);
+                    const httpMod = parsed.protocol === 'https:' ? https : http;
+                    const reqOpts = {
+                        hostname: parsed.hostname,
+                        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+                        path: parsed.pathname + parsed.search,
+                        method: 'GET',
+                        headers: { 'Accept': 'text/html,application/xhtml+xml,text/plain', 'User-Agent': 'OllamaPilot/1.0' },
+                        timeout: 20000,
+                    };
+                    const req = httpMod.request(reqOpts, (res: any) => {
+                        // Follow single redirect
+                        if ((res.statusCode === 301 || res.statusCode === 302) && res.headers.location) {
+                            resolve(`(redirect to ${res.headers.location} — call web_fetch again with the new URL)`);
+                            return;
+                        }
+                        let raw = '';
+                        res.on('data', (chunk: any) => { if (raw.length < 300_000) { raw += chunk; } });
+                        res.on('end', () => {
+                            // Strip HTML tags → readable text
+                            let text = raw
+                                .replace(/<script[\s\S]*?<\/script>/gi, '')
+                                .replace(/<style[\s\S]*?<\/style>/gi, '')
+                                .replace(/<[^>]+>/g, ' ')
+                                .replace(/&nbsp;/g, ' ')
+                                .replace(/&amp;/g, '&')
+                                .replace(/&lt;/g, '<')
+                                .replace(/&gt;/g, '>')
+                                .replace(/&quot;/g, '"')
+                                .replace(/&#39;/g, "'")
+                                .replace(/\s{3,}/g, '\n\n')
+                                .trim();
+                            const cap = 8000;
+                            if (text.length > cap) { text = text.slice(0, cap) + '\n\n...(truncated — page has more content)'; }
+                            resolve(text || '(page returned no readable text)');
+                        });
+                    });
+                    req.on('error', (e: any) => resolve(`web_fetch: request failed — ${toErrorMessage(e)}`));
+                    req.on('timeout', () => { req.destroy(); resolve('web_fetch: request timed out after 20s'); });
+                    req.end();
+                });
             }
 
             // ── refactor_multi_file ────────────────────────────────────────────
@@ -5920,6 +6561,7 @@ Do NOT assume you have no memory — check first.`;
                 // Notify about file changes
                 plan.changes.forEach(c => {
                     this.postFn({ type: 'fileChanged', path: c.path, action: 'refactored' });
+                    if (!this._filesChangedThisRun.includes(c.path)) { this._filesChangedThisRun.push(c.path); }
                 });
 
                 return `Refactoring complete: ${result.success} file(s) modified successfully.`;
@@ -6525,7 +7167,31 @@ Do NOT assume you have no memory — check first.`;
             }
         }
         if (missing.length === 0) { return null; }
-        return `Edit blocked: the following module(s) do not exist on disk:\n${missing.map(m => `  - ${m}`).join('\n')}\nVerify the correct import path before proceeding.`;
+        // Try to suggest the correct module for each missing one
+        const suggestions: string[] = [];
+        for (const m of missing) {
+            const lastName = m.split('.').pop() ?? '';
+            // Search for the name in known utility files
+            const searchDirs = ['app/utils', 'app'];
+            let found = '';
+            for (const sd of searchDirs) {
+                const sdAbs = path.join(root, sd);
+                try {
+                    for (const f of fs.readdirSync(sdAbs)) {
+                        if (!f.endsWith('.py')) { continue; }
+                        const fContent = fs.readFileSync(path.join(sdAbs, f), 'utf8');
+                        if (fContent.includes(`def ${lastName}`) || fContent.includes(`class ${lastName}`)) {
+                            const rel2 = sd.replace(/\//g, '.') + '.' + f.replace('.py', '');
+                            found = `  - Use \`from ${rel2} import ${lastName}\` instead`;
+                            break;
+                        }
+                    }
+                } catch { /* skip */ }
+                if (found) { break; }
+            }
+            suggestions.push(`  - ${m}${found ? '\n' + found : ''}`);
+        }
+        return `Edit blocked: the following module(s) do not exist on disk:\n${suggestions.join('\n')}\nFix the import path and retry edit_file immediately — do NOT ask the user.`;
     }
 
     private safePath(root: string, rel: string): string {
@@ -7369,7 +8035,7 @@ Do NOT assume you have no memory — check first.`;
             'the','a','an','to','in','on','of','for','whenever','when','every','time',
             'that','this','so','and','or','with','by','from','at','into','should',
             'would','could','will','can','all','any','some','statement','log','logging',
-            'make','sure','please','just','need','want','also','route','returns','return',
+            'make','sure','please','just','need','want','also','returns','return',
             'list','json','endpoint','function','method']);
         const contentKws = userMessage.toLowerCase().split(/\W+/).filter(w => w.length > 3 && !STOP.has(w)).slice(0, 5);
         if (filenameKeywords.length === 0) { filenameKeywords.push(...contentKws); }
@@ -7948,6 +8614,118 @@ Do NOT assume you have no memory — check first.`;
             }).catch(() => {});
         }
 
+        // ── 5c. Static bug scan on target file ───────────────────────────────
+        // Scan the loaded file for common obvious bugs before the model ever sees it.
+        // These are injected as pre-warnings so the model fixes them instead of
+        // propagating them or asking the user to clarify.
+        const staticBugWarnings: string[] = [];
+        if (hasPy) {
+            const lines = targetContent.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                const lineNo = i + 1;
+
+                // Pattern: `for x in some_dict_var:` where `some_dict_var` is initialized
+                // as an empty dict `{}` earlier in the same function. Classic "iterate empty dict" bug.
+                const forInMatch = line.match(/^\s*for\s+(\w+)\s+in\s+(\w+)\s*:/);
+                if (forInMatch) {
+                    const iterVar = forInMatch[2];
+                    // Look back up to 60 lines for the variable being assigned an empty dict/list
+                    for (let j = Math.max(0, i - 60); j < i; j++) {
+                        const prevLine = lines[j];
+                        // e.g. `field_changes = {}` or `field_changes = []`
+                        if (new RegExp(`^\\s*${iterVar}\\s*=\\s*(?:\\{\\}|\\[\\])\\s*$`).test(prevLine)) {
+                            const listVar = lines.slice(Math.max(0, i - 80), i)
+                                .map(l => l.match(/^\s*(\w+)\s*=\s*\[/)?.[1])
+                                .filter(Boolean)
+                                .pop();
+                            staticBugWarnings.push(
+                                `⚠ BUG at line ${lineNo}: \`for ${forInMatch[1]} in ${iterVar}:\` — ` +
+                                `\`${iterVar}\` is initialized as empty (${prevLine.trim()}) at line ${j + 1}, ` +
+                                `so this loop body NEVER executes. Did you mean to iterate a different variable?` +
+                                (listVar ? ` Nearby list variable: \`${listVar}\`.` : '')
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── 5d. File-system existence scan ───────────────────────────────────
+        // For create/implement/add tasks: scan app/routes/ and app/services/ for files
+        // and function definitions that match the task keywords. If found, block immediately
+        // with a [FEATURE ALREADY EXISTS] message. This is purely programmatic — no model call.
+        const isCreateTask = /\b(implement|create|add|build|make|set up|write)\b/i.test(userMessage)
+            && !/\b(plan|discuss|design|proposal|update|modify|change|fix|remove|delete)\b/i.test(userMessage);
+        if (isCreateTask && hasPy && contentKws.length >= 2) {
+            interface FsHit { relPath: string; matchedRoutes: string[]; matchedFunctions: string[] }
+            const fsHits: FsHit[] = [];
+
+            // Directories to scan
+            const scanDirs = ['app/routes', 'app/services', 'app/views', 'app/blueprints']
+                .map(d => path.join(root, d))
+                .filter(d => fs.existsSync(d));
+
+            for (const scanDir of scanDirs) {
+                let pyFiles: string[];
+                try { pyFiles = fs.readdirSync(scanDir).filter(f => f.endsWith('.py') && f !== '__init__.py'); }
+                catch { continue; }
+
+                for (const pf of pyFiles) {
+                    const pfAbs = path.join(scanDir, pf);
+                    let pfContent: string;
+                    try { pfContent = fs.readFileSync(pfAbs, 'utf8'); }
+                    catch { continue; }
+
+                    // Check if this file is relevant: at least 2 content keywords present
+                    const pfLower = pfContent.toLowerCase();
+                    const kwHits = contentKws.filter(kw => pfLower.includes(kw));
+                    if (kwHits.length < 2) { continue; }
+
+                    const pfLines = pfContent.split('\n');
+                    const matchedRoutes: string[] = [];
+                    const matchedFunctions: string[] = [];
+
+                    for (const line of pfLines) {
+                        const rm = line.match(/^\s*@\w+\.route\(['"]([^'"]+)['"]/);
+                        if (rm) { matchedRoutes.push(rm[1]); }
+                        const fm = line.match(/^\s*(?:async\s+)?def\s+(\w+)\s*\(/);
+                        if (fm && !fm[1].startsWith('_')) { matchedFunctions.push(fm[1]); }
+                    }
+
+                    // Only flag if at least one route or function name contains a content keyword
+                    const relevantFns = matchedFunctions.filter(fn =>
+                        contentKws.some(kw => fn.toLowerCase().includes(kw))
+                    );
+                    const relevantRoutes = matchedRoutes.filter(r =>
+                        contentKws.some(kw => r.toLowerCase().includes(kw))
+                    );
+
+                    if (relevantFns.length > 0 || relevantRoutes.length > 0) {
+                        const rel = path.relative(root, pfAbs).replace(/\\/g, '/');
+                        fsHits.push({ relPath: rel, matchedRoutes: relevantRoutes, matchedFunctions: relevantFns });
+                        logInfo(`[fs-scan] Feature match: ${rel} (routes: ${relevantRoutes.join(', ')}, fns: ${relevantFns.join(', ')})`);
+                    }
+                }
+            }
+
+            if (fsHits.length > 0) {
+                const hitLines = fsHits.map(h => {
+                    const parts: string[] = [`  File: \`${h.relPath}\``];
+                    if (h.matchedRoutes.length > 0) { parts.push(`  Routes: ${h.matchedRoutes.map(r => `\`${r}\``).join(', ')}`); }
+                    if (h.matchedFunctions.length > 0) { parts.push(`  Functions: ${h.matchedFunctions.map(f => `\`${f}\``).join(', ')}`); }
+                    return parts.join('\n');
+                }).join('\n\n');
+
+                const msg = `[FEATURE ALREADY EXISTS]\n\nA file-system scan found existing code matching this task:\n\n${hitLines}\n\nBefore writing any new code:\n1. Read the file(s) listed above to confirm what is already implemented\n2. Tell the user what exists and what (if anything) is missing\n3. Only write new code if something is genuinely absent`;
+                logInfo(`[fs-scan] Blocking: ${fsHits.length} hit(s) for keywords [${contentKws.join(', ')}]`);
+                // Don't return blocked — inject as warning instead so model can still act if needed
+                // (user may want to extend, not re-implement). Inject prominently at top of sections.
+                return { injection: `[PRE-LOADED CONTEXT for your task]\n\n## ⚠ ${msg}\n`, blocked: null, pendingSteps: [] };
+            }
+        }
+
         // ── 6. Assemble the injection ────────────────────────────────────────
         const sections: string[] = [];
 
@@ -8036,6 +8814,12 @@ Do NOT assume you have no memory — check first.`;
         // Target file
         sections.push(`## Target file: ${targetRelPath}${windowNote}`);
         sections.push(`\`\`\`${ext}\n${numberedLines}\n\`\`\``);
+
+        // Static bug scan warnings — shown prominently so model fixes them
+        if (staticBugWarnings.length > 0) {
+            sections.push(`\n## ⚠ STATIC BUG SCAN — fix these FIRST before implementing any new code`);
+            sections.push(staticBugWarnings.join('\n'));
+        }
 
         // Pre-validation warnings
         if (preValidationWarnings.length > 0) {

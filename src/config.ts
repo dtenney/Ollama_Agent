@@ -54,6 +54,32 @@ export interface OllamaConfig {
     enableThinking: boolean;
     /** Maximum agent turns per session (0 = use built-in defaults per task type). */
     maxTurnsPerSession: number;
+    // ── Multi-model routing ────────────────────────────────────────────────────
+    /** Model to use for read-only / exploration turns (shell_read, memory_search). Empty = use main model. */
+    fastModel: string;
+    /** Model to use for the critic review pass after edits. Empty = use main model. */
+    criticModel: string;
+    /** Enable automatic multi-model routing based on operation type. */
+    modelRoutingEnabled: boolean;
+    /** Days before AGENTS.md is considered stale and auto-refresh is triggered on workspace open. 0 = disabled. */
+    contextFileAutoUpdateDays: number;
+}
+
+// ── Model routing helpers ─────────────────────────────────────────────────────
+
+export type OperationType = 'read' | 'write' | 'critic' | 'default';
+
+/**
+ * Resolve which model to use for a given operation type.
+ * Falls back to the base model when no specialist model is configured.
+ */
+export function resolveModelForOperation(cfg: OllamaConfig, op: OperationType): string {
+    if (!cfg.modelRoutingEnabled) { return cfg.model; }
+    switch (op) {
+        case 'read':   return cfg.fastModel   || cfg.model;
+        case 'critic': return cfg.criticModel || cfg.model;
+        default:       return cfg.model;
+    }
 }
 
 export function getConfig(): OllamaConfig {
@@ -68,7 +94,7 @@ export function getConfig(): OllamaConfig {
         baseUrl,
         host,
         port,
-        model:                c.get<string> ('model',                'llama2'),
+        model:                c.get<string> ('model',                'qwen2.5-coder:7b'),
         temperature:          c.get<number> ('temperature',          0.7),
         systemPrompt:         c.get<string> ('systemPrompt',         ''),
         autoIncludeFile:      c.get<boolean>('autoIncludeFile',      false),
@@ -79,6 +105,25 @@ export function getConfig(): OllamaConfig {
         autoCompactContext:   c.get<boolean>('autoCompactContext',   true),
         enableThinking:       c.get<boolean>('enableThinking',       false),
         maxTurnsPerSession:   c.get<number> ('maxTurnsPerSession',   0),
+        fastModel:                 c.get<string> ('routing.fastModel',             ''),
+        criticModel:               c.get<string> ('routing.criticModel',            ''),
+        modelRoutingEnabled:       c.get<boolean>('routing.enabled',                false),
+        contextFileAutoUpdateDays: c.get<number> ('contextFile.autoUpdateDays',     7),
+    };
+}
+
+export interface SearchConfig {
+    /** SearXNG base URL, e.g. "http://192.168.1.100:8888". Empty = disabled. */
+    url: string;
+    /** Max results per query (default 5). */
+    resultsLimit: number;
+}
+
+export function getSearchConfig(): SearchConfig {
+    const c = vscode.workspace.getConfiguration(SECTION);
+    return {
+        url:          c.get<string>('search.url', '').trim().replace(/\/$/, ''),
+        resultsLimit: c.get<number>('search.resultsLimit', 5),
     };
 }
 

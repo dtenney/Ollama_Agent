@@ -2,6 +2,22 @@ import * as vscode from 'vscode';
 import { OllamaMessage } from './ollamaClient';
 import { logInfo, logError, toErrorMessage } from './logger';
 
+// ── Active task state ─────────────────────────────────────────────────────────
+
+/**
+ * Serialisable snapshot of the agent's in-progress task state.
+ * Persisted in ChatSession so the agent can resume after a VSCode restart
+ * without losing knowledge of which files it already confirmed or ruled out.
+ */
+export interface ActiveTaskState {
+    message: string;
+    type: 'add_field' | 'fix_bug' | 'add_route' | 'refactor' | 'query' | 'other';
+    filesConfirmed: string[];
+    filesRuledOut: string[];
+    stepsCompleted: string[];
+    stepsPending: string[];
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 /** A single renderable message stored per session. */
@@ -27,6 +43,12 @@ export interface ChatSession {
      * Restored when the user re-opens a session so the model has prior context.
      */
     agentHistory: OllamaMessage[];
+    /**
+     * Snapshot of the agent's active task state machine.
+     * Restored on session load so filesConfirmed/filesRuledOut survive a restart.
+     * Optional for backward-compat with sessions saved before this field existed.
+     */
+    activeTask?: ActiveTaskState | null;
     /** IDs of pinned messages (persisted across reloads). */
     pinnedMsgIds?: string[];
 }
@@ -120,6 +142,7 @@ export class ChatStorage {
             updatedAt:    Date.now(),
             messages:     [],
             agentHistory: [],
+            activeTask:   null,
         };
     }
 }

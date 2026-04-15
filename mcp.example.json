@@ -1,0 +1,72 @@
+{
+  "_comment": "Copy this file to <your-project>/.ollamapilot/mcp.json and configure the servers you want. OllamaPilot loads MCP servers from that location at startup.",
+  "servers": [
+
+    {
+      "_comment": "Local filesystem — always recommended. Gives the agent read/write access to workspace files via MCP protocol.",
+      "name": "filesystem",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/your/project"],
+      "env": {}
+    },
+
+    {
+      "_comment": "Date/time — gives the agent current date, time, timezone, and date arithmetic. No API key needed.",
+      "name": "time",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-time"],
+      "env": {}
+    },
+
+    {
+      "_comment": "URL fetch — reads any web page as clean markdown. No API key needed. Install: npm install -g @modelcontextprotocol/server-fetch",
+      "name": "fetch",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch"],
+      "env": {}
+    },
+
+    {
+      "_comment": "Brave web search — web_search tool with real results. Get a free key at https://api.search.brave.com. Install: npm install -g @modelcontextprotocol/server-brave-search",
+      "name": "brave-search",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "YOUR_BRAVE_API_KEY_HERE"
+      }
+    },
+
+    {
+      "_comment": "PostgreSQL — query, list_tables, describe_table. Replace the connection string. Install: npm install -g @modelcontextprotocol/server-postgres",
+      "name": "postgres",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://user:password@localhost:5432/your_database"],
+      "env": {}
+    },
+
+    {
+      "_comment": "PDF reader — extract text from local PDF files. Requires Python. Install: pip install mcp-server-pdf",
+      "name": "pdf",
+      "command": "python",
+      "args": ["-m", "mcp_server_pdf"],
+      "env": {}
+    },
+
+    {
+      "_comment": "Git — git_log, git_diff, git_blame, git_show. Install: npm install -g @modelcontextprotocol/server-git",
+      "name": "git",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-git", "--repository", "/path/to/your/project"],
+      "env": {}
+    },
+
+    {
+      "_comment": "Sequential thinking — structured multi-step reasoning tool for complex planning tasks.",
+      "name": "sequential-thinking",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+      "env": {}
+    }
+
+  ]
+}

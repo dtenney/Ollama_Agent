@@ -96,3 +96,6 @@ qdrant_storage/
 
 # ── Internal test notes ──────────────────────────────────────────────────────
 MANUAL_TESTS.md
+
+# ── Claude Code session data ──────────────────────────────────────────────────
+.claude/

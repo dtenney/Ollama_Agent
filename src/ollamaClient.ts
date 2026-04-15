@@ -18,6 +18,8 @@ export interface OllamaToolCall {
 export interface StreamResult {
     content: string;
     toolCalls: OllamaToolCall[];
+    /** Average log-probability of generated tokens, or null if the model didn't return logprobs. */
+    avgLogprob: number | null;
 }
 
 // ── Endpoint helpers ──────────────────────────────────────────────────────────
@@ -82,6 +84,7 @@ export function streamChatRequest(
             model,
             messages,
             stream: true,
+            logprobs: true,
         };
         // Only include tools if non-empty (some models reject the field when empty)
         if (tools.length) { payload.tools = tools; }
@@ -124,6 +127,9 @@ export function streamChatRequest(
                 let buf = '';
                 let resolved = false;
                 let thinkingStarted = false;
+                // Logprob accumulation — Ollama returns per-token logprobs when logprobs:true is set
+                let logprobSum = 0;
+                let logprobCount = 0;
 
                 res.on('data', (chunk: Buffer) => {
                     if (stopRef.stop) { req.destroy(); return; }
@@ -155,18 +161,35 @@ export function streamChatRequest(
                             if (p.message?.tool_calls?.length) {
                                 toolCalls = p.message.tool_calls;
                             }
+                            // Accumulate per-token logprobs (Ollama streams one token per chunk)
+                            if (Array.isArray(p.logprobs)) {
+                                for (const lp of p.logprobs as Array<{ logprob?: number }>) {
+                                    if (typeof lp.logprob === 'number' && isFinite(lp.logprob)) {
+                                        logprobSum += lp.logprob;
+                                        logprobCount++;
+                                    }
+                                }
+                            }
                             if (p.done && !resolved) {
                                 if (thinkingStarted) { onToken('\x01THINK_END\x01'); }
                                 resolved = true;
+                                const avgLogprob = logprobCount > 0 ? logprobSum / logprobCount : null;
                                 if (fullThinking) { logInfo(`[think] ${fullThinking.length} thinking chars`); }
+                                if (avgLogprob !== null) { logInfo(`[logprobs] avg=${avgLogprob.toFixed(3)} over ${logprobCount} tokens`); }
                                 logInfo(`Stream done — ${fullContent.length} chars, ${toolCalls.length} tool calls`);
-                                resolve({ content: fullContent, toolCalls });
+                                resolve({ content: fullContent, toolCalls, avgLogprob });
                             }
                         } catch { /* skip malformed line */ }
                     }
                 });
 
-                res.on('end', () => { if (!resolved) { resolved = true; resolve({ content: fullContent, toolCalls }); } });
+                res.on('end', () => {
+                    if (!resolved) {
+                        resolved = true;
+                        const avgLogprob = logprobCount > 0 ? logprobSum / logprobCount : null;
+                        resolve({ content: fullContent, toolCalls, avgLogprob });
+                    }
+                });
                 res.on('error', reject);
             }
         );

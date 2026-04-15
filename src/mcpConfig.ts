@@ -111,19 +111,78 @@ export async function createExampleMCPConfig(): Promise<void> {
     }
     
     const exampleConfig = {
+        "_comment": "OllamaPilot MCP server configuration. Enable servers by uncommenting and configuring them. Run 'npm install -g <package>' for any server you enable.",
         servers: [
+            // ── Always-on: local filesystem access ────────────────────────
             {
                 name: 'filesystem',
                 command: 'npx',
                 args: ['-y', '@modelcontextprotocol/server-filesystem', workspaceRoot],
                 env: {},
             },
+            // ── Date/time awareness ───────────────────────────────────────
+            // Gives the agent: current date, time, timezone, date arithmetic.
+            // Install: npm install -g @modelcontextprotocol/server-time
             {
-                name: 'sequential-thinking',
+                name: 'time',
                 command: 'npx',
-                args: ['-y', '@modelcontextprotocol/server-sequential-thinking'],
+                args: ['-y', '@modelcontextprotocol/server-time'],
                 env: {},
             },
+            // ── Web fetch + search ────────────────────────────────────────
+            // Gives the agent: fetch_url, web_search (uses Brave Search API).
+            // Install: npm install -g @modelcontextprotocol/server-brave-search
+            // Required env: BRAVE_API_KEY (get free key at https://api.search.brave.com)
+            // {
+            //     name: 'brave-search',
+            //     command: 'npx',
+            //     args: ['-y', '@modelcontextprotocol/server-brave-search'],
+            //     env: { BRAVE_API_KEY: 'YOUR_KEY_HERE' },
+            // },
+            // ── URL fetch (no search key needed) ─────────────────────────
+            // Gives the agent: fetch(url) — reads web pages as markdown.
+            // Install: npm install -g @modelcontextprotocol/server-fetch
+            // {
+            //     name: 'fetch',
+            //     command: 'npx',
+            //     args: ['-y', '@modelcontextprotocol/server-fetch'],
+            //     env: {},
+            // },
+            // ── PostgreSQL ────────────────────────────────────────────────
+            // Gives the agent: query, list_tables, describe_table.
+            // Install: npm install -g @modelcontextprotocol/server-postgres
+            // {
+            //     name: 'postgres',
+            //     command: 'npx',
+            //     args: ['-y', '@modelcontextprotocol/server-postgres', 'postgresql://user:pass@localhost:5432/dbname'],
+            //     env: {},
+            // },
+            // ── PDF / document reading ────────────────────────────────────
+            // Gives the agent: read_pdf, extract_text from local PDF files.
+            // Install: pip install mcp-server-pdf  (Python-based)
+            // {
+            //     name: 'pdf',
+            //     command: 'python',
+            //     args: ['-m', 'mcp_server_pdf'],
+            //     env: {},
+            // },
+            // ── Git ───────────────────────────────────────────────────────
+            // Gives the agent: git_log, git_diff, git_blame, git_show.
+            // Install: npm install -g @modelcontextprotocol/server-git
+            // {
+            //     name: 'git',
+            //     command: 'npx',
+            //     args: ['-y', '@modelcontextprotocol/server-git', '--repository', workspaceRoot],
+            //     env: {},
+            // },
+            // ── Sequential thinking ───────────────────────────────────────
+            // Gives the agent a structured multi-step reasoning tool.
+            // {
+            //     name: 'sequential-thinking',
+            //     command: 'npx',
+            //     args: ['-y', '@modelcontextprotocol/server-sequential-thinking'],
+            //     env: {},
+            // },
         ],
     };
     

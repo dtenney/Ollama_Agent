@@ -2,33 +2,81 @@ import axios from 'axios';
 import { logInfo, logError } from './logger';
 import { MemoryConfig } from './memoryConfig';
 
+/** LRU cache entry */
+interface CacheEntry {
+    vector: number[];
+    lastUsed: number;
+}
+
 /**
  * Service for generating embeddings using Ollama.
  * Used for semantic search in tiered memory system.
+ *
+ * Includes an in-process LRU cache keyed by SHA-256 of the input text.
+ * The same content string (e.g. repeated isSemanticDuplicate calls on
+ * identical memory entries) will never hit Ollama more than once per session.
  */
 export class EmbeddingService {
     private readonly ollamaUrl: string;
     private readonly model: string;
     private cachedDimension: number | null = null;
 
+    /** In-process LRU embedding cache: SHA-256(text) → vector */
+    private readonly _embeddingCache = new Map<string, CacheEntry>();
+    private static readonly CACHE_MAX = 256;
+
     constructor(config: MemoryConfig) {
         this.ollamaUrl = config.embeddingUrl;
         this.model = config.embeddingModel;
     }
 
+    /** Fast djb2 hash of text. Used as cache key — collision probability negligible at 256-entry scale. */
+    private static hashText(text: string): string {
+        let h = 5381;
+        for (let i = 0; i < text.length; i++) {
+            h = ((h << 5) + h) ^ text.charCodeAt(i);
+            h = h >>> 0; // keep 32-bit unsigned
+        }
+        return h.toString(36) + '_' + text.length.toString(36);
+    }
+
+    /** Evict the least-recently-used entry when cache is full. */
+    private evictLRU(): void {
+        let oldest = Infinity;
+        let oldestKey = '';
+        for (const [k, v] of this._embeddingCache) {
+            if (v.lastUsed < oldest) { oldest = v.lastUsed; oldestKey = k; }
+        }
+        if (oldestKey) { this._embeddingCache.delete(oldestKey); }
+    }
+
+    /** Expose cache stats for logging / tests. */
+    getCacheStats(): { size: number; max: number } {
+        return { size: this._embeddingCache.size, max: EmbeddingService.CACHE_MAX };
+    }
+
     /**
      * Generate embedding vector for a single text string.
+     * Returns a cached vector if the same text was seen this session.
      * Automatically detects and caches the dimension size.
      */
     async generateEmbedding(text: string): Promise<number[]> {
         if (!text || !text.trim()) {
             throw new Error('Cannot generate embedding for empty text');
         }
-        
+
         // Truncate very long texts to prevent API issues
         const maxLength = 8000;
         const truncated = text.length > maxLength ? text.slice(0, maxLength) : text;
-        
+
+        // Check in-process cache first
+        const key = EmbeddingService.hashText(truncated);
+        const cached = this._embeddingCache.get(key);
+        if (cached) {
+            cached.lastUsed = Date.now();
+            return cached.vector;
+        }
+
         try {
             const response = await axios.post(
                 `${this.ollamaUrl}/api/embeddings`,
@@ -56,6 +104,10 @@ export class EmbeddingService {
             } else if (this.cachedDimension !== response.data.embedding.length) {
                 logError(`[embedding] Dimension mismatch: expected ${this.cachedDimension}, got ${response.data.embedding.length}`);
             }
+
+            // Store in LRU cache
+            if (this._embeddingCache.size >= EmbeddingService.CACHE_MAX) { this.evictLRU(); }
+            this._embeddingCache.set(key, { vector: response.data.embedding, lastUsed: Date.now() });
 
             return response.data.embedding;
         } catch (error) {

@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fs from 'fs';
 import { Agent, PostFn } from './agent';
 import { fetchModels, rawGet, streamChatRequest, generateChatTitle } from './ollamaClient';
 import { getConfig, getOpenClawConfig } from './config';
@@ -7,6 +8,7 @@ import { dispatchTask, checkConnection } from './openClawClient';
 import { getActiveContext, buildContextString } from './context';
 import { logInfo, logError, channel, toErrorMessage } from './logger';
 import { ChatStorage, ChatSession, StoredMessage, deriveTitle, relativeTime } from './chatStorage';
+import { appendSessionLog } from './sessionLog';
 import { indexWorkspaceFiles, fuzzySearchFiles, buildMentionContext } from './mentions';
 import { buildGitDiffContext } from './gitContext';
 import { TieredMemoryManager } from './memoryCore';
@@ -213,11 +215,17 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
             }).catch(err => {
                 logError(`[provider] File indexing failed: ${toErrorMessage(err)}`);
             });
+
+            // Auto-refresh AGENTS.md if stale (non-blocking background run)
+            this.maybeRefreshContextFile(workspaceRoot);
         }
 
-        // Restore agent conversation history from the loaded session
+        // Restore agent conversation history and task state from the loaded session
         if (this.currentSession.agentHistory.length) {
             this._agent.restoreHistory(this.currentSession.agentHistory);
+        }
+        if (this.currentSession.activeTask) {
+            this._agent.restoreActiveTask(this.currentSession.activeTask);
         }
 
         webviewView.webview.options = { enableScripts: true };
@@ -426,12 +434,30 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         }
                     };
 
+                    const runStart = Date.now();
                     try {
                         await this._agent!.run(fullMessageWithPins, model, trackedPost);
-                        // Sync agent history into session after run completes
+                        // Sync agent history and task state into session after run completes
                         this.currentSession.agentHistory = this._agent!.conversationHistory;
+                        this.currentSession.activeTask   = this._agent!.activeTask;
                         this.persistSession();
                     } finally {
+                        const stats = this._agent!.runStats;
+                        if (this._currentWorkspaceRoot) {
+                            appendSessionLog(this._currentWorkspaceRoot, {
+                                ts:           new Date(runStart).toISOString(),
+                                sessionId:    this.currentSession.id,
+                                model,
+                                task:         text.trim().slice(0, 500),
+                                turns:        stats.turns,
+                                toolCalls:    stats.toolCalls,
+                                guardEvents:  stats.guardEvents,
+                                filesChanged: stats.filesChanged,
+                                avgLogprob:   stats.avgLogprob,
+                                durationMs:   Date.now() - runStart,
+                                outcome:      stats.outcome,
+                            });
+                        }
                         this._running = false;
                         post({ type: 'agentDone' });
                     }
@@ -485,11 +511,29 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         }
                     };
 
+                    const retryStart = Date.now();
                     try {
                         await this._agent!.run(lastMsg, model, retryPost);
                         this.currentSession.agentHistory = this._agent!.conversationHistory;
+                        this.currentSession.activeTask   = this._agent!.activeTask;
                         this.persistSession();
                     } finally {
+                        const retryStats = this._agent!.runStats;
+                        if (this._currentWorkspaceRoot) {
+                            appendSessionLog(this._currentWorkspaceRoot, {
+                                ts:           new Date(retryStart).toISOString(),
+                                sessionId:    this.currentSession.id,
+                                model,
+                                task:         `[retry] ${lastMsg.trim().slice(0, 480)}`,
+                                turns:        retryStats.turns,
+                                toolCalls:    retryStats.toolCalls,
+                                guardEvents:  retryStats.guardEvents,
+                                filesChanged: retryStats.filesChanged,
+                                avgLogprob:   retryStats.avgLogprob,
+                                durationMs:   Date.now() - retryStart,
+                                outcome:      retryStats.outcome,
+                            });
+                        }
                         this._running = false;
                         post({ type: 'agentDone' });
                     }
@@ -527,6 +571,9 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     this._agent = new Agent(root, this.memory, this.codeIndexer);
                     if (session.agentHistory.length) {
                         this._agent.restoreHistory(session.agentHistory);
+                    }
+                    if (session.activeTask) {
+                        this._agent.restoreActiveTask(session.activeTask);
                     }
                     if (this.memory) {
                         const stats = this.memory.getStats();
@@ -652,6 +699,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         summary: result.summary,
                     });
                     this.currentSession.agentHistory = this._agent!.conversationHistory;
+                    this.currentSession.activeTask   = this._agent!.activeTask;
                     this.persistSession();
                     logInfo(`[provider] Manual compact: removed ${result.removed} messages`);
                     break;
@@ -878,6 +926,70 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         ) {
             this.currentSession.messages.pop();
         }
+    }
+
+    /**
+     * Check if AGENTS.md (or CLAUDE.md / .ollamapilot.md) in the workspace root is stale.
+     * If so, fire a silent background agent run to refresh it.
+     * Controlled by `contextFile.autoUpdateDays` (0 = disabled).
+     */
+    private maybeRefreshContextFile(workspaceRoot: string): void {
+        const cfg = getConfig();
+        if (!cfg.contextFileAutoUpdateDays || cfg.contextFileAutoUpdateDays <= 0) { return; }
+
+        const candidates = ['.ollamapilot.md', 'AGENTS.md', 'CLAUDE.md'];
+        let contextFilePath: string | null = null;
+        let ageMsDays = Infinity;
+
+        for (const name of candidates) {
+            const p = path.join(workspaceRoot, name);
+            try {
+                const stat = fs.statSync(p);
+                const ageDays = (Date.now() - stat.mtimeMs) / (1000 * 60 * 60 * 24);
+                if (ageDays < ageMsDays) { ageMsDays = ageDays; contextFilePath = p; }
+            } catch { /* file doesn't exist */ }
+        }
+
+        const targetFile = contextFilePath ? path.basename(contextFilePath) : 'AGENTS.md';
+        const isStale = ageMsDays > cfg.contextFileAutoUpdateDays;
+        const isMissing = contextFilePath === null;
+
+        if (!isStale && !isMissing) { return; }
+
+        const reason = isMissing ? 'no context file found' : `${targetFile} is ${Math.floor(ageMsDays)} days old`;
+        logInfo(`[context-file] Auto-refresh triggered — ${reason} (threshold: ${cfg.contextFileAutoUpdateDays} days)`);
+
+        const REFRESH_PROMPT = `Scan this project and generate (or update) an AGENTS.md file in the workspace root. The file should include:
+1. One-paragraph project description (what it does, tech stack)
+2. Directory structure overview (key folders and their purpose)
+3. Coding conventions you can infer from reading the code (naming, error handling, return formats, DB patterns, etc.)
+4. Key domains/modules — one line each explaining what each major file or group of files does
+5. Any constraints or rules an AI agent should follow when making changes
+
+Steps:
+- Read the root directory listing
+- Read package.json or requirements.txt to identify the stack
+- Sample 3-5 representative source files to infer conventions
+- If AGENTS.md already exists, read it first and update rather than replace
+- Write the final file to AGENTS.md in the project root
+
+Be specific and factual — only write what you can confirm from the code, not guesses.`;
+
+        // Run silently in background — use a fresh agent so it doesn't pollute the current session history
+        const backgroundAgent = new Agent(workspaceRoot, this.memory, this.codeIndexer);
+        const model = cfg.model;
+        const silentPost: PostFn = (m) => {
+            const msg = m as { type: string; path?: string };
+            if (msg.type === 'fileChanged' && msg.path) {
+                logInfo(`[context-file] Auto-refresh wrote ${msg.path}`);
+                this._view?.webview.postMessage({ type: 'contextFileRefreshed', path: msg.path });
+            }
+        };
+        backgroundAgent.run(REFRESH_PROMPT, model, silentPost).then(() => {
+            logInfo('[context-file] Auto-refresh complete');
+        }).catch(err => {
+            logInfo(`[context-file] Auto-refresh skipped: ${toErrorMessage(err)}`);
+        });
     }
 
     private persistSession(): void {

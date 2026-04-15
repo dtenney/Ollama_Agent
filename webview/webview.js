@@ -551,11 +551,15 @@ const TOOL_ICONS = {
     delete_file:       '🗑️',
     shell_read:        '🐚',
     run_command:       '⚡',
+    memory_search:     '🧠',
     memory_list:       '🧠',
-    memory_write:      '💡',
+    memory_write:      '💾',
+    memory_tier_write: '💾',
     memory_delete:     '🗑️',
     get_diagnostics:   '💡',
     read_terminal:     '🖥️',
+    web_search:        '🌐',
+    web_fetch:         '🌍',
 };
 
 // ── Time helper ───────────────────────────────────────────────────────────────
@@ -823,9 +827,22 @@ function removeLastAssistantMsg() {
  */
 function addToolCard(id, name, args) {
     const icon = TOOL_ICONS[name] || '🔧';
-    const argsStr = Object.entries(args)
-        .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-        .join(' ');
+    let argsStr;
+    if (name === 'memory_search') {
+        argsStr = `query="${args.query ?? ''}"`;
+    } else if (name === 'memory_tier_write' || name === 'memory_write') {
+        const tier = args.tier !== undefined ? `Tier ${args.tier} — ` : '';
+        const content = String(args.content ?? '').slice(0, 60);
+        argsStr = `${tier}"${content}${content.length >= 60 ? '…' : ''}"`;
+    } else if (name === 'web_search') {
+        argsStr = `"${String(args.query ?? '').slice(0, 80)}"`;
+    } else if (name === 'web_fetch') {
+        argsStr = String(args.url ?? '').slice(0, 80);
+    } else {
+        argsStr = Object.entries(args)
+            .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+            .join(' ');
+    }
     const div = document.createElement('div');
     div.className = 'tool-card';
     div.id = `tool-${id}`;
@@ -867,6 +884,37 @@ function updateToolCard(id, success, preview, fullResult) {
             summary += m ? ` ${m[1]} matches` : ` ${lines.length} lines`;
         } else if (toolName === 'list_files') {
             summary += ` ${lines.length} entries`;
+        } else if (toolName === 'memory_search') {
+            const foundM = output.match(/\((\d+) found\)/);
+            const queryM = output.match(/for "([^"]{1,40})"/);
+            if (!success || output.includes('No relevant memories')) {
+                summary += ` no memories found`;
+            } else if (foundM && queryM) {
+                summary += ` ${foundM[1]} memories — "${queryM[1]}"`;
+            } else {
+                summary += ` ${lines.length} results`;
+            }
+        } else if (toolName === 'memory_tier_write' || toolName === 'memory_write') {
+            const tierM = output.match(/Tier (\d+)/);
+            const snip = output.replace(/Note saved.*?\./i, '').trim().slice(0, 50);
+            summary += tierM ? ` saved to Tier ${tierM[1]}` : ` saved`;
+            if (snip) { summary += ` — ${snip}`; }
+        } else if (toolName === 'web_search') {
+            const countM = output.match(/(\d+) results?/i);
+            if (!success || output.startsWith('(web_search unavailable')) {
+                summary += ` unavailable`;
+            } else if (countM) {
+                summary += ` ${countM[1]} results`;
+            } else {
+                summary += ` ${lines.length} lines`;
+            }
+        } else if (toolName === 'web_fetch') {
+            if (!success) {
+                summary += ` failed`;
+            } else {
+                const chars = output.length;
+                summary += ` ${chars > 1000 ? Math.round(chars / 1000) + 'k' : chars} chars`;
+            }
         } else {
             summary += ` ${lines.length} lines`;
         }
@@ -1666,6 +1714,7 @@ const SLASH_COMMANDS = {
     '/refactor': { label: '/refactor', desc: 'Refactor for clarity and maintainability', prompt: 'Refactor the following code to improve readability, maintainability, and performance. Show the changes.\n\n' },
     '/optimize': { label: '/optimize', desc: 'Optimize for performance',                prompt: 'Optimize the following code for performance. Explain the improvements.\n\n' },
     '/openclaw': { label: '/openclaw', desc: 'Dispatch a background task to OpenCLAW',  prompt: null },
+    '/context':  { label: '/context',  desc: 'Generate or update AGENTS.md project context file', prompt: 'Scan this project and generate (or update) an AGENTS.md file in the workspace root. The file should include:\n1. One-paragraph project description (what it does, tech stack)\n2. Directory structure overview (key folders and their purpose)\n3. Coding conventions you can infer from reading the code (naming, error handling, return formats, DB patterns, etc.)\n4. Key domains/modules — one line each explaining what each major file or group of files does\n5. Any constraints or rules the agent should follow when making changes\n\nSteps:\n- Read the root directory listing\n- Read package.json or requirements.txt to identify the stack\n- Sample 3-5 representative source files to infer conventions\n- If AGENTS.md already exists, read it first and update rather than replace\n- Write the final file to AGENTS.md in the project root\n\nBe specific and factual — only write what you can confirm from the code, not guesses.' },
 };
 
 const slashDropdown = document.createElement('div');

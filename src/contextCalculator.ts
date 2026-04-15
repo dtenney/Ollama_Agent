@@ -32,6 +32,11 @@ const MODEL_CONTEXT_LIMITS: Record<string, number> = {
     'qwen2.5-coder': 32768,
     'qwen2.5-coder:7b': 32768,
     'qwen2.5-coder:7b-256k': 262144,
+
+    // Qwen3.5 models
+    'qwen3.5': 32768,
+    'qwen3.5:27b': 32768,
+    'qwen3.5:27b-49k': 49152,
     
     // Phi models
     'phi': 2048,

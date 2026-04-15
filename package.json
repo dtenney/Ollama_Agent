@@ -44,7 +44,7 @@
   "scripts": {
     "vendor": "node scripts/vendor-hljs.js",
     "compile": "npm run vendor && tsc",
-    "deploy": "npm run compile && node -e \"const fs=require('fs'),path=require('path');const extRoot=process.env.USERPROFILE+'/.vscode/extensions/dtenney.ollamapilot-0.4.0';const ext=extRoot+'/dist';const files=['agent','provider','main','memoryCore','contextCalculator','ollamaClient','config','openClawClient'];files.forEach(f=>{const src='dist/'+f+'.js';const dst=ext+'/'+f+'.js';if(fs.existsSync(src)){fs.copyFileSync(src,dst);console.log('Deployed '+f+'.js');}});const wv=extRoot+'/webview/webview.js';fs.copyFileSync('webview/webview.js',wv);console.log('Deployed webview.js');fs.copyFileSync('package.json',extRoot+'/package.json');console.log('Deployed package.json');\"",
+    "deploy": "npm run compile && node -e \"const fs=require('fs'),path=require('path');const extRoot=process.env.USERPROFILE+'/.vscode/extensions/dtenney.ollamapilot-0.4.0';const ext=extRoot+'/dist';const files=['agent','provider','main','memoryCore','contextCalculator','ollamaClient','config','openClawClient','sessionLog'];files.forEach(f=>{const src='dist/'+f+'.js';const dst=ext+'/'+f+'.js';if(fs.existsSync(src)){fs.copyFileSync(src,dst);console.log('Deployed '+f+'.js');}});const wv=extRoot+'/webview/webview.js';fs.copyFileSync('webview/webview.js',wv);console.log('Deployed webview.js');fs.copyFileSync('package.json',extRoot+'/package.json');console.log('Deployed package.json');['mcp.example.json','settings.example.json'].forEach(f=>{if(fs.existsSync(f)){fs.copyFileSync(f,extRoot+'/'+f);console.log('Deployed '+f);}});\"",
     "bundle": "npm run vendor && node esbuild.js",
     "bundle:prod": "npm run vendor && node esbuild.js --production",
     "build": "npm run deploy",
@@ -294,7 +294,7 @@
         },
         "ollamaAgent.model": {
           "type": "string",
-          "default": "llama2",
+          "default": "qwen2.5-coder:7b",
           "description": "Default model to use when the extension starts. Overridable per session via the model selector in the sidebar."
         },
         "ollamaAgent.temperature": {
@@ -457,6 +457,16 @@
           "default": false,
           "markdownDescription": "Enable chain-of-thought reasoning for models that support it (e.g. qwen3, deepseek-r1). The model will reason internally before responding — slower but more accurate for complex tasks like code verification, debugging, and doc cross-checking. Requires a compatible Ollama model."
         },
+        "ollamaAgent.search.url": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "SearXNG instance URL for web search, e.g. `http://192.168.1.100:8888`. Leave empty to disable `web_search`. The agent will append `/search?q={query}&format=json` automatically."
+        },
+        "ollamaAgent.search.resultsLimit": {
+          "type": "number",
+          "default": 5,
+          "markdownDescription": "Maximum number of search results to return per `web_search` call (1–20)."
+        },
         "ollamaAgent.openClaw.baseUrl": {
           "type": "string",
           "default": "",
@@ -499,6 +509,27 @@
           "minimum": 0,
           "maximum": 200,
           "markdownDescription": "Maximum number of agent tool-call turns per session. `0` (default) uses built-in limits per task type (sweep=50, merge=60, plan=50, normal=40, small-model=8). Set to a lower value (e.g. `24`) to cap resource usage for large models."
+        },
+        "ollamaAgent.routing.enabled": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Enable automatic multi-model routing. When enabled, the agent uses a smaller/faster model for read-only exploration turns (shell_read, memory_search) and reserves the main model for write/edit turns. Configure the fast model with `routing.fastModel`."
+        },
+        "ollamaAgent.routing.fastModel": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Model name to use for read-only exploration turns when `routing.enabled` is true (e.g. `qwen2.5-coder:1.5b`). Leave empty to use the main model for all turns."
+        },
+        "ollamaAgent.routing.criticModel": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Model name to use for the automated critic review pass after edits when `routing.enabled` is true (e.g. `qwen2.5-coder:7b`). Leave empty to use the main model."
+        },
+        "ollamaAgent.contextFile.autoUpdateDays": {
+          "type": "number",
+          "default": 7,
+          "minimum": 0,
+          "markdownDescription": "Automatically refresh `AGENTS.md` in the background when it is older than this many days (checked on workspace open). Set to `0` to disable auto-refresh. The `/context` slash command always refreshes on demand regardless of this setting."
         }
       }
     }

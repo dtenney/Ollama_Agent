@@ -1,0 +1,49 @@
+{
+  "_comment": "Copy the settings below into your project's .vscode/settings.json. Remove any you don't need.",
+
+  // ── Core model ──────────────────────────────────────────────────────────────
+  "ollamaAgent.model": "qwen2.5-coder:7b",
+  "ollamaAgent.temperature": 0.7,
+
+  // ── Multi-model routing ─────────────────────────────────────────────────────
+  // fastModel handles read-only turns (shell_read, memory_search) — much cheaper.
+  // criticModel reviews each edit before the agent sees the result.
+  // Set routing.enabled to true to activate. Remove or set to "" to disable routing.
+  "ollamaAgent.routing.enabled": false,
+  "ollamaAgent.routing.fastModel": "qwen2.5-coder:1.5b",
+  "ollamaAgent.routing.criticModel": "",
+
+  // ── Memory ─────────────────────────────────────────────────────────────────
+  "ollamaAgent.memory.enabled": true,
+  "ollamaAgent.memory.autoSave": false,
+  "ollamaAgent.memory.autoLoadTiers": [0, 1, 2],
+  "ollamaAgent.memory.maxContextTokens": 4000,
+  // Qdrant vector DB for semantic memory search (Tiers 4-5).
+  // Leave blank to use local-only memory (Tiers 0-3 still work).
+  "ollamaAgent.memory.qdrantUrl": "",
+  "ollamaAgent.memory.embeddingModel": "nomic-embed-text",
+
+  // ── Web search ──────────────────────────────────────────────────────────────
+  // SearXNG instance for web_search and web_fetch agent tools.
+  // Leave empty to disable (agent will not have access to web search).
+  "ollamaAgent.search.url": "",
+  "ollamaAgent.search.resultsLimit": 5,
+
+  // ── Context & turns ─────────────────────────────────────────────────────────
+  "ollamaAgent.autoCompactContext": true,
+  "ollamaAgent.maxTurnsPerSession": 0,
+
+  // ── Chain-of-thought ────────────────────────────────────────────────────────
+  // Enable for qwen3 / deepseek-r1 models that support <think> tokens.
+  "ollamaAgent.enableThinking": false,
+
+  // ── MCP servers ─────────────────────────────────────────────────────────────
+  // Alternatively, put server config in <project>/.ollamapilot/mcp.json.
+  // See mcp.example.json in the extension install directory for all available servers.
+  "ollamaAgent.mcpServers": [],
+
+  // ── AGENTS.md auto-refresh ──────────────────────────────────────────────────
+  // Silently regenerates AGENTS.md in the background if older than N days.
+  // Set to 0 to disable. Use /context slash command to refresh on demand.
+  "ollamaAgent.contextFile.autoUpdateDays": 7
+}
