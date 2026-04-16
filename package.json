@@ -44,11 +44,11 @@
   "scripts": {
     "vendor": "node scripts/vendor-hljs.js",
     "compile": "npm run vendor && tsc",
-    "deploy": "npm run compile && node -e \"const fs=require('fs'),path=require('path');const extRoot=process.env.USERPROFILE+'/.vscode/extensions/dtenney.ollamapilot-0.4.0';const ext=extRoot+'/dist';const files=['agent','provider','main','memoryCore','contextCalculator','ollamaClient','config','openClawClient','sessionLog'];files.forEach(f=>{const src='dist/'+f+'.js';const dst=ext+'/'+f+'.js';if(fs.existsSync(src)){fs.copyFileSync(src,dst);console.log('Deployed '+f+'.js');}});const wv=extRoot+'/webview/webview.js';fs.copyFileSync('webview/webview.js',wv);console.log('Deployed webview.js');fs.copyFileSync('package.json',extRoot+'/package.json');console.log('Deployed package.json');['mcp.example.json','settings.example.json'].forEach(f=>{if(fs.existsSync(f)){fs.copyFileSync(f,extRoot+'/'+f);console.log('Deployed '+f);}});\"",
+    "deploy": "npm run bundle && node scripts/deploy.js",
     "bundle": "npm run vendor && node esbuild.js",
     "bundle:prod": "npm run vendor && node esbuild.js --production",
     "build": "npm run deploy",
-    "package": "npm run compile && npx vsce package --no-dependencies",
+    "package": "npm run compile && npx vsce package",
     "vscode:prepublish": "npm run compile",
     "test": "npm run compile && vscode-test",
     "test:unit": "npm run compile && mocha dist/test/unit/**/*.test.js",
