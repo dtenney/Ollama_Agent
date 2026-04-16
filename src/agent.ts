@@ -816,6 +816,15 @@ At the start of any conversation on a known project:
 
 At the end of a session where significant work was done, save a Tier 2 memory note capturing: what was built, what was left unfinished, and any decisions made. This lets the next session pick up without the developer having to re-explain.
 
+## Verify before implementing — never duplicate work
+Before writing ANY code for an "add/implement/create" task:
+1. Read the target file(s) directly and search for the function, method, route, or class name you're about to create
+2. If it already exists — stop, tell the user it's already implemented, show them what's there, and ask if they want changes
+3. Never assume the file is unmodified just because the conversation is new — another session may have already completed the task
+4. This check takes one shell_read call and prevents wasted work and broken edits
+
+Example: Asked to "add send_weekly_summary to email_service.py" — first call: shell_read on email_service.py and grep for "send_weekly_summary". If found, report it. If not found, proceed.
+
 ## Design decisions — show your reasoning
 When you make a non-obvious technical choice, say so in one line. Not a lecture — just enough that the developer understands the tradeoff and can push back if they disagree.
 
@@ -4012,7 +4021,9 @@ Do NOT assume you have no memory — check first.`;
                     // Write unconditionally — skip isSemanticDuplicate to avoid blocking
                     // on an embedding call while Ollama is busy unloading the main model.
                     // Tier 3 duplicates are harmless and get evicted naturally.
-                    this.memory!.addEntry(3, sessionNote, ['session-end', 'completed', 'completed-feature']).catch(() => {});
+                    // Include feature keywords as tags so future memory_search("weekly summary") finds this entry.
+                    const sessionTags = ['session-end', 'completed', 'completed-feature', ...featureKws.slice(0, 6).map(k => k.toLowerCase())];
+                    this.memory!.addEntry(3, sessionNote, sessionTags).catch(() => {});
                     logInfo(`[memory] Session-end: saved completed-feature to Tier 3 (${editedPaths.length} files, ${featureKws.length} keywords)`);
                 }
 
