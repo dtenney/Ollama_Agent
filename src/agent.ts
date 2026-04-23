@@ -3208,6 +3208,35 @@ Do NOT assume you have no memory — check first.`;
             } catch { /* skip if memory unavailable */ }
         }
 
+        // ── Resume detection ──────────────────────────────────────────────────
+        // If the user's first message signals intent to resume ("continue", "where were we",
+        // "resume", etc.), pull the most recent sweep-progress + session-end entries from
+        // memory and inject a full [RESUME] block so the model can recap and pick up exactly
+        // where it left off — without the user having to re-explain the task.
+        const isResumeIntent = this.history.length <= 1
+            && /\b(continue|resume|pick\s+up|where\s+(were|was|did)\s+we|what\s+(were|was|are)\s+we|carry\s+on|keep\s+going|what('s|\s+is)\s+(left|next|pending|remaining)|still\s+(working|need)|finish(ing|ed)?|where\s+did\s+we|last\s+time)\b/i.test(userMessage);
+        if (isResumeIntent && this.memory) {
+            try {
+                // Grab the most recent sweep-progress entry (could be mid-sweep)
+                const sweepEntries = this.memory.getTier(2)
+                    .filter(e => e.tags?.includes('sweep-progress') || e.tags?.includes('wip-sync'))
+                    .slice(-2); // most recent 2
+                // Grab the most recent session-end entry
+                const sessionEntries = this.memory.getTier(3)
+                    .filter(e => e.tags?.includes('session-end') || e.tags?.includes('completed'))
+                    .slice(-1);
+                const resumeEntries = [...sweepEntries, ...sessionEntries];
+                if (resumeEntries.length > 0) {
+                    const resumeLines = resumeEntries.map(e => e.content).join('\n\n---\n');
+                    baseSystemWithMemory += `\n\n## [RESUME REQUESTED]\nThe user wants to pick up where the last session left off. Here is the persisted state from memory:\n\n${resumeLines}\n\nYour job:\n1. Summarize what was done and what remains in 2-3 sentences\n2. Ask the user if they want to continue with the pending work\n3. If they confirm, proceed with the next pending step immediately — do not re-explain the whole plan`;
+                    logInfo(`[resume] Injected resume context: ${resumeEntries.length} entries`);
+                } else {
+                    baseSystemWithMemory += `\n\n## [RESUME REQUESTED]\nThe user wants to pick up where the last session left off, but no persisted task state was found in memory. Let the user know you don't have a record of unfinished work, and ask them to describe what they'd like to do.`;
+                    logInfo(`[resume] Resume intent detected but no prior state found in memory`);
+                }
+            } catch { /* skip if memory unavailable */ }
+        }
+
         // ── Prior-work existence check ────────────────────────────────────────
         // For implement/create/add tasks: search memory for matching completed-feature
         // entries BEFORE the model starts exploring. If found, inject a prominent
