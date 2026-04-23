@@ -7,39 +7,8 @@ esbuild.js
 .github/**
 scripts/**
 
-# node_modules — exclude most, but keep runtime third-party deps
-# (axios, @modelcontextprotocol/sdk are required at runtime by dist/ files)
+# node_modules — excluded entirely; all deps are bundled into dist/main.js by esbuild
 node_modules/**
-!node_modules/axios/**
-!node_modules/axios-retry/**
-!node_modules/follow-redirects/**
-!node_modules/form-data/**
-!node_modules/combined-stream/**
-!node_modules/delayed-stream/**
-!node_modules/mime-types/**
-!node_modules/mime-db/**
-!node_modules/proxy-from-env/**
-!node_modules/@modelcontextprotocol/**
-!node_modules/zod/**
-!node_modules/zod-to-json-schema/**
-!node_modules/eventsource-parser/**
-!node_modules/content-type/**
-!node_modules/is-stream/**
-!node_modules/cross-spawn/**
-!node_modules/shebang-command/**
-!node_modules/shebang-regex/**
-!node_modules/which/**
-!node_modules/path-key/**
-!node_modules/ajv/**
-!node_modules/ajv-formats/**
-!node_modules/fast-deep-equal/**
-!node_modules/fast-uri/**
-!node_modules/json-schema-traverse/**
-!node_modules/require-from-string/**
-!node_modules/eventsource/**
-!node_modules/json-schema-typed/**
-!node_modules/jose/**
-!node_modules/pkce-challenge/**
 
 # Internal dev docs
 docs/internal/**
@@ -84,8 +53,14 @@ vsce_ls.txt
 .DS_Store
 Thumbs.db
 
+# dist — keep only the esbuild bundle; exclude old tsc-compiled individual files
+dist/**
+!dist/main.js
+!dist/highlight.bundle.js
+
 # ── Keep in VSIX ─────────────────────────────────────────────────────────────
-# dist/**           ← tsc-compiled extension files
+# dist/main.js      ← esbuild single-file bundle (all deps included)
+# dist/highlight.bundle.js ← syntax highlighting vendor bundle
 # webview/**        ← chat UI (HTML + JS + vendor hljs)
 # images/**         ← logo, banner, sidebar icon, demo gif
 # docs/CHANGELOG.md ← user-facing release notes

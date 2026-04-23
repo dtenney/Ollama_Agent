@@ -1,8 +1,19 @@
-import { exec } from 'child_process';
+import { exec, execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import { logInfo, logWarn, toErrorMessage } from './logger';
+
+const execFileAsync = promisify(execFile);
+
+/** Validate a git commit range — only allow safe characters to prevent injection. */
+function validateCommitRange(range: string): string {
+    // Allow: alphanum, dots, tildes, carets, slashes, hyphens, underscores, @, spaces, ..
+    if (!/^[a-zA-Z0-9_.~^/\-@ \.]+$/.test(range)) {
+        throw new Error(`Invalid commit range: "${range}"`);
+    }
+    return range;
+}
 
 const execAsync = promisify(exec);
 
@@ -118,12 +129,13 @@ export async function getGitDiffForRange(root: string, commitRange: string): Pro
     const opts = { cwd: root, timeout: GIT_TIMEOUT_MS * 2 };
 
     try {
-        const { stdout: diff } = await execAsync(`git diff ${commitRange}`, opts);
+        const safeRange = validateCommitRange(commitRange);
+        const { stdout: diff } = await execFileAsync('git', ['diff', safeRange], opts);
         if (!diff.trim()) { return { summary: 'No changes', diff: '', truncated: false, clean: true }; }
 
         let summary = '';
         try {
-            const { stdout: stat } = await execAsync(`git diff --stat ${commitRange}`, opts);
+            const { stdout: stat } = await execFileAsync('git', ['diff', '--stat', safeRange], opts);
             const statLines = stat.trim().split('\n');
             summary = statLines[statLines.length - 1]?.trim() ?? '';
         } catch { /* fallback */ }

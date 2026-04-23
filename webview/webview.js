@@ -2499,7 +2499,7 @@ window.addEventListener('message', (event) => {
             if (existing) {
                 existing.removeAttribute('id');
                 const lbl = existing.querySelector('.system-label');
-                if (lbl) lbl.textContent = '📦 Context compacted — summary of earlier conversation:';
+                if (lbl) lbl.textContent = '📦 Context compacted — here is what we have been working on:';
                 const body = existing.querySelector('.summary-body');
                 if (body) { body.style.fontStyle = ''; body.style.opacity = ''; }
             } else if (msg.summary) {
@@ -2507,10 +2507,10 @@ window.addEventListener('message', (event) => {
                 summaryEl.className = 'msg system-msg compaction-summary';
                 const summaryLabel = document.createElement('span');
                 summaryLabel.className = 'system-label';
-                summaryLabel.textContent = '📦 Context compacted — summary of earlier conversation:';
+                summaryLabel.textContent = '📦 Context compacted — here is what we have been working on:';
                 const summaryBody = document.createElement('div');
                 summaryBody.className = 'summary-body';
-                summaryBody.textContent = msg.summary;
+                summaryBody.innerHTML = renderMarkdown(msg.summary);
                 summaryEl.appendChild(summaryLabel);
                 summaryEl.appendChild(summaryBody);
                 messagesEl.appendChild(summaryEl);

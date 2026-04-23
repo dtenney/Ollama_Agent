@@ -88,6 +88,11 @@ export class TieredMemoryManager {
         this._cachedCore = this.readCoreFromStorage();
     }
 
+    /** True when Qdrant + embeddings are available (Tiers 4-5 operational). */
+    get isQdrantAvailable(): boolean {
+        return !!(this.qdrantClient && this.embeddingService);
+    }
+
     /** Dispose resources: clear pending timers and flush to storage. */
     dispose(): void {
         if (this._disposed) { return; }
@@ -973,13 +978,18 @@ export class TieredMemoryManager {
     private async withLock<T>(operation: () => Promise<T>): Promise<T> {
         const previousLock = this.operationLock;
         let releaseLock: () => void;
-        
+
         this.operationLock = new Promise<void>(resolve => {
             releaseLock = resolve;
         });
-        
+
         try {
-            await previousLock;
+            // Wait for previous lock with a 10s timeout so a hung background
+            // save (e.g. embedding request that never returns) can't block the UI forever.
+            await Promise.race([
+                previousLock,
+                new Promise<void>(resolve => setTimeout(resolve, 10_000))
+            ]);
             return await operation();
         } finally {
             releaseLock!();

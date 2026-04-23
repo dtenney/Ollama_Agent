@@ -87,6 +87,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     logError(`[memory] Qdrant unavailable, using local storage only: ${toErrorMessage(error)}`);
                     qdrantClient = undefined;
                     embeddingService = undefined;
+                    // Notify the user so they know semantic search (Tiers 4-5) is offline.
+                    // Use showWarningMessage so it appears in the UI, not just the log.
+                    vscode.window.showWarningMessage(
+                        'OllamaPilot: Qdrant is unavailable — memory Tiers 4-5 (semantic search) are offline. Tiers 0-3 (local) are still active.',
+                        'Open Log'
+                    ).then(choice => {
+                        if (choice === 'Open Log') {
+                            vscode.commands.executeCommand('ollamapilot.showLog');
+                        }
+                    });
                 } else {
                     throw error;
                 }

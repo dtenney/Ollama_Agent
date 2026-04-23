@@ -49,7 +49,7 @@
     "bundle:prod": "npm run vendor && node esbuild.js --production",
     "build": "npm run deploy",
     "package": "npm run compile && npx vsce package",
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run bundle:prod",
     "test": "npm run compile && vscode-test",
     "test:unit": "npm run compile && mocha dist/test/unit/**/*.test.js",
     "test:harness": "npm run compile && mocha --require dist/test/vscode-mock.js --timeout 30000 dist/test/unit/agentHarness.test.js",

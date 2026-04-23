@@ -30,6 +30,8 @@ export interface ShellEnvironment {
     shell: string;           // e.g. 'powershell', 'cmd', 'bash', 'zsh'
     /** Short label for prompts, e.g. "Windows (PowerShell)" */
     label: string;
+    /** Python executable name (e.g. 'python3', 'python') — empty string if not found */
+    pythonCmd: string;
     /** Find files by name */
     findCmd: string;
     /** Search text in files */
@@ -141,12 +143,27 @@ export function detectShellEnvironment(): ShellEnvironment {
         else { shell = 'bash'; }
     }
 
+    // Detect Python executable — try python3 first (Unix convention), then python (Windows/venvs)
+    let pythonCmd = '';
+    for (const candidate of ['python3', 'python']) {
+        try {
+            const out = execSync(`${candidate} --version`, { stdio: 'pipe', timeout: 3000 }).toString().trim();
+            if (/python\s+3\./i.test(out)) { pythonCmd = candidate; break; }
+        } catch { /* not found */ }
+    }
+    if (pythonCmd) {
+        logInfo(`[shell-env] Python detected: ${pythonCmd}`);
+    } else {
+        logWarn('[shell-env] Python 3 not found — Python-based file ops will fall back to shell');
+    }
+
     const osName: ShellEnvironment['os'] = isWin ? 'windows' : isMac ? 'macos' : 'linux';
 
     if (isWin) {
         _cachedShellEnv = {
             os: 'windows',
             shell,
+            pythonCmd,
             label: `Windows (${shell === 'powershell' ? 'PowerShell' : 'cmd'})`,
             findCmd: 'dir /s /b *pattern*',
             grepCmd: 'findstr /S /N /I "text" *.py',
@@ -159,6 +176,7 @@ export function detectShellEnvironment(): ShellEnvironment {
         _cachedShellEnv = {
             os: osName,
             shell,
+            pythonCmd,
             label: `${isMac ? 'macOS' : 'Linux'} (${shell})`,
             findCmd: "find . -name '*pattern*' -not -path '*__pycache__*'",
             grepCmd: "grep -rn 'text' --include='*.py' .",
@@ -169,97 +187,101 @@ export function detectShellEnvironment(): ShellEnvironment {
         };
     }
 
-    logInfo(`[shell-env] Detected: ${_cachedShellEnv.label} (shell=${shell}, os=${osName})`);
+    logInfo(`[shell-env] Detected: ${_cachedShellEnv.label} (shell=${shell}, os=${osName}, python=${pythonCmd || 'none'})`);
     return _cachedShellEnv;
 }
 
-/** Build shell-first examples tailored to the detected OS/shell */
+/** Build Python-first examples tailored to the detected environment */
 function buildShellExamples(env: ShellEnvironment, workspaceRoot?: string): string {
     const ws = workspaceRoot ? workspaceRoot.replace(/\\/g, '/') : '.';
-    if (env.os === 'windows') {
-        return `Your PRIMARY tools are shell_read and run_command. The host is **${env.label}**. Workspace: ${ws}
-Use Windows-native PowerShell commands — NOT Unix commands (find, grep, cat, mv, mkdir -p are NOT available):
-- Finding files by name: shell_read with "Get-ChildItem -Path '${ws}' -Recurse -Filter '*transaction*' | Select-Object FullName"
-- Searching code for a symbol: shell_read with "Get-ChildItem -Path '${ws}/app' -Recurse -Filter '*.py' | Select-String -Pattern 'def fetch_user' | Select-Object Path,LineNumber,Line | Select-Object -First 20"
-- Viewing files: shell_read with "Get-Content 'C:/full/path/to/file.py'"
-- Reading a specific line range (e.g. lines 474–580): shell_read with "(Get-Content 'C:/full/path/file.py' | Select-Object -Skip 473 -First 107)"
-  NOTE: Select-Object -Index does NOT accept ranges like 473..580 — use -Skip/-First instead. Skip = first line - 1, First = count of lines to read.
-- Git operations: shell_read with "git status", "git log --oneline -20", "git diff"
-PREFER grep/Select-String over directory listing — it finds what you need in one step instead of two.
-ALWAYS use full paths from search results — never guess relative paths.`;
-    } else {
-        return `Your PRIMARY tools are shell_read and run_command. The host is **${env.label}**. Workspace: ${ws}
-Use shell commands like a developer:
-- Finding files: shell_read with "find '${ws}' -name '*transaction*' -not -path '*__pycache__*'"
-- Searching code: shell_read with "grep -rn 'def fetch_user' --include='*.py' '${ws}'"
-- Listing directories: shell_read with "find '${ws}/app' -type f -name '*.py' | head -50"
-- Viewing files: shell_read with "cat '/full/path/to/file.py'"
-- Git operations: shell_read with "git status", "git log --oneline -20", "git diff"
-ALWAYS use full paths from search results — never guess relative paths.`;
-    }
+    const py = env.pythonCmd || 'python3';
+
+    const pythonSection = `## Python-first (works on ALL platforms — prefer this)
+- Find files by name:        shell_read → ${py} -c "import pathlib; [print(p) for p in pathlib.Path('${ws}').rglob('*transaction*') if '__pycache__' not in str(p)]"
+- Search code for a symbol:  shell_read → ${py} -c "import pathlib,re; [print(f'{p}:{i+1}: {l.rstrip()}') for p in pathlib.Path('${ws}').rglob('*.py') if '__pycache__' not in str(p) for i,l in enumerate(p.read_text(errors='ignore').splitlines()) if re.search(r'def fetch_user', l)]"
+- Read a file:               shell_read → ${py} -c "print(open('FULL/PATH/file.py').read())"
+- Read specific lines (e.g. 474–580): shell_read → ${py} -c "lines=open('FULL/PATH/file.py').readlines(); print(''.join(lines[473:580]))"
+- List directory contents:   shell_read → ${py} -c "import pathlib; [print(p) for p in sorted(pathlib.Path('${ws}/app').iterdir())]"
+- Check if file exists:      shell_read → ${py} -c "import pathlib; print(pathlib.Path('FULL/PATH').exists())"`;
+
+    const gitSection = `- Git status/log/diff:       shell_read → git status  |  git log --oneline -20  |  git diff`;
+
+    const fallbackSection = env.os === 'windows'
+        ? `## PowerShell fallback (Windows only — use Python above when possible)
+- Find files: Get-ChildItem -Path '${ws}' -Recurse -Filter '*pattern*' | Select-Object FullName
+- Search code: Get-ChildItem -Path '${ws}' -Recurse -Filter '*.py' | Select-String -Pattern 'def foo' | Select-Object Path,LineNumber,Line -First 20
+- Read file: Get-Content 'FULL/PATH/file.py'
+- Read line range: (Get-Content 'FULL/PATH/file.py' | Select-Object -Skip 473 -First 107)`
+        : `## Shell fallback (Unix — use Python above when possible)
+- Find files: find '${ws}' -name '*pattern*' -not -path '*__pycache__*'
+- Search code: grep -rn 'def fetch_user' --include='*.py' '${ws}'
+- Read file: cat '/full/path/file.py'
+- Read line range: sed -n '474,580p' '/full/path/file.py'`;
+
+    return `Your PRIMARY tools are shell_read and run_command. Host: **${env.label}**. Workspace: ${ws}
+${env.pythonCmd ? `Python available: **${py}** — use it first for all file operations (cross-platform, reliable).` : `Python NOT detected — use platform shell commands below.`}
+
+${pythonSection}
+
+${gitSection}
+
+${fallbackSection}
+
+ALWAYS use full absolute paths from search results — never guess relative paths.
+PREFER targeted searches over broad directory sweeps.`;
 }
 
-/** Build shell-first examples for text-mode instructions */
+/** Build Python-first examples for text-mode (XML tool) instructions */
 function buildTextModeShellExamples(env: ShellEnvironment, workspaceRoot?: string): string {
     const ws = workspaceRoot ? workspaceRoot.replace(/\\/g, '/') : '.';
-    if (env.os === 'windows') {
-        return `CRITICAL — Shell-First Approach:
-The host is **${env.label}**. Workspace root: ${ws}
-Use PowerShell commands for ALL file operations. Do NOT use Unix commands (find, grep, cat, mv, mkdir -p).
+    const py = env.pythonCmd || 'python3';
+    const hasPython = !!env.pythonCmd;
 
-EXAMPLE - User says "find the payment service code":
-Step 1 — find by filename filter (fast):
-<tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem -Path '${ws}' -Recurse -Filter '*payment*' | Select-Object FullName"}}</tool>
-Step 2 — read it immediately using the path from step 1:
-<tool>{"name": "shell_read", "arguments": {"command": "Get-Content 'C:\\path\\from\\step1\\payment_service.py'"}}</tool>
+    const pythonExamples = `CRITICAL — Python-First Approach (works on ALL platforms):
+Host: **${env.label}**. Workspace root: ${ws}
+${hasPython ? `Python available: **${py}** — use it for ALL file discovery and reading.` : `Python NOT detected — use platform shell commands below instead.`}
 
-EXAMPLE - User says "search for where process_payment is defined":
-<tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem -Path '${ws}/app' -Recurse -Filter '*.py' | Select-String -Pattern 'def process_payment' | Select-Object Path,LineNumber,Line | Select-Object -First 10"}}</tool>
+EXAMPLE - Find the payment service code:
+<tool>{"name": "shell_read", "arguments": {"command": "${py} -c \\"import pathlib; [print(p) for p in pathlib.Path('${ws}').rglob('*payment*') if '__pycache__' not in str(p)]\\""}}</tool>
 
-EXAMPLE - User says "read the checkout service":
-<tool>{"name": "shell_read", "arguments": {"command": "Get-Content '${ws}/app/services/checkout_service.py'"}}</tool>
-If path is wrong, search: Get-ChildItem -Recurse -Filter '*checkout*' | Select-Object FullName
+EXAMPLE - Search for where process_payment is defined (with line numbers):
+<tool>{"name": "shell_read", "arguments": {"command": "${py} -c \\"import pathlib,re;\\n[print(f'{p}:{i+1}: {l.rstrip()}') for p in pathlib.Path('${ws}').rglob('*.py') if '__pycache__' not in str(p) for i,l in enumerate(p.read_text(errors='ignore').splitlines()) if re.search(r'def process_payment', l)]\\""}}</tool>
 
-EXAMPLE - User says "show me the files under app/routes":
-<tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem '${ws}/app/routes' | Select-Object Name"}}</tool>
+EXAMPLE - Read a file (use full path from search result):
+<tool>{"name": "shell_read", "arguments": {"command": "${py} -c \\"print(open('/full/path/payment_service.py').read())\\""}}</tool>
 
-EXAMPLE - User needs to read lines 474–580 of a file:
-<tool>{"name": "shell_read", "arguments": {"command": "(Get-Content 'C:/full/path/file.py' | Select-Object -Skip 473 -First 107)"}}</tool>
-NOTE: Select-Object -Index does NOT accept ranges (473..580 fails). Use -Skip (line number minus 1) and -First (number of lines) instead.
+EXAMPLE - Read lines 474–580 of a file:
+<tool>{"name": "shell_read", "arguments": {"command": "${py} -c \\"lines=open('/full/path/file.py').readlines(); print(''.join(lines[473:580]))\\""}}</tool>
 
-CRITICAL: Prefer targeted reads over broad directory sweeps. If you know the likely path (e.g. app/services/email_service.py), read it directly — do NOT list the whole directory first.
+EXAMPLE - List files in a directory:
+<tool>{"name": "shell_read", "arguments": {"command": "${py} -c \\"import pathlib; [print(p) for p in sorted(pathlib.Path('${ws}/app').rglob('*.py')) if '__pycache__' not in str(p)]\\""}}</tool>
 
-EXAMPLE - User says "create the admin directory and move admin.py into it":
-<tool>{"name": "run_command", "arguments": {"command": "New-Item -ItemType Directory -Path '${ws}/app/routes/admin' -Force; Move-Item '${ws}/app/routes/admin.py' '${ws}/app/routes/admin/'"}}</tool>
+EXAMPLE - Create a directory and move a file:
+<tool>{"name": "run_command", "arguments": {"command": "${py} -c \\"import shutil,pathlib; pathlib.Path('${ws}/app/routes/admin').mkdir(parents=True,exist_ok=True); shutil.move('${ws}/app/routes/admin.py','${ws}/app/routes/admin/')\\""}}</tool>
 
-EXAMPLE - User says "create a new file new_service.py with this content":
-Use edit_file with old_string="" (empty string) to create the file — NEVER use echo or shell redirection:
+EXAMPLE - Create a new source file:
+Use edit_file with old_string="" — NEVER use echo or shell redirection (collapses newlines):
 <tool>{"name": "edit_file", "arguments": {"path": "${ws}/app/services/new_service.py", "old_string": "", "new_string": "# full file content here"}}</tool>
 
-CRITICAL: NEVER use echo, Add-Content, or shell redirection (>, >>) to write source code files. echo collapses newlines and produces broken code. Always use edit_file to create or modify source files.
-CRITICAL: When file search returns a path, READ the full path in the next call. Do NOT guess paths.`;
-    } else {
-        return `CRITICAL — Shell-First Approach:
-The host is **${env.label}**. Workspace root: ${ws}
-Use shell commands for ALL file operations.
+CRITICAL: When a search returns a path, use that EXACT full path in the next call — do NOT guess.
+CRITICAL: NEVER use echo, Add-Content, Set-Content, or shell redirection to write source files — use edit_file.`;
 
-EXAMPLE - User says "find the payment service code":
-<tool>{"name": "shell_read", "arguments": {"command": "find '${ws}' -type f -name '*payment*' -not -path '*__pycache__*'"}}</tool>
+    if (hasPython) { return pythonExamples; }
 
-EXAMPLE - User says "search for where process_payment is defined":
-<tool>{"name": "shell_read", "arguments": {"command": "grep -rn 'def process_payment' --include='*.py' '${ws}'"}}</tool>
+    // Python not available — fall back to platform shell examples
+    const shellFallback = env.os === 'windows'
+        ? `\n\nPython not found — using PowerShell fallback:
+EXAMPLE - Find files: <tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem -Path '${ws}' -Recurse -Filter '*payment*' | Select-Object FullName"}}</tool>
+EXAMPLE - Search code: <tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem -Path '${ws}/app' -Recurse -Filter '*.py' | Select-String -Pattern 'def process_payment' | Select-Object Path,LineNumber,Line -First 10"}}</tool>
+EXAMPLE - Read file: <tool>{"name": "shell_read", "arguments": {"command": "Get-Content 'FULL/PATH/file.py'"}}</tool>
+EXAMPLE - Read lines 474-580: <tool>{"name": "shell_read", "arguments": {"command": "(Get-Content 'FULL/PATH/file.py' | Select-Object -Skip 473 -First 107)"}}</tool>`
+        : `\n\nPython not found — using shell fallback:
+EXAMPLE - Find files: <tool>{"name": "shell_read", "arguments": {"command": "find '${ws}' -type f -name '*payment*' -not -path '*__pycache__*'"}}</tool>
+EXAMPLE - Search code: <tool>{"name": "shell_read", "arguments": {"command": "grep -rn 'def process_payment' --include='*.py' '${ws}'"}}</tool>
+EXAMPLE - Read file: <tool>{"name": "shell_read", "arguments": {"command": "cat '/full/path/payment_service.py'"}}</tool>
+EXAMPLE - Read line range: <tool>{"name": "shell_read", "arguments": {"command": "sed -n '474,580p' '/full/path/file.py'"}}</tool>`;
 
-EXAMPLE - User says "read the checkout service":
-Step 1 — find the file:
-<tool>{"name": "shell_read", "arguments": {"command": "find '${ws}' -name '*checkout_service*' -not -path '*__pycache__*'"}}</tool>
-Step 2 — read it (use the EXACT path from step 1 result):
-<tool>{"name": "shell_read", "arguments": {"command": "cat '/exact/path/from/step1/checkout_service.py'"}}</tool>
-
-EXAMPLE - User says "show me the files under app/routes":
-<tool>{"name": "shell_read", "arguments": {"command": "find '${ws}/app/routes' -type f -name '*.py' | sort"}}</tool>
-
-CRITICAL: When file search returns a path, READ the full path in the next call. Do NOT guess paths.`;
-    }
+    return pythonExamples + shellFallback;
 }
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
@@ -1204,6 +1226,36 @@ function repairToolJson(raw: string): string | null {
         return `{"name":"${toolName}","arguments":{"command":${JSON.stringify(cmdStr)}}}`;
     }
 
+    // Generic repair for simple single-field tools (memory_search, workspace_summary, memory_list, etc.)
+    // These tools typically have one primary string argument — try to extract it.
+    const SIMPLE_TOOLS: Record<string, string> = {
+        memory_search:    'query',
+        memory_tier_write:'content',
+        memory_delete:    'id',
+        workspace_summary:'',  // no args
+        memory_list:      '',  // no args
+        get_diagnostics:  '',  // no args
+        find_files:       'query',
+    };
+    if (toolName in SIMPLE_TOOLS) {
+        const argKey = SIMPLE_TOOLS[toolName];
+        if (!argKey) {
+            // No-arg tool
+            return `{"name":"${toolName}","arguments":{}}`;
+        }
+        // Try to extract the primary argument value
+        const argMatch = raw.match(new RegExp(`"${argKey}"\\s*:\\s*"([^"]*)"`, 's'));
+        if (argMatch) {
+            // Also try to extract tier and tags for memory_tier_write
+            const tierMatch = raw.match(/"tier"\s*:\s*(\d)/);
+            const tagsMatch = raw.match(/"tags"\s*:\s*(\[[^\]]*\])/);
+            const tierPart = tierMatch ? `,"tier":${tierMatch[1]}` : '';
+            const tagsPart = tagsMatch ? `,"tags":${tagsMatch[1]}` : '';
+            return `{"name":"${toolName}","arguments":{"${argKey}":${JSON.stringify(argMatch[1])}${tierPart}${tagsPart}}}`;
+        }
+        return null;
+    }
+
     // Only repair edit_file (has complex old_string/new_string fields)
     if (toolName !== 'edit_file') return null;
 
@@ -1766,6 +1818,7 @@ export class Agent {
     private _lastFileOp: { path: string; originalContent: string | null; action: string } | null = null;
     private _editsThisRun = 0; // count of successful file edits in current agent run
     private _lastEditedFilePath: string = ''; // path of last successfully edited file
+    private _wrapUpSuggested = false; // true once the wrap-up nudge has been shown this session
     /** Pending inline confirmation resolver */
     private _confirmResolver: ((accepted: boolean) => void) | null = null;
     /** Timeout for pending confirmation to prevent hanging forever */
@@ -1774,6 +1827,8 @@ export class Agent {
     private _activeChildren: Set<ChildProcess> = new Set();
     /** Whether shell environment has been saved to memory for this workspace */
     private static shellEnvSaved = false;
+    /** Cached session recon result — built once per Agent class, injected into every run's system prompt */
+    private static _reconResult: string | null = null;
     /** Tool names auto-approved for the current run() — "Accept All" skips confirmation */
     private _autoApprovedTools = new Set<string>();
     /** The original user task message for the current conversation turn — preserved across context compaction */
@@ -1822,6 +1877,8 @@ export class Agent {
     private _recentSearchResultIds = new Set<string>();
     /** Per-file read counts in merge mode — resets on successful edit_file */
     private _mergeFileReadCounts: Map<string, number> = new Map();
+    /** Per-file edit counts this run — guards against looping on a corrupted/repeatedly broken file */
+    private _perFileEditCounts: Map<string, number> = new Map();
     /** Active multi-file plan steps remaining (for sequential execution) */
     private _pendingPlanSteps: FilePlan[] = [];
     /** Output summary from the last completed plan step — passed as context to the next */
@@ -2984,11 +3041,51 @@ export class Agent {
             }
         }
 
+        // ── Security scan mode detection ── (declared here so it's available for system prompt)
+        const isSecurityScan = /\b(security\s*(scan|audit|review|check|vuln[a-z]*|issue|bug|flaw|hole|anal[iy]s[ie]s?)|vuln[a-z]*\s*(scan|check|find|hunt|anal[iy]s[ie]s?|report)|pentest|pen\s+test|cve\s*scan|owasp|injection\s*(check|scan|find)|find\s*(vuln|security)|security\s*(report|risk))\b/i.test(userMessage)
+            || /\b(look|check|scan|search|find|review|audit|anal[iy]s[ie])\b.{0,60}\b(security\s*(vuln|issue|bug|flaw|risk|hole|problem|check)|vuln[a-z]*)\b/i.test(userMessage)
+            || /\bcheck\s+(for\s+)?(security\s+(issues?|bugs?|vuln[a-z]*|flaws?|risks?|problems?)|vuln[a-z]*)\b/i.test(userMessage);
+        if (isSecurityScan) {
+            logInfo('[security-scan] Security audit mode activated');
+        }
+
         const cfg = getConfig();
-        const baseSystemContent = cfg.systemPrompt.trim()
+        let baseSystemContent = cfg.systemPrompt.trim()
             || (this._isSmallModel
                 ? buildSmallModelSystemPrompt(this.workspaceRoot)
                 : await buildSystemPromptAsync(cfg.autoSaveMemory, this.workspaceRoot));
+
+        // ── Security scan addendum ───────────────────────────────────────────────
+        if (isSecurityScan) {
+            baseSystemContent += `\n\n## SECURITY AUDIT MODE
+You are performing a security vulnerability scan. Your job is to systematically read source files and identify real, exploitable security issues. Follow this process:
+
+**Step 1 — Enumerate files**: Use shell_read to list all relevant source files (routes, services, models, config).
+**Step 2 — Read each file**: Read files one at a time. For each file, look for:
+  - Command injection: user input passed to exec/spawn/shell without sanitization
+  - SQL injection: string interpolation in queries instead of parameterized queries
+  - Path traversal: unsanitized file paths from user input
+  - Hardcoded secrets: API keys, passwords, tokens in source code
+  - Insecure deserialization: loading untrusted data with pickle, yaml.load, eval
+  - Authentication bypass: missing auth decorators on sensitive routes
+  - XSS: user input rendered as HTML without escaping (render_template_string, Markup())
+  - SSRF: user-controlled URLs passed to requests.get/http calls
+  - Mass assignment: accepting arbitrary fields from request.json/form without filtering
+  - Exposed debug endpoints: debug=True, /debug routes, stack traces to users
+**Step 3 — Report findings**: For each finding output:
+  - File and line number
+  - Vulnerability type and severity (Critical/High/Medium/Low)
+  - The exact vulnerable code snippet
+  - Why it is exploitable
+  - A concrete fix
+
+**Rules**:
+- Read the actual code — do NOT guess or hallucinate findings
+- Report ONLY real issues you can see in the code you read
+- Skip informational notes — only report exploitable vulnerabilities
+- After reading all files, produce a final summary table: File | Line | Type | Severity
+- Use shell_read to read files — do not ask the user to paste code`;
+        }
 
         // Inject periodic memory nudge as a separate system message (not mutating user message)
         let memoryNudgeMsg: OllamaMessage | null = null;
@@ -3030,14 +3127,20 @@ export class Agent {
             }
         }
 
-        const isSweepTask = /\b(all|every|each|any)\b.{0,40}\b(route|function|endpoint|def)\b/i.test(userMessage)
+        const isSweepTask =/\b(all|every|each|any)\b.{0,40}\b(route|function|endpoint|def)\b/i.test(userMessage)
             || /\b(missing|without|lacks?)\b.{0,50}\b(error|exception|try|handl)/i.test(userMessage)
             || /\b(no\s+error|no\s+try)\b/i.test(userMessage)
-            || /\b(add|fix).{0,30}\b(all|every|each|any)\b/i.test(userMessage);
+            || /\b(add|fix).{0,30}\b(all|every|each|any)\b/i.test(userMessage)
+            || isSecurityScan;
         this._isSweepTask = isSweepTask;
         // Sweep tasks need a clean slate — prior history from failed/partial sweeps confuses the model
         // into thinking the work is already done (hallucinating completion) or repeating bad strategies.
-        if (isSweepTask && !this._mergeMode && this.history.length > 2) {
+        // Exception: if prior history already contains this task message, this is a retry — keep history
+        // so the model can see what it already did and not start over from scratch.
+        const isRetryOfSameTask = this.history.some(
+            m => m.role === 'user' && typeof m.content === 'string' && (m.content as string).includes(userMessage.slice(0, 60))
+        );
+        if (isSweepTask && !this._mergeMode && this.history.length > 2 && !isRetryOfSameTask) {
             logInfo(`[agent] Sweep task with ${this.history.length} prior messages — clearing history for a fresh start`);
             this.history = [];
         }
@@ -3063,6 +3166,12 @@ IMPORTANT: Only critical infrastructure is shown above. You have MORE memories s
 - Before implementing ANY feature request or code change → call memory_search("<feature area>") to check existing patterns
 - When given a vague business requirement (e.g. "allow decimals for X on the Y page") → call memory_search("<X>") and memory_search("<Y page>") FIRST before looking at files
 Do NOT assume you have no memory — check first.`;
+        }
+
+        // If Qdrant is offline, tell the model so it doesn't waste turns calling memory_search
+        // expecting semantic results that won't come back.
+        if (this.memory && !this.memory.isQdrantAvailable) {
+            baseSystemWithMemory += `\n\n[MEMORY STATUS] Semantic memory (Tiers 4-5) is OFFLINE — Qdrant/embedding service is unavailable. memory_search will only return local Tier 0-3 results. Do NOT expect past-session solutions or semantic lookups to be available this session.`;
         }
 
         // Fix M5: Recent-work briefing on session start
@@ -3240,6 +3349,13 @@ Do NOT assume you have no memory — check first.`;
             } catch { /* non-fatal */ }
         }
 
+        // Session recon — run once per agent instance, inject into every run's system prompt
+        // so the model knows the exact Python/git/node versions available without guessing.
+        if (!Agent._reconResult) {
+            Agent._reconResult = Agent.buildSessionRecon();
+        }
+        baseSystemWithMemory += `\n\n${Agent._reconResult}`;
+
         // Fix 6a: Task-type-specific system prompt suffix
         // Small, focused instructions beat long generic ones for 7B models.
         // Only appended when we know the task type (edit task with pre-loaded context).
@@ -3319,10 +3435,71 @@ Do NOT assume you have no memory — check first.`;
             if (contextStats.level === 'overflow') {
                 if (cfg.autoCompactContext) {
                     logWarn(`[context] Auto-compacting at ${contextStats.usagePercentage.toFixed(1)}%`);
-                    
-                    // Store old count BEFORE compaction
+
+                    // === SYNCHRONOUS WORK-IN-PROGRESS SNAPSHOT ===
+                    // Build this BEFORE compactHistory drops messages so we still have full history.
+                    // This is the key recovery mechanism — no LLM call needed, uses available state.
+                    const wipLines: string[] = [];
+                    wipLines.push(`[WORK IN PROGRESS — Context was compacted at ${contextStats.usagePercentage.toFixed(0)}% usage]`);
+                    wipLines.push(`Task: ${this._currentTaskMessage}`);
+
+                    // Files read this session
+                    if (this._filesAutoReadThisRun.size > 0) {
+                        wipLines.push(`Files read this session: ${[...this._filesAutoReadThisRun].join(', ')}`);
+                    }
+
+                    // Edit state
+                    if (this._editsThisRun > 0) {
+                        wipLines.push(`Edits made this session: ${this._editsThisRun} edit(s), last file: ${this._lastEditedFilePath || 'unknown'}`);
+                    } else {
+                        wipLines.push(`No file edits made yet this session.`);
+                    }
+
+                    // Active task state (if tracked)
+                    if (this._activeTask) {
+                        if (this._activeTask.stepsCompleted.length) {
+                            wipLines.push(`Steps completed: ${this._activeTask.stepsCompleted.join(' | ')}`);
+                        }
+                        if (this._activeTask.stepsPending.length) {
+                            wipLines.push(`Steps still pending: ${this._activeTask.stepsPending.join(' | ')}`);
+                        }
+                        if (this._activeTask.filesConfirmed.length) {
+                            wipLines.push(`Files confirmed correct: ${this._activeTask.filesConfirmed.join(', ')}`);
+                        }
+                        if (this._activeTask.filesRuledOut.length) {
+                            wipLines.push(`Files ruled out (stubs/wrong): ${this._activeTask.filesRuledOut.join(', ')}`);
+                        }
+                    }
+
+                    // Extract last assistant message(s) — what was the model doing right before compaction?
+                    const lastAssistantMsgs = this.history
+                        .filter(m => m.role === 'assistant' && typeof m.content === 'string' && (m.content as string).trim().length > 0)
+                        .slice(-3);
+                    if (lastAssistantMsgs.length > 0) {
+                        const lastMsg = lastAssistantMsgs[lastAssistantMsgs.length - 1];
+                        const snippet = (lastMsg.content as string).slice(0, 600).trim();
+                        wipLines.push(`Last action / progress before compaction:\n${snippet}`);
+                    }
+
+                    wipLines.push(`IMPORTANT: Do NOT repeat work already done. Continue from where you left off.`);
+                    const wipSnapshot = wipLines.join('\n');
+
+                    // === SYNCHRONOUS TIER 2 SAVE ===
+                    // Save the WIP snapshot to Tier 2 memory NOW, before the async LLM extraction,
+                    // so that recentMemFacts on the very next turn already has current session context.
+                    // The async LLM extraction will add richer structured facts on top of this.
+                    if (this.memory) {
+                        const syncMemNote = wipLines
+                            .filter(l => !l.startsWith('[WORK IN PROGRESS') && !l.startsWith('IMPORTANT:'))
+                            .join('\n');
+                        this.memory.addEntry(2, syncMemNote, ['auto-compact', 'session', 'wip-sync']).catch(() => {});
+                        logInfo(`[context] Synchronous WIP snapshot saved to Tier 2 (${wipLines.length} lines)`);
+                    }
+
+                    // Store old count and snapshot BEFORE compaction (needed to find dropped messages)
                     const oldMessageCount = this.history.length;
-                    
+                    const historyBeforeCompact = this.history.slice(); // shallow copy for dropped-message extraction
+
                     this.history = compactHistory(
                         this.history,
                         50, // Target 50% usage after compaction
@@ -3330,7 +3507,7 @@ Do NOT assume you have no memory — check first.`;
                         contextStats.systemPromptTokens,
                         contextStats.memoryTokens
                     );
-                    
+
                     // Calculate removed count AFTER compaction
                     const messagesRemoved = oldMessageCount - this.history.length;
 
@@ -3338,7 +3515,8 @@ Do NOT assume you have no memory — check first.`;
                     // survive even silent auto-compaction. Use the same LLM-based structured
                     // extraction as manual compact — run async so it doesn't block this turn.
                     if (this.memory && messagesRemoved > 0) {
-                        const droppedForSave = this.history.slice(0, messagesRemoved);
+                        // compactHistory keeps the NEWEST messages, so dropped = OLDEST messages from pre-compact history
+                        const droppedForSave = historyBeforeCompact.slice(0, messagesRemoved);
                         const droppedText = droppedForSave
                             .filter(m => m.role === 'user' || m.role === 'assistant')
                             .map(m => `${m.role}: ${m.content.slice(0, 500)}`)
@@ -3427,55 +3605,63 @@ Do NOT assume you have no memory — check first.`;
                         })();
                     }
 
-                    // After compaction, ensure the original task is still in history.
-                    // compactHistory works backwards from the end, so the first user message
-                    // (the actual task) is often the first thing dropped when context is full.
-                    // Re-inject it at the start so the model stays on task.
+                    // After compaction, inject WIP snapshot + recent Tier 2 memory at the front of history.
+                    // This ensures the model knows exactly what it was doing and what not to repeat.
+                    // NOTE: compactSummary is built below — injection uses wipSnapshot here, then we
+                    // update the injected message after compactSummary is available.
+                    let injectedCompactNote = '';
                     if (this._currentTaskMessage) {
-                        const taskStillPresent = this.history.some(
-                            m => m.role === 'user' && m.content.includes(this._currentTaskMessage.slice(0, 50))
-                        );
-                        if (!taskStillPresent) {
-                            // Load any recent Tier 2 memory to give the model the structured facts
-                            let recentMemFacts = '';
-                            if (this.memory) {
-                                try {
-                                    const tier2 = this.memory.getTier(2).slice(0, 3);
-                                    if (tier2.length) {
-                                        recentMemFacts = '\n\nRecent memory:\n' + tier2.map(e => `- ${e.content.slice(0, 120)}`).join('\n');
-                                    }
-                                } catch { /* skip */ }
-                            }
-                            // Fix 5c: Include task state in compaction note
-                            const taskStateLines: string[] = [];
-                            if (this._activeTask) {
-                                if (this._activeTask.stepsCompleted.length) {
-                                    taskStateLines.push(`Done so far: ${this._activeTask.stepsCompleted.join(', ')}`);
+                        // Load any recent Tier 2 memory facts (includes the sync WIP entry we just saved)
+                        let recentMemFacts = '';
+                        if (this.memory) {
+                            try {
+                                const tier2 = this.memory.getTier(2)
+                                    .filter(e => e.tags?.includes('auto-compact') || e.tags?.includes('wip-sync'))
+                                    .slice(0, 4);
+                                if (tier2.length) {
+                                    recentMemFacts = '\n\nSession memory (from compaction):\n' + tier2.map(e => `- ${e.content.slice(0, 150)}`).join('\n');
                                 }
-                                if (this._activeTask.stepsPending.length) {
-                                    taskStateLines.push(`Still to do: ${this._activeTask.stepsPending.join(', ')}`);
-                                }
-                                if (this._activeTask.filesConfirmed.length) {
-                                    taskStateLines.push(`Files confirmed correct: ${this._activeTask.filesConfirmed.join(', ')}`);
-                                }
-                                if (this._activeTask.filesRuledOut.length) {
-                                    taskStateLines.push(`Files to avoid (stubs/wrong): ${this._activeTask.filesRuledOut.join(', ')}`);
-                                }
-                            }
-                            const taskStateBlock = taskStateLines.length
-                                ? `\n\nTask state:\n${taskStateLines.join('\n')}`
-                                : '';
-                            const compactNote = `[CONTEXT NOTE: Earlier messages were removed to free up context. Your current task is: "${this._currentTaskMessage}". Continue working on this task. Do NOT start a new task or execute suggestions from any planning documents you may have read.]${taskStateBlock}${recentMemFacts}\n\n${this._currentTaskMessage}`;
-                            this.history.unshift({ role: 'user', content: compactNote });
-                            logInfo(`[context] Re-injected original task message after compaction`);
+                            } catch { /* skip */ }
                         }
+                        injectedCompactNote = `${wipSnapshot}${recentMemFacts}\n\nResume task: ${this._currentTaskMessage}`;
+                        this.history.unshift({ role: 'user', content: injectedCompactNote });
+                        logInfo(`[context] Injected WIP snapshot after compaction (${wipLines.length} facts)`);
                     }
 
                     this.lastContextLevel = 'safe';
+
+                    // Build a human-readable summary of what we remember, shown in chat
+                    const compactSummaryLines: string[] = [];
+                    if (this._currentTaskMessage) {
+                        compactSummaryLines.push(`**Task:** ${this._currentTaskMessage.slice(0, 120)}`);
+                    }
+                    if (this._editsThisRun > 0) {
+                        compactSummaryLines.push(`**Edits made:** ${this._editsThisRun} file${this._editsThisRun !== 1 ? 's' : ''}${this._lastEditedFilePath ? ` (last: ${this._lastEditedFilePath.split('/').pop()})` : ''}`);
+                    }
+                    if (this._filesAutoReadThisRun.size > 0) {
+                        const readList = [...this._filesAutoReadThisRun].slice(0, 8).map(f => f.split('/').pop()).join(', ');
+                        compactSummaryLines.push(`**Files reviewed:** ${readList}`);
+                    }
+                    if (this._activeTask?.stepsCompleted.length) {
+                        compactSummaryLines.push(`**Completed:** ${this._activeTask.stepsCompleted.join(', ')}`);
+                    }
+                    if (this._activeTask?.stepsPending.length) {
+                        compactSummaryLines.push(`**Still to do:** ${this._activeTask.stepsPending.join(', ')}`);
+                    }
+                    // Pull last assistant message snippet as "last action"
+                    const lastAsstMsg = this.history.filter(m => m.role === 'assistant' && typeof m.content === 'string' && (m.content as string).trim().length > 20).slice(-1)[0];
+                    if (lastAsstMsg) {
+                        const snippet = (lastAsstMsg.content as string).replace(/<tool>[\s\S]*?<\/tool>/g, '').trim().slice(0, 200);
+                        if (snippet) { compactSummaryLines.push(`**Last action:** ${snippet}`); }
+                    }
+                    compactSummaryLines.push(`*(${messagesRemoved} old message${messagesRemoved !== 1 ? 's' : ''} removed — continuing from here)*`);
+                    const compactSummary = compactSummaryLines.join('\n');
+
                     post({
                         type: 'contextCompacted',
                         messagesRemoved,
-                        newPercentage: 50
+                        newPercentage: 50,
+                        summary: compactSummary
                     });
                 } else {
                     // Alert user that compaction is needed but disabled
@@ -3742,12 +3928,44 @@ Do NOT assume you have no memory — check first.`;
                     // (b) the user explicitly asked for a plan/document/summary
                     const userAskedForPlan = /\b(plan|design|document|write.*doc|create.*file|save.*plan|discuss|proposal|how.*can|is it possible)\b/i.test(this._currentTaskMessage);
                     const responseHasToolBlock = result.content.includes('<tool>');
+
+                    // If the model output a <tool> block but it failed to parse (toolCalls is empty),
+                    // give it targeted feedback with the raw block so it can correct the JSON.
+                    if (responseHasToolBlock && !toolCalls.length && isTextMode && this.autoRetryCount < this.MAX_AUTO_RETRIES) {
+                        this.autoRetryCount++;
+                        // Extract the raw <tool> block for feedback
+                        const rawToolMatch = result.content.match(/<tool>([\s\S]*?)(?:<\/tool>|<tool>|$)/);
+                        const rawBlock = rawToolMatch ? rawToolMatch[1].slice(0, 400).trim() : '(could not extract)';
+                        logWarn(`[agent] Auto-retry ${this.autoRetryCount}: <tool> block present but failed to parse — feeding back raw JSON`);
+                        this.history.pop();
+                        this.history.push({
+                            role: 'user',
+                            content: `[SYSTEM: Your <tool> block could not be parsed as valid JSON. The raw content was:\n\n${rawBlock}\n\nFix the JSON and output ONLY a corrected <tool>{"name":"...","arguments":{...}}</tool> block — nothing else.]`,
+                        });
+                        post({ type: 'removeLastAssistant' });
+                        continue;
+                    }
+
                     // Detect task-completion responses — model correctly concluded nothing more needed
                     // Also detect completion when edits were already made this run and model produces a summary (even with code blocks or "fix" language)
                     const editsAlreadyMade = this._editsThisRun > 0 && !toolCalls.length && turn > 0;
                     const isTaskCompletion = editsAlreadyMade
                         || /\b(no (further |more |additional |other )?changes? (are |is )?(needed|required|necessary)|no (further |more )?edits? (are |is )?(needed|required)|already (implemented|fully implemented|in place|connected|wired up|present|exists?|correct)|implementation (is |looks )?(complete|correct|already|done)|task (is |appears )?(complete|done|finished)|nothing (else |more |further |additional )?(is |are |was )?(needed|required|to do)|fully (connected|wired|implemented|functional)|no (action|update|change|edit) (is |are )?(needed|required|necessary))\b/i.test(resp)
                         || /✅|task complete|no errors or warnings found|following (our |the )?project conventions?/i.test(resp);
+                    // Short "let me check X" statements at turn > 0 with no tool call — model announced
+                    // intent but forgot to follow through. Catch these before the 300-char threshold below.
+                    const isShortIntentWithoutTool = turn > 0 && !toolCalls.length && resp.length < 300
+                        && !isTaskCompletion && !responseHasToolBlock && userWantsAction
+                        && /\b(let me (check|look|read|examine|see|find|verify|inspect)|i('ll| will) (check|look|read|examine|see|find|verify|inspect)|checking|looking at|reading)\b/i.test(resp);
+                    if (isShortIntentWithoutTool) {
+                        this.autoRetryCount++;
+                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: short intent statement without tool call (${resp.length} chars, turn ${turn})`);
+                        this.history.pop();
+                        this.history.push({ role: 'user', content: `[SYSTEM: You said you would check something but did not call a tool. Call the tool NOW — output only a <tool> block.]` });
+                        post({ type: 'removeLastAssistant' });
+                        continue;
+                    }
+
                     const isPlanningInsteadOfDoing = turn > 0 && !toolCalls.length && resp.length > 300
                         && !userAskedForPlan && !responseHasToolBlock && !isTaskCompletion
                         && /\b(you would|you could|you can|you need to|would need to|we would need to|this (would|will|change will|change would)|to (split|refactor|separate|reorganize|restructure|move|create|migrate)|to (find|check|inspect|verify|look at) (which|each|every|all))\b/i.test(resp)
@@ -4025,6 +4243,19 @@ Do NOT assume you have no memory — check first.`;
                     const sessionTags = ['session-end', 'completed', 'completed-feature', ...featureKws.slice(0, 6).map(k => k.toLowerCase())];
                     this.memory!.addEntry(3, sessionNote, sessionTags).catch(() => {});
                     logInfo(`[memory] Session-end: saved completed-feature to Tier 3 (${editedPaths.length} files, ${featureKws.length} keywords)`);
+
+                    // ── Wrap-up nudge ────────────────────────────────────
+                    // After a significant coding effort, suggest starting fresh to avoid
+                    // context bloat degrading future responses. Only fires when:
+                    // - 3+ files edited this session, OR context is above 35%
+                    // - Not already suggested this session
+                    const contextPct = finalStats.usagePercentage ?? 0;
+                    const bigSession = this._editsThisRun >= 3 || contextPct >= 75;
+                    if (bigSession && !this._wrapUpSuggested) {
+                        this._wrapUpSuggested = true;
+                        const ctxNote = contextPct >= 35 ? ` (context at ${Math.round(contextPct)}%)` : '';
+                        post({ type: 'chunk', content: `\n\n---\n*Good stopping point${ctxNote}. Start a new chat to keep context fresh for the next task.*` });
+                    }
                 }
 
                 // ── search_hit upgrade ───────────────────────────────────
@@ -4969,7 +5200,13 @@ Do NOT assume you have no memory — check first.`;
                             } else {
                             const env2 = detectShellEnvironment();
                             // Keep backslashes as-is for Windows paths; convert forward slashes for Unix
-                            const pathForCmd = env2.os === 'windows' ? relevantPath.replace(/\//g, '\\') : relevantPath;
+                            let pathForCmd = env2.os === 'windows' ? relevantPath.replace(/\//g, '\\') : relevantPath;
+                            // If path has no directory separators it's a bare filename — not usable for auto-read.
+                            // Skip rather than generating a command that will fail with "path not found".
+                            if (!pathForCmd.includes('/') && !pathForCmd.includes('\\')) {
+                                logInfo(`[agent] Auto-read skipped — bare filename with no directory: ${pathForCmd}`);
+                                nudge = `The file listing showed only filenames without full paths. Use shell_read with the full path including directory (e.g. 'Get-Content "${this.workspaceRoot.replace(/\\/g, '/')}/${pathForCmd}"') to read the file.`;
+                            } else {
                             // Build a focused grep/Select-String command to extract only relevant sections
                             // (exception/error handling + user-task keywords) with surrounding context lines.
                             // This prevents the full file (potentially thousands of lines) from flooding context.
@@ -5058,6 +5295,7 @@ Do NOT assume you have no memory — check first.`;
                                 nudge = `You found the file path. Now READ the file content before editing. Call shell_read with: ${catCmd}`;
                             }
                             } // close the else-block for "not already auto-read"
+                            } // close the "else" for bare-filename check
                         } else if (/Get-Content|cat\s/i.test(String(args.command ?? ''))
                             && (isShellError || (toolResult.length < 300 && !/def |class |import |#/.test(toolResult)))) {
                             // Get-Content failed (path not found) OR returned too little to be real source code.
@@ -5733,6 +5971,15 @@ If the code looks correct, respond with exactly: OK`;
                 this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
                 if (!this._filesChangedThisRun.includes(rel)) { this._filesChangedThisRun.push(rel); }
 
+                // Guard against looping on a repeatedly broken file (e.g. corrupted content that
+                // force_overwrite fixed but the model wrote wrong content and keeps re-editing).
+                const perFileCount = (this._perFileEditCounts.get(rel) ?? 0) + 1;
+                this._perFileEditCounts.set(rel, perFileCount);
+                if (perFileCount >= 5) {
+                    logWarn(`[agent] ${perFileCount} edits to "${rel}" this run — possible edit loop`);
+                    return `Edit applied (${perFileCount} edits to this file this run).\n\n[SYSTEM WARNING] You have now edited "${rel}" ${perFileCount} times this session. This may indicate a loop. STOP and review whether the file is now correct before editing it again. Use shell_read to read it and verify the content is what you intended. If the task is complete, say so.`;
+                }
+
                 // Auto-save a project memory note when a new named function or route is added
                 if (this.memory) {
                     const fnMatch = newString.match(/(?:def|function|async function|const)\s+(\w+)\s*[\(\=]/);
@@ -5763,6 +6010,18 @@ If the code looks correct, respond with exactly: OK`;
                         if (done) { this._activeTask!.stepsCompleted.push(step); }
                         return !done;
                     });
+
+                    // Persist sweep progress to Tier 2 memory after every edit so an
+                    // interrupted sweep can be resumed in a future session.
+                    if (this.memory && this._currentTaskMessage) {
+                        const sweepNote = [
+                            `Sweep in progress: ${this._currentTaskMessage.slice(0, 100)}`,
+                            `Completed: ${this._activeTask.stepsCompleted.join(' | ')}`,
+                            this._activeTask.stepsPending.length ? `Pending: ${this._activeTask.stepsPending.join(' | ')}` : 'All steps done',
+                            `Files done: ${this._activeTask.filesConfirmed.join(', ')}`,
+                        ].join('\n');
+                        this.memory.addEntry(2, sweepNote, ['sweep-progress', 'auto-edit', 'wip-sync']).catch(() => {});
+                    }
                 }
 
                 // Low-confidence warning: if the model's average token logprob for this response
@@ -6680,12 +6939,21 @@ If the code looks correct, respond with exactly: OK`;
             const post = this.postFn;
             post({ type: 'commandStart', id: cmdId, cmd });
 
-            // On Windows, PowerShell cmdlets must run via powershell.exe, not cmd.exe.
-            const isPSCmd = process.platform === 'win32'
-                && /Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Measure-Object|Sort-Object|\$_|\$PSItem/.test(cmd);
-            const child = isPSCmd
-                ? spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], { cwd, env: { ...process.env } })
-                : spawn(cmd, { cwd, env: { ...process.env }, shell: true });
+            // Strip newlines to prevent newline-injection (cmd1\ncmd2 becoming two shell commands).
+            const safeCmd = cmd.replace(/[\r\n]+/g, ' ').trim();
+
+            // Routing priority:
+            //   1. python/python3/py -c "..." → spawn python directly (cross-platform, no shell needed)
+            //   2. PowerShell cmdlets on Windows → powershell.exe array args (safe)
+            //   3. Everything else → shell:true (needed for pipelines/redirects)
+            const pyMatch = safeCmd.match(/^(python3?|py)\s+-c\s+"([\s\S]*)"\s*$/);
+            const isPSCmd = !pyMatch && process.platform === 'win32'
+                && /Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Measure-Object|Sort-Object|\$_|\$PSItem/.test(safeCmd);
+            const child = pyMatch
+                ? spawn(pyMatch[1], ['-c', pyMatch[2]], { cwd, env: { ...process.env } })
+                : isPSCmd
+                    ? spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', safeCmd], { cwd, env: { ...process.env } })
+                    : spawn(safeCmd, { cwd, env: { ...process.env }, shell: true, windowsHide: true });
             this.trackChild(child);
 
             let output = '';
@@ -6743,13 +7011,18 @@ If the code looks correct, respond with exactly: OK`;
             const post = this.postFn;
             post({ type: 'commandStart', id: cmdId, cmd });
 
-            // On Windows, PowerShell cmdlets must run via powershell.exe, not cmd.exe.
-            // Detect PowerShell commands and spawn accordingly.
-            const isPowerShellCmd = process.platform === 'win32'
+            // Routing priority:
+            //   1. python/python3/py -c "..." → spawn python directly (cross-platform, no shell needed)
+            //   2. PowerShell cmdlets on Windows → powershell.exe array args (safe)
+            //   3. Everything else → shell:true (needed for pipelines/redirects)
+            const pyMatchR = cmd.match(/^(python3?|py)\s+-c\s+"([\s\S]*)"\s*$/);
+            const isPowerShellCmd = !pyMatchR && process.platform === 'win32'
                 && /Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Out-Host|Measure-Object|Sort-Object|\$_|\$PSItem/.test(cmd);
-            const spawnArgs: [string, string[], object] = isPowerShellCmd
-                ? ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], { cwd, env: { ...process.env } }]
-                : [cmd, [], { cwd, env: { ...process.env }, shell: true }];
+            const spawnArgs: [string, string[], object] = pyMatchR
+                ? [pyMatchR[1], ['-c', pyMatchR[2]], { cwd, env: { ...process.env } }]
+                : isPowerShellCmd
+                    ? ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], { cwd, env: { ...process.env } }]
+                    : [cmd, [], { cwd, env: { ...process.env }, shell: true }];
             const child = spawn(...spawnArgs);
             this.trackChild(child);
 
@@ -6803,6 +7076,57 @@ If the code looks correct, respond with exactly: OK`;
                 }
             }, 30_000);
         });
+    }
+
+    // ── Session recon ─────────────────────────────────────────────────────────
+
+    /**
+     * Run a one-time environment probe and cache the result.
+     * Detects Python version, pip, git, node/npm so the model knows the exact
+     * tools available without guessing. Runs synchronously via execSync so the
+     * result is ready before the first LLM call.
+     */
+    private static buildSessionRecon(): string {
+        const probe = (cmd: string): string => {
+            try {
+                return execSync(cmd, { stdio: 'pipe', timeout: 3000 }).toString().trim().split('\n')[0];
+            } catch { return ''; }
+        };
+
+        const lines: string[] = ['## Environment (auto-detected)'];
+
+        // Python
+        const pyVer = probe('python3 --version') || probe('python --version');
+        const pyCmd = pyVer.toLowerCase().startsWith('python 3') ? (probe('python3 --version') ? 'python3' : 'python') : '';
+        if (pyVer) { lines.push(`- Python: ${pyVer}${pyCmd ? ` (use \`${pyCmd}\`)` : ' (WARNING: Python 2 or unknown)'}`); }
+        else { lines.push('- Python: NOT FOUND — do not use python commands'); }
+
+        // pip
+        const pipVer = probe('pip3 --version') || probe('pip --version');
+        if (pipVer) { lines.push(`- pip: ${pipVer.split(' ').slice(0,2).join(' ')} (use \`${pipVer.includes('pip3') ? 'pip3' : 'pip'}\`)`); }
+
+        // git
+        const gitVer = probe('git --version');
+        if (gitVer) { lines.push(`- git: ${gitVer}`); }
+        else { lines.push('- git: NOT FOUND'); }
+
+        // node / npm
+        const nodeVer = probe('node --version');
+        const npmVer  = probe('npm --version');
+        if (nodeVer) { lines.push(`- node: ${nodeVer}${npmVer ? `, npm: ${npmVer}` : ''}`); }
+
+        // OS details
+        const platform = process.platform;
+        const arch = process.arch;
+        lines.push(`- OS: ${platform} (${arch})`);
+
+        // Shell
+        const shellEnv = detectShellEnvironment();
+        lines.push(`- Shell: ${shellEnv.label}`);
+
+        const result = lines.join('\n');
+        logInfo(`[recon] Session environment:\n${result}`);
+        return result;
     }
 
     // ── Utilities ─────────────────────────────────────────────────────────────
@@ -7504,6 +7828,7 @@ If the code looks correct, respond with exactly: OK`;
         // Must specifically be about import paths / file locations — not general code edits
         const hasPathKeyword = /\b(import path|import location|module path|reorganiz|moved|new folder|new director)\b/i.test(msg)
             || (/\b(path|import|reference)\b/i.test(msg) && /\b(update|fix|point|adjust|rewrite)\b/i.test(msg));
+        logInfo(`[pre-process] hasPathKeyword=${hasPathKeyword} userMessage="${userMessage.slice(0, 80)}"`);
         if (!hasPathKeyword) { return ''; }
 
         const root = this.workspaceRoot;
