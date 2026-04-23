@@ -1204,14 +1204,31 @@ export class TieredMemoryManager {
      */
     async seedProjectMemory(workspaceRoot: string): Promise<void> {
         // Check if already seeded — read from JSON file directly to avoid stale workspaceState
+        // Re-seed if ARCHITECTURE.md is newer than the last seed (catches regenerated architecture docs)
         const filePath = this.getMemoryFilePath();
         let alreadySeeded = false;
+        let seededAt = 0;
         if (filePath && fs.existsSync(filePath)) {
             try {
                 const raw = fs.readFileSync(filePath, 'utf8');
                 const data = JSON.parse(raw) as MemoryFileFormat;
-                alreadySeeded = (data.tiers?.tier_1_essential || []).some(e => e.tags?.includes('auto-seeded'));
+                const seedEntry = (data.tiers?.tier_1_essential || []).find(e => e.tags?.includes('auto-seeded'));
+                if (seedEntry) {
+                    alreadySeeded = true;
+                    seededAt = new Date(seedEntry.createdAt).getTime();
+                }
             } catch { /* ignore parse errors — will re-seed */ }
+        }
+        // Check if ARCHITECTURE.md is newer than the last seed
+        if (alreadySeeded) {
+            try {
+                const archPath = path.join(workspaceRoot, 'ARCHITECTURE.md');
+                const archStat = fs.statSync(archPath);
+                if (archStat.mtimeMs > seededAt) {
+                    logInfo('[memory] ARCHITECTURE.md updated since last seed — re-seeding');
+                    alreadySeeded = false;
+                }
+            } catch { /* no ARCHITECTURE.md — use existing seed */ }
         }
         if (alreadySeeded) {
             logInfo('[memory] Project memory already seeded — skipping');
@@ -1341,6 +1358,18 @@ export class TieredMemoryManager {
                     seeds.push({ content: `Documentation files in docs/: ${docFiles.join(', ')}`, tags: ['auto-seeded', 'docs'] });
                 }
             } catch { /* ignore */ }
+        }
+
+        // ── ARCHITECTURE.md (auto-generated project structure briefing) ─────
+        // Seed the full content into Tier 1 so every session starts with
+        // a complete structural picture without needing memory_search.
+        const archContent = tryRead('ARCHITECTURE.md');
+        if (archContent) {
+            seeds.push({
+                content: `Project architecture (from ARCHITECTURE.md):\n${archContent.slice(0, 3000)}`,
+                tags: ['auto-seeded', 'architecture', 'structure'],
+            });
+            logInfo('[memory] Seeding ARCHITECTURE.md into Tier 1');
         }
 
         // Write all seeds to Tier 1 (essential — available via memory_search, not auto-injected)

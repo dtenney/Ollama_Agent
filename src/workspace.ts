@@ -281,6 +281,16 @@ export async function buildWorkspaceSummary(root: string): Promise<string> {
         sections.push('', '── Python environment ──', formatPythonEnvironment(pyEnv));
     }
 
+    // Include ARCHITECTURE.md if present — concise project structure reference
+    const archPath = path.join(root, 'ARCHITECTURE.md');
+    try {
+        const archStat = fs.statSync(archPath);
+        if (archStat.isFile()) {
+            const archContent = fs.readFileSync(archPath, 'utf8').slice(0, 3000);
+            sections.push('', '── Architecture ──', archContent.trim());
+        }
+    } catch { /* file doesn't exist yet — skip */ }
+
     sections.push(
         '',
         '── File tree ──',

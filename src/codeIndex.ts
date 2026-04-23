@@ -383,12 +383,55 @@ export class CodeIndexer {
 
         // ── Entry points ────────────────────────────────────────────────────────
         const entryPoints: string[] = [];
-        const entryPatterns = ['app.py', 'main.py', 'run.py', 'wsgi.py', 'manage.py', 'server.ts', 'server.js', 'index.ts', 'index.js', 'app/index.ts', 'src/index.ts'];
+        const entryPatterns = ['app.py', 'main.py', 'run.py', 'wsgi.py', 'manage.py', 'server.ts', 'server.js', 'index.ts', 'index.js', 'app/index.ts', 'src/index.ts', 'src/main.ts', 'src/extension.ts'];
         for (const ep of entryPatterns) {
             if (fs.existsSync(path.join(root, ep))) { entryPoints.push(ep); }
         }
         if (entryPoints.length > 0) {
             lines.push(`## Entry points\n\n${entryPoints.map(e => `- \`${e}\``).join('\n')}\n`);
+        }
+
+        // ── TypeScript/Node.js: scripts + key src/ exports ──────────────────────
+        if (hasTs || hasPackageJson) {
+            // npm scripts
+            try {
+                const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+                const scripts = pkg.scripts ? Object.entries(pkg.scripts as Record<string, string>).map(([k, v]) => `\`${k}\`: ${v}`).join('\n- ') : null;
+                if (scripts) { lines.push(`## npm scripts\n\n- ${scripts}\n`); }
+                // Key dependencies
+                const deps = Object.keys(pkg.dependencies ?? {}).slice(0, 12);
+                const devDeps = Object.keys(pkg.devDependencies ?? {}).slice(0, 8);
+                if (deps.length) { lines.push(`## Dependencies\n\n- ${deps.join('\n- ')}\n`); }
+                if (devDeps.length) { lines.push(`## Dev dependencies\n\n- ${devDeps.join('\n- ')}\n`); }
+            } catch { /* no package.json */ }
+
+            // Key src/ files with exported classes/interfaces/functions
+            const srcDir = path.join(root, 'src');
+            if (fs.existsSync(srcDir)) {
+                try {
+                    const srcFiles = fs.readdirSync(srcDir)
+                        .filter(f => f.endsWith('.ts') || f.endsWith('.js'))
+                        .slice(0, 20);
+                    const exportLines: string[] = [];
+                    for (const sf of srcFiles) {
+                        try {
+                            const content = fs.readFileSync(path.join(srcDir, sf), 'utf8');
+                            const exports: string[] = [];
+                            for (const m of content.matchAll(/^export\s+(?:async\s+)?(?:class|interface|type|function|const)\s+(\w+)/gm)) {
+                                exports.push(m[1]);
+                            }
+                            if (exports.length > 0) {
+                                exportLines.push(`- \`src/${sf}\`: ${exports.slice(0, 6).join(', ')}`);
+                            } else {
+                                exportLines.push(`- \`src/${sf}\``);
+                            }
+                        } catch { /* skip */ }
+                    }
+                    if (exportLines.length > 0) {
+                        lines.push(`## Source files (src/)\n\n${exportLines.join('\n')}\n`);
+                    }
+                } catch { /* skip */ }
+            }
         }
 
         // ── Models ──────────────────────────────────────────────────────────────
