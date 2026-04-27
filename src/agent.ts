@@ -1908,6 +1908,8 @@ export class Agent {
     private _pendingPlanSteps: FilePlan[] = [];
     /** Output summary from the last completed plan step — passed as context to the next */
     private _lastPlanStepOutput: string = '';
+    /** Absolute path of the active task plan file (plans/<name>.md), or null if none */
+    private _activePlanFile: string | null = null;
 
     // Fix 5a: Task state machine — survives context compaction, drives completion tracking
     private _activeTask: {
@@ -2307,6 +2309,15 @@ export class Agent {
                 stepsCompleted: [],
                 stepsPending: [],
             };
+        }
+
+        // ── Explicit plan request ─────────────────────────────────────────────
+        // If the user explicitly asks for a plan ("make a plan", "create a plan",
+        // "write up a plan"), create the plan file immediately with a placeholder
+        // step list — it will be filled in once the model responds with its approach.
+        const isExplicitPlanRequest = /\b(make|create|write|give me|draft)\s+(a\s+)?(plan|step[- ]by[- ]step|checklist)\b/i.test(userMessage);
+        if (isExplicitPlanRequest && !this._activePlanFile) {
+            this.writePlanFile(userMessage, ['Planning in progress…']);
         }
 
         this._failedCommandSignatures.clear(); // Reset failed command tracking
@@ -2746,6 +2757,10 @@ export class Agent {
                 if (this._activeTask && preResult.pendingSteps.length > 0) {
                     this._activeTask.stepsPending = preResult.pendingSteps.map(s => s.replace(/^\[ \]\s*/, ''));
                     logInfo(`[task-state] Pending steps: ${this._activeTask.stepsPending.join(' | ')}`);
+                    // Auto-create a plan file when the task has 4+ programmatically-derived steps
+                    if (!this._activePlanFile && this._activeTask.stepsPending.length >= 4) {
+                        this.writePlanFile(userMessage, this._activeTask.stepsPending);
+                    }
                 }
             }
         } else if (isMultiFileRestructure) {
@@ -4242,6 +4257,19 @@ Do NOT assume you have no memory — check first.`;
                     });
                 }
 
+                // ── Auto plan file from model response ───────────────────
+                // If the model's first response lays out a numbered/bulleted plan
+                // with 4+ steps and no plan file exists yet, extract those steps
+                // and create a plan file automatically.
+                if (!this._activePlanFile && this._editsThisRun === 0 && toolCalls.length === 0) {
+                    const respText = displayContent || result.content;
+                    const stepMatches = [...respText.matchAll(/^[\s]*(?:\d+[.)]\s+|[-*]\s+)(.{10,120})$/gm)];
+                    if (stepMatches.length >= 4) {
+                        const steps = stepMatches.slice(0, 12).map(m => m[1].trim());
+                        this.writePlanFile(userMessage, steps);
+                    }
+                }
+
                 // ── Session-end save to Tier 3 ───────────────────────────
                 // When a session completes successfully (model gave final answer after ≥1 edit),
                 // save a structured "completed feature" entry to Tier 3 so future sessions
@@ -4297,6 +4325,9 @@ Do NOT assume you have no memory — check first.`;
                     const sessionTags = ['session-end', 'completed', 'completed-feature', ...featureKws.slice(0, 6).map(k => k.toLowerCase())];
                     this.memory!.addEntry(3, sessionNote, sessionTags).catch(() => {});
                     logInfo(`[memory] Session-end: saved completed-feature to Tier 3 (${editedPaths.length} files, ${featureKws.length} keywords)`);
+
+                    // Mark the active plan file done when the session ends cleanly
+                    this.closePlanFile();
 
                     // ── Wrap-up nudge ────────────────────────────────────
                     // After a significant coding effort, suggest starting fresh to avoid
@@ -6065,6 +6096,9 @@ If the code looks correct, respond with exactly: OK`;
                         return !done;
                     });
 
+                    // Update plan file checkboxes after every edit
+                    this.updatePlanFile();
+
                     // Persist sweep progress to Tier 2 memory after every edit so an
                     // interrupted sweep can be resumed in a future session.
                     if (this.memory && this._currentTaskMessage) {
@@ -7130,6 +7164,104 @@ If the code looks correct, respond with exactly: OK`;
                 }
             }, 30_000);
         });
+    }
+
+    // ── Task plan files ───────────────────────────────────────────────────────
+
+    /**
+     * Derive a short slug from the user's task message for the plan filename.
+     * e.g. "add authentication to the API" → "add-auth-api"
+     */
+    private static planSlug(message: string): string {
+        const stopWords = new Set(['a','an','the','to','for','of','in','on','at','by','with','and','or','that','this','from','into','please','just','can','you','we','i','my','our']);
+        return message
+            .toLowerCase()
+            .replace(/[^a-z0-9\s]/g, '')
+            .split(/\s+/)
+            .filter(w => w.length > 2 && !stopWords.has(w))
+            .slice(0, 4)
+            .join('-') || 'task';
+    }
+
+    /**
+     * Create a plan file at plans/<slug>.md and set _activePlanFile.
+     * Called when the agent decides a task warrants a plan (>= 4 steps or explicit request).
+     */
+    private writePlanFile(task: string, steps: string[]): void {
+        if (!this.workspaceRoot) { return; }
+        try {
+            const plansDir = path.join(this.workspaceRoot, 'plans');
+            if (!fs.existsSync(plansDir)) { fs.mkdirSync(plansDir, { recursive: true }); }
+            const slug = Agent.planSlug(task);
+            const filePath = path.join(plansDir, `${slug}.md`);
+            const now = new Date().toISOString().slice(0, 10);
+            const stepLines = steps.map(s => `- [ ] ${s}`).join('\n');
+            const content = [
+                `# Plan: ${task.slice(0, 80)}`,
+                ``,
+                `**Created**: ${now}`,
+                `**Status**: in progress`,
+                ``,
+                `## Steps`,
+                stepLines,
+                ``,
+                `## Notes`,
+                ``,
+            ].join('\n');
+            fs.writeFileSync(filePath, content, 'utf8');
+            this._activePlanFile = filePath;
+            logInfo(`[plan] Created plan file: plans/${slug}.md (${steps.length} steps)`);
+        } catch (err) {
+            logWarn(`[plan] Could not write plan file: ${toErrorMessage(err)}`);
+        }
+    }
+
+    /**
+     * Update the active plan file — tick off completed steps and update status.
+     * Safe to call after every edit; no-ops if no plan file is active.
+     */
+    private updatePlanFile(): void {
+        if (!this._activePlanFile || !this._activeTask) { return; }
+        try {
+            let content = fs.readFileSync(this._activePlanFile, 'utf8');
+            // Tick off any step whose text appears in stepsCompleted
+            for (const done of this._activeTask.stepsCompleted) {
+                // Match "- [ ] <something containing the done text>" case-insensitively
+                content = content.replace(
+                    new RegExp(`- \\[ \\] (.*${done.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\n]*)`, 'i'),
+                    '- [x] $1'
+                );
+                // Also try matching by filename fragment (e.g. "routes.py" in step text)
+                const fileBase = done.replace(/^Edited\s+/i, '').split('/').pop() ?? '';
+                if (fileBase) {
+                    content = content.replace(
+                        new RegExp(`- \\[ \\] ([^\n]*${fileBase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\n]*)`, 'i'),
+                        '- [x] $1'
+                    );
+                }
+            }
+            // Update status line
+            const allDone = !content.includes('- [ ]');
+            content = content.replace(/\*\*Status\*\*: .*/, `**Status**: ${allDone ? 'done' : 'in progress'}`);
+            fs.writeFileSync(this._activePlanFile, content, 'utf8');
+        } catch { /* silent — plan update must never interrupt the agent */ }
+    }
+
+    /**
+     * Mark the active plan file as complete (all steps done).
+     * Called at the end of a successful run when a plan file is active.
+     */
+    private closePlanFile(): void {
+        if (!this._activePlanFile) { return; }
+        try {
+            let content = fs.readFileSync(this._activePlanFile, 'utf8');
+            content = content.replace(/\*\*Status\*\*: .*/, '**Status**: done');
+            // Tick any remaining unchecked boxes
+            content = content.replace(/- \[ \] /g, '- [x] ');
+            fs.writeFileSync(this._activePlanFile, content, 'utf8');
+            logInfo(`[plan] Closed plan file: ${path.basename(this._activePlanFile)}`);
+        } catch { /* silent */ }
+        this._activePlanFile = null;
     }
 
     // ── Session recon ─────────────────────────────────────────────────────────

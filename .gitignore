@@ -99,3 +99,6 @@ MANUAL_TESTS.md
 
 # ── Claude Code session data ──────────────────────────────────────────────────
 .claude/
+
+# ── Task plan files (user reviews and deletes when done) ────────────────────
+plans/
