@@ -628,6 +628,17 @@ async function loadHierarchicalContext(workspaceRoot: string): Promise<string> {
             }
         } catch { /* file doesn't exist yet — skip */ }
 
+        // ── PLAN.md (root only, loaded second — development plan and backlog) ──
+        const planPath = path.join(workspaceRoot, 'PLAN.md');
+        try {
+            const stat = fs.statSync(planPath);
+            if (stat.isFile()) {
+                const content = fs.readFileSync(planPath, 'utf8').slice(0, MAX_CONTEXT_FILE_BYTES);
+                sections.push(`### PLAN.md (development plan and backlog)\n${content.trim()}`);
+                logInfo(`[context-files] Loaded PLAN.md (${content.length} chars)`);
+            }
+        } catch { /* file doesn't exist — skip */ }
+
         // ── Convention/guide files: root + immediate subdirectories ──────────────
         const candidates: string[] = [workspaceRoot];
         try {
