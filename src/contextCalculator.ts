@@ -37,6 +37,11 @@ const MODEL_CONTEXT_LIMITS: Record<string, number> = {
     'qwen3.5': 32768,
     'qwen3.5:27b': 32768,
     'qwen3.5:27b-49k': 49152,
+
+    // Qwen3.6 models
+    'qwen3.6': 32768,
+    'qwen3.6:35b-a3b': 32768,
+    'qwen3.6:35b-a3b-32k': 32768,
     
     // Phi models
     'phi': 2048,

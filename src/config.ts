@@ -14,19 +14,19 @@ export interface ModelPreset {
 export const MODEL_PRESETS: Record<string, ModelPreset> = {
     fast: {
         name: 'Fast',
-        model: 'qwen2.5-coder:1.5b',
+        model: 'qwen2.5-coder:7b',
         temperature: 0.5,
         description: 'Quick responses, lower quality'
     },
     balanced: {
         name: 'Balanced',
-        model: 'qwen2.5-coder:7b',
+        model: 'qwen3.6:35b-a3b-32k',
         temperature: 0.7,
         description: 'Good balance of speed and quality'
     },
     quality: {
         name: 'Quality',
-        model: 'llama3.1:8b',
+        model: 'qwen3.6:35b-a3b-32k',
         temperature: 0.8,
         description: 'Best quality, slower responses'
     }
@@ -94,7 +94,7 @@ export function getConfig(): OllamaConfig {
         baseUrl,
         host,
         port,
-        model:                c.get<string> ('model',                'qwen2.5-coder:7b'),
+        model:                c.get<string> ('model',                'qwen3.6:35b-a3b-32k'),
         temperature:          c.get<number> ('temperature',          0.7),
         systemPrompt:         c.get<string> ('systemPrompt',         ''),
         autoIncludeFile:      c.get<boolean>('autoIncludeFile',      false),

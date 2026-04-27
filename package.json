@@ -295,7 +295,7 @@
         },
         "ollamaAgent.model": {
           "type": "string",
-          "default": "qwen2.5-coder:7b",
+          "default": "qwen3.6:35b-a3b-32k",
           "description": "Default model to use when the extension starts. Overridable per session via the model selector in the sidebar."
         },
         "ollamaAgent.temperature": {
