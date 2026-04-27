@@ -426,6 +426,10 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                             }
                             assistantBuf = '';
                             (this as any)._inThinking = false;
+                            // Sync agent history and task state mid-run so a crash/force-close
+                            // doesn't lose the turns already completed in this run.
+                            this.currentSession.agentHistory = this._agent!.conversationHistory;
+                            this.currentSession.activeTask   = this._agent!.activeTask;
                             this.persistSession();
                         } else if (pm.type === 'error') {
                             const errText = (m as { type: string; text: string }).text;
@@ -507,6 +511,8 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                                 this.appendToSession({ role: 'assistant', content: stripToolBlocksFromText(assistantBuf2).replace(/<mention[\s\S]*?<\/mention>\s*/g, '').replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '').replace(/\[wait for result[^\]]*\]/gi, '').replace(/\n{3,}/g, '\n\n').trim(), timestamp: Date.now() });
                             }
                             assistantBuf2 = '';
+                            this.currentSession.agentHistory = this._agent!.conversationHistory;
+                            this.currentSession.activeTask   = this._agent!.activeTask;
                             this.persistSession();
                         }
                     };
