@@ -192,8 +192,12 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
         this._currentWorkspaceRoot = workspaceRoot;
-        // Wire real agent into the first tab now that we have the workspace root
-        this._tab.agent = new Agent(workspaceRoot, this.memory, this.codeIndexer);
+        // Wire real agent into the first tab only when it still holds the null placeholder.
+        // On subsequent re-resolves (sidebar hide/show) all tabs already have live agents —
+        // do NOT replace them or we leak the old agent and destroy restored history.
+        if (!this._tab.agent) {
+            this._tab.agent = new Agent(workspaceRoot, this.memory, this.codeIndexer);
+        }
 
         // Listen for workspace folder changes
         this._workspaceListener?.dispose();
@@ -211,24 +215,24 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     logInfo(`[provider] Workspace changed: ${this._currentWorkspaceRoot} → ${newRoot}`);
                     this._currentWorkspaceRoot = newRoot;
                     
-                    // Stop and dispose all tab agents, recreate with new root
+                    // Stop, dispose, and recreate all tab agents for the new root.
+                    // Also reset all sessions so stale workspace context doesn't bleed in.
+                    const model = getConfig().model;
                     for (const tab of this._tabs.values()) {
                         tab.agent?.stop();
                         tab.agent?.dispose();
                         tab.running = false;
                         tab.agent = new Agent(newRoot, this.memory, this.codeIndexer);
+                        tab.session = this.storage.createNew(model);
                     }
-                    
+
                     // Clear file index - will be rebuilt on next use
                     this._fileIndex = [];
-                    
-                    // Start a new session for the new workspace
-                    this.startNewSession({});
-                    this._view?.webview.postMessage({ type: 'clearChat' });
-                    this._view?.webview.postMessage({ 
-                        type: 'info', 
-                        text: `Switched to workspace: ${vscode.workspace.name || 'Unknown'}` 
-                    });
+
+                    const post = (m: object) => this._view?.webview.postMessage(m);
+                    post({ type: 'clearChat' });
+                    post({ type: 'tabList', tabs: this.getTabSummaries(), activeTabId: this._activeTabId });
+                    logInfo(`[provider] Workspace changed — all tabs reset to new root`);
                 } finally {
                     this._workspaceChanging = false;
                 }
@@ -285,6 +289,9 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     const model = raw.model ?? getConfig().model;
                     if (!text) { break; }
                     this._running = true;
+                    // Capture the tab that owns this run. If the user switches tabs mid-run,
+                    // _activeTabId changes but this closure still writes to the correct tab.
+                    const runTab = this._tab;
 
                     logInfo(`[user] ${text.slice(0, 120)}${text.length > 120 ? '…' : ''}`);
 
@@ -418,19 +425,21 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         ? `${fullMessage}${pinnedCtx}`
                         : fullMessage;
 
-                    // Wrap post() to capture streamed tokens → save assistant message
+                    // Wrap post() to capture streamed tokens → save assistant message.
+                    // All references use runTab (captured above) so a mid-run tab switch
+                    // cannot corrupt the wrong tab's session or flags.
                     let assistantBuf = '';
-                    (this as any)._inThinking = false;
-                    const isFirstExchange = this.currentSession.messages.filter(m => m.role === 'assistant').length === 0;
+                    let inThinking = false; // local, not on `this` — tab-safe
+                    const isFirstExchange = runTab.session.messages.filter(m => m.role === 'assistant').length === 0;
                     const trackedPost: PostFn = (m: object) => {
                         post(m);
                         const pm = m as { type: string; text?: string };
                         if (pm.type === 'token') {
                             const tok = pm.text ?? '';
                             // Strip thinking sentinels and thinking content from session buffer
-                            if (tok === '\x01THINK_START\x01') { (this as any)._inThinking = true; }
-                            else if (tok === '\x01THINK_END\x01') { (this as any)._inThinking = false; }
-                            else if (!(this as any)._inThinking) { assistantBuf += tok; }
+                            if (tok === '\x01THINK_START\x01') { inThinking = true; }
+                            else if (tok === '\x01THINK_END\x01') { inThinking = false; }
+                            else if (!inThinking) { assistantBuf += tok; }
                         } else if (pm.type === 'streamEnd') {
                             if (assistantBuf.trim()) {
                                 const clean = stripToolBlocksFromText(assistantBuf)
@@ -439,49 +448,52 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                                     .replace(/\[wait for result[^\]]*\]/gi, '')
                                     .replace(/\n{3,}/g, '\n\n')
                                     .trim();
-                                this.appendToSession({ role: 'assistant', content: clean, timestamp: Date.now() });
+                                runTab.session.messages.push({ role: 'assistant', content: clean, timestamp: Date.now() });
+                                if (runTab.session.title === 'New Chat') {
+                                    runTab.session.title = deriveTitle(runTab.session.messages);
+                                }
                                 logInfo(`[assistant] ${clean.slice(0, 120)}${clean.length > 120 ? '…' : ''}`);
 
                                 // Auto-generate a title after the first assistant response
-                                if (isFirstExchange && this.currentSession.title === 'New Chat') {
+                                if (isFirstExchange && runTab.session.title === 'New Chat') {
                                     generateChatTitle(model, text, clean).then((title) => {
-                                        if (title && this.currentSession.title === 'New Chat') {
-                                            this.currentSession.title = title;
-                                            this.persistSession();
-                                            post({ type: 'sessionSaved', session: { id: this.currentSession.id, title } });
+                                        if (title && runTab.session.title === 'New Chat') {
+                                            runTab.session.title = title;
+                                            this.storage.upsert(runTab.session);
+                                            post({ type: 'sessionSaved', session: { id: runTab.session.id, title } });
                                             post({ type: 'tabList', tabs: this.getTabSummaries(), activeTabId: this._activeTabId });
                                             logInfo(`[provider] Auto-title: "${title}"`);
                                         }
-                                    }).catch(() => { /* fallback to deriveTitle stays in persistSession */ });
+                                    }).catch(() => {});
                                 }
                             }
                             assistantBuf = '';
-                            (this as any)._inThinking = false;
+                            inThinking = false;
                             // Sync agent history and task state mid-run so a crash/force-close
                             // doesn't lose the turns already completed in this run.
-                            this.currentSession.agentHistory = this._agent!.conversationHistory;
-                            this.currentSession.activeTask   = this._agent!.activeTask;
-                            this.persistSession();
+                            runTab.session.agentHistory = runTab.agent.conversationHistory;
+                            runTab.session.activeTask   = runTab.agent.activeTask;
+                            this.storage.upsert(runTab.session);
                         } else if (pm.type === 'error') {
                             const errText = (m as { type: string; text: string }).text;
-                            this.appendToSession({ role: 'error', content: errText, timestamp: Date.now() });
-                            this.persistSession();
+                            runTab.session.messages.push({ role: 'error', content: errText, timestamp: Date.now() });
+                            this.storage.upsert(runTab.session);
                         }
                     };
 
                     const runStart = Date.now();
                     try {
-                        await this._agent!.run(fullMessageWithPins, model, trackedPost);
+                        await runTab.agent.run(fullMessageWithPins, model, trackedPost);
                         // Sync agent history and task state into session after run completes
-                        this.currentSession.agentHistory = this._agent!.conversationHistory;
-                        this.currentSession.activeTask   = this._agent!.activeTask;
-                        this.persistSession();
+                        runTab.session.agentHistory = runTab.agent.conversationHistory;
+                        runTab.session.activeTask   = runTab.agent.activeTask;
+                        this.storage.upsert(runTab.session);
                     } finally {
-                        const stats = this._agent!.runStats;
+                        const stats = runTab.agent.runStats;
                         if (this._currentWorkspaceRoot) {
                             appendSessionLog(this._currentWorkspaceRoot, {
                                 ts:           new Date(runStart).toISOString(),
-                                sessionId:    this.currentSession.id,
+                                sessionId:    runTab.session.id,
                                 model,
                                 task:         text.trim().slice(0, 500),
                                 turns:        stats.turns,
@@ -493,7 +505,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                                 outcome:      stats.outcome,
                             });
                         }
-                        this._running = false;
+                        runTab.running = false;
                         post({ type: 'agentDone' });
                     }
                     break;
@@ -524,42 +536,49 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         break;
                     }
                     this._running = true;
+                    const retryTab = this._tab; // capture before any async switch
                     const model   = raw.model ?? getConfig().model;
-                    const lastMsg = this._agent!.retryLast();
-                    if (!lastMsg) { this._running = false; break; }
+                    const lastMsg = retryTab.agent.retryLast();
+                    if (!lastMsg) { retryTab.running = false; break; }
                     // Remove the last assistant + error messages from session
                     this.trimSessionToLastUser();
                     post({ type: 'removeLastAssistant' });
                     logInfo('[provider] Retrying last message…');
 
                     let assistantBuf2 = '';
+                    let inThinking2 = false; // local, not on `this`
                     const retryPost: PostFn = (m: object) => {
                         post(m);
                         const pm = m as { type: string; text?: string };
-                        if (pm.type === 'token') { assistantBuf2 += pm.text ?? ''; }
-                        else if (pm.type === 'streamEnd') {
+                        if (pm.type === 'token') {
+                            const tok = pm.text ?? '';
+                            if (tok === '\x01THINK_START\x01') { inThinking2 = true; }
+                            else if (tok === '\x01THINK_END\x01') { inThinking2 = false; }
+                            else if (!inThinking2) { assistantBuf2 += tok; }
+                        } else if (pm.type === 'streamEnd') {
                             if (assistantBuf2.trim()) {
-                                this.appendToSession({ role: 'assistant', content: stripToolBlocksFromText(assistantBuf2).replace(/<mention[\s\S]*?<\/mention>\s*/g, '').replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '').replace(/\[wait for result[^\]]*\]/gi, '').replace(/\n{3,}/g, '\n\n').trim(), timestamp: Date.now() });
+                                retryTab.session.messages.push({ role: 'assistant', content: stripToolBlocksFromText(assistantBuf2).replace(/<mention[\s\S]*?<\/mention>\s*/g, '').replace(/<git-diff[\s\S]*?<\/git-diff>\s*/g, '').replace(/\[wait for result[^\]]*\]/gi, '').replace(/\n{3,}/g, '\n\n').trim(), timestamp: Date.now() });
                             }
                             assistantBuf2 = '';
-                            this.currentSession.agentHistory = this._agent!.conversationHistory;
-                            this.currentSession.activeTask   = this._agent!.activeTask;
-                            this.persistSession();
+                            inThinking2 = false;
+                            retryTab.session.agentHistory = retryTab.agent.conversationHistory;
+                            retryTab.session.activeTask   = retryTab.agent.activeTask;
+                            this.storage.upsert(retryTab.session);
                         }
                     };
 
                     const retryStart = Date.now();
                     try {
-                        await this._agent!.run(lastMsg, model, retryPost);
-                        this.currentSession.agentHistory = this._agent!.conversationHistory;
-                        this.currentSession.activeTask   = this._agent!.activeTask;
-                        this.persistSession();
+                        await retryTab.agent.run(lastMsg, model, retryPost);
+                        retryTab.session.agentHistory = retryTab.agent.conversationHistory;
+                        retryTab.session.activeTask   = retryTab.agent.activeTask;
+                        this.storage.upsert(retryTab.session);
                     } finally {
-                        const retryStats = this._agent!.runStats;
+                        const retryStats = retryTab.agent.runStats;
                         if (this._currentWorkspaceRoot) {
                             appendSessionLog(this._currentWorkspaceRoot, {
                                 ts:           new Date(retryStart).toISOString(),
-                                sessionId:    this.currentSession.id,
+                                sessionId:    retryTab.session.id,
                                 model,
                                 task:         `[retry] ${lastMsg.trim().slice(0, 480)}`,
                                 turns:        retryStats.turns,
@@ -571,7 +590,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                                 outcome:      retryStats.outcome,
                             });
                         }
-                        this._running = false;
+                        retryTab.running = false;
                         post({ type: 'agentDone' });
                     }
                     break;
@@ -659,9 +678,9 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         running: false,
                     });
                     this._activeTabId = newTabId;
-                    post({ type: 'tabOpened', tabId: newTabId, title: 'New Chat' });
-                    post({ type: 'tabList', tabs: this.getTabSummaries(), activeTabId: this._activeTabId });
+                    // Order: clear content first, then update tab bar
                     post({ type: 'clearChat' });
+                    post({ type: 'tabList', tabs: this.getTabSummaries(), activeTabId: this._activeTabId });
                     logInfo(`[provider] Opened new tab: ${newTabId}`);
                     break;
                 }
@@ -670,10 +689,11 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     const closeMsg = raw as { command: 'closeTab'; tabId: string };
                     const tabToClose = this._tabs.get(closeMsg.tabId);
                     if (!tabToClose) { break; }
+                    // Stop before dispose to avoid async continuations on a dead agent
                     tabToClose.agent?.stop();
                     tabToClose.agent?.dispose();
                     this._tabs.delete(closeMsg.tabId);
-                    // If we closed the active tab, switch to another
+                    // If we closed the active tab, switch to the nearest remaining tab
                     if (this._activeTabId === closeMsg.tabId) {
                         const remaining = [...this._tabs.keys()];
                         if (remaining.length === 0) {
@@ -689,10 +709,13 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                             });
                             this._activeTabId = fallbackId;
                         } else {
-                            this._activeTabId = remaining[remaining.length - 1];
+                            // Pick the tab inserted just before the closed one (nearest left neighbor)
+                            const allIds = [...this._tabs.keys()];
+                            this._activeTabId = allIds[allIds.length - 1];
                         }
-                        post({ type: 'clearChat' });
                         const active = this._tab;
+                        // Order: clear, populate content, then update tab bar
+                        post({ type: 'clearChat' });
                         post({
                             type: 'sessionLoaded',
                             session: toSummary(active.session),
@@ -707,18 +730,21 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
                 case 'switchTab': {
                     const switchMsg = raw as { command: 'switchTab'; tabId: string };
-                    if (!this._tabs.has(switchMsg.tabId)) { break; }
-                    if (this._tab.running) { this._tab.agent?.stop(); this._tab.running = false; }
+                    if (!this._tabs.has(switchMsg.tabId) || switchMsg.tabId === this._activeTabId) { break; }
+                    // Stop any in-flight run on the outgoing tab
+                    const outgoing = this._tab;
+                    if (outgoing.running) { outgoing.agent?.stop(); outgoing.running = false; }
                     this._activeTabId = switchMsg.tabId;
-                    const switched = this._tab;
-                    post({ type: 'tabList', tabs: this.getTabSummaries(), activeTabId: this._activeTabId });
+                    const incoming = this._tab;
+                    // Order: clear content, populate incoming session, then update tab bar highlight
                     post({ type: 'clearChat' });
                     post({
                         type: 'sessionLoaded',
-                        session: toSummary(switched.session),
-                        messages: switched.session.messages,
-                        pinnedMsgIds: switched.session.pinnedMsgIds || [],
+                        session: toSummary(incoming.session),
+                        messages: incoming.session.messages,
+                        pinnedMsgIds: incoming.session.pinnedMsgIds || [],
                     });
+                    post({ type: 'tabList', tabs: this.getTabSummaries(), activeTabId: this._activeTabId });
                     logInfo(`[provider] Switched to tab: ${switchMsg.tabId}`);
                     break;
                 }
@@ -957,7 +983,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         this._workspaceListener?.dispose();
         this._saveListener?.dispose();
         this._messageListener?.dispose();
-        for (const tab of this._tabs.values()) { tab.agent?.dispose(); }
+        for (const tab of this._tabs.values()) { tab.agent?.stop(); tab.agent?.dispose(); }
         this._tabs.clear();
         this._diffViewManager.dispose();
     }

@@ -1127,6 +1127,13 @@ function clearChat() {
     userScrolledUp = false;
     scrollBtn.classList.remove('visible');
     updateContextUsage(0, 0, 0);
+    // Reset streaming/agent state so a tab switch never leaves the UI stuck
+    inThinkingBlock = false;
+    thinkingBuf = '';
+    setStreaming(false);
+    agentActive = false;
+    stopBtn.classList.remove('visible');
+    sendBtn.disabled = modelSelect.value === '';
 }
 
 // ── Retry via event delegation ────────────────────────────────────────────────
@@ -2320,6 +2327,7 @@ window.addEventListener('message', (event) => {
 
         case 'clearChat':
             clearChat();
+            activeSessionId = null; // reset until sessionLoaded or sessionSaved arrives
             break;
 
         case 'removeLastAssistant':
@@ -2784,8 +2792,13 @@ function renderTabBar() {
         tabBar.insertBefore(btn, tabAdd);
     });
 
-    // Only show tab bar if there's more than one tab
-    tabBar.style.display = tabList.length > 1 ? 'flex' : 'none';
+    // Always show the bar (so + is always accessible). Tab buttons are only shown when
+    // there are 2+ tabs — with a single tab they're redundant and just waste space.
+    tabBar.style.display = 'flex';
+    const showTabs = tabList.length > 1;
+    tabBar.querySelectorAll('.tab-btn').forEach(el => {
+        /** @type {HTMLElement} */ (el).style.display = showTabs ? '' : 'none';
+    });
 }
 
 tabAdd.addEventListener('click', () => {
