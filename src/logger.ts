@@ -16,8 +16,9 @@ function redactSecrets(m: string): string {
         .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9+/=._\-]{8,}/g, '$1 [REDACTED]')
         // Connection strings with embedded credentials: user:pass@host
         .replace(/\/\/[^:@\s]+:[^@\s]+@/g, '//[REDACTED]@')
-        // Long high-entropy strings that look like tokens (40+ hex or base64 chars)
-        .replace(/\b[A-Za-z0-9+/]{40,}={0,2}\b/g, '[REDACTED]');
+        // Long high-entropy strings that look like tokens (40+ chars with mixed case + digits).
+        // Requires at least one digit and one letter to avoid redacting long all-alpha words or paths.
+        .replace(/\b(?=[A-Za-z0-9+/]{40,}={0,2}\b)(?=[^=]*[0-9])(?=[^=]*[A-Za-z])[A-Za-z0-9+/]{40,}={0,2}\b/g, '[REDACTED]');
 }
 
 export const logInfo  = (m: string): void => channel.appendLine(`[INFO]  ${ts()}  ${redactSecrets(m)}`);

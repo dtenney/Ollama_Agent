@@ -151,7 +151,10 @@ const EXT_TO_LANG: Record<string, string> = {
  */
 export function readMentionedFile(rel: string, root: string): MentionContent {
     const full = path.resolve(root, rel);
-    if (!full.startsWith(root)) {
+    // Normalise root with a trailing separator so "/home/user.evil" doesn't
+    // pass a startsWith("/home/user") check against root "/home/user".
+    const safeRoot = root.endsWith(path.sep) ? root : root + path.sep;
+    if (full !== root && !full.startsWith(safeRoot)) {
         throw new Error(`Path outside workspace: ${rel}`);
     }
 
