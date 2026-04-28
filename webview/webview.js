@@ -2362,6 +2362,11 @@ window.addEventListener('message', (event) => {
             addModeNotice(msg.model);
             break;
 
+        case 'tabList':
+            tabList = msg.tabs || [];
+            renderTabBar();
+            break;
+
         case 'sessionList':
             renderSessionList(msg.sessions, msg.currentId);
             break;
@@ -2731,6 +2736,61 @@ function addUserMessage(text, timestamp) {
     userScrolledUp = false;
     scrollBottom(true);
 }
+
+// ── Tab bar ────────────────────────────────────────────────────────────────────
+
+const tabBar = /** @type {HTMLElement} */ (document.getElementById('tab-bar'));
+const tabAdd = /** @type {HTMLButtonElement} */ (document.getElementById('tab-add'));
+
+/** @type {Array<{tabId: string, title: string, active: boolean}>} */
+let tabList = [];
+
+/**
+ * Render the tab bar from the current tabList state.
+ */
+function renderTabBar() {
+    // Remove existing tab buttons (keep the + button)
+    tabBar.querySelectorAll('.tab-btn').forEach(el => el.remove());
+
+    tabList.forEach((tab) => {
+        const btn = document.createElement('button');
+        btn.className = 'tab-btn' + (tab.active ? ' active' : '');
+        btn.title = tab.title;
+        btn.dataset.tabId = tab.tabId;
+
+        const label = document.createElement('span');
+        label.className = 'tab-label';
+        label.textContent = tab.title;
+
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'tab-close';
+        closeBtn.title = 'Close tab';
+        closeBtn.textContent = '×';
+        closeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            vscode.postMessage({ command: 'closeTab', tabId: tab.tabId });
+        });
+
+        btn.appendChild(label);
+        btn.appendChild(closeBtn);
+
+        btn.addEventListener('click', () => {
+            if (!btn.classList.contains('active')) {
+                vscode.postMessage({ command: 'switchTab', tabId: tab.tabId });
+            }
+        });
+
+        // Insert before the + button
+        tabBar.insertBefore(btn, tabAdd);
+    });
+
+    // Only show tab bar if there's more than one tab
+    tabBar.style.display = tabList.length > 1 ? 'flex' : 'none';
+}
+
+tabAdd.addEventListener('click', () => {
+    vscode.postMessage({ command: 'openTab' });
+});
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 

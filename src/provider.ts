@@ -72,7 +72,10 @@ type WebviewMsg =
     | { command: 'confirmResponse'; id: string; accepted: boolean }
     | { command: 'confirmResponseAll'; id: string; toolName: string }
     | { command: 'applyCodeBlock'; code: string; lang: string }
-    | { command: 'webviewError'; text: string };
+    | { command: 'webviewError'; text: string }
+    | { command: 'openTab' }
+    | { command: 'closeTab'; tabId: string }
+    | { command: 'switchTab'; tabId: string };
 
 // ── Serialised session summary sent to the webview ───────────────────────────
 
@@ -96,28 +99,46 @@ function toSummary(s: ChatSession): SessionSummary {
     };
 }
 
+// ── Tab state ─────────────────────────────────────────────────────────────────
+
+interface TabState {
+    id: string;
+    agent: Agent;
+    session: ChatSession;
+    running: boolean;
+}
+
 // ── Provider ──────────────────────────────────────────────────────────────────
 
 export class OllamaAgentProvider implements vscode.WebviewViewProvider {
     private _view?: vscode.WebviewView;
-    private _agent?: Agent;
     private _editorListener?: vscode.Disposable;
     private _selectionListener?: vscode.Disposable;
     private _workspaceListener?: vscode.Disposable;
     private _currentWorkspaceRoot?: string;
     /** Mutex to prevent concurrent workspace changes */
     private _workspaceChanging: boolean = false;
-    /** Guard to prevent concurrent sendMessage calls */
-    private _running: boolean = false;
     /** Shared DiffViewManager for applyCodeBlock (reused, not created per call) */
     private _diffViewManager: DiffViewManager = new DiffViewManager();
+
+    // ── Tab management ────────────────────────────────────────────────────────
+    private _tabs: Map<string, TabState> = new Map();
+    private _activeTabId: string = '';
+
+    /** Active tab — always valid after resolveWebviewView */
+    private get _tab(): TabState { return this._tabs.get(this._activeTabId)!; }
+    /** Convenience proxies so existing code reads naturally */
+    private get _agent(): Agent  { return this._tab.agent; }
+    private get _running(): boolean { return this._tab.running; }
+    private set _running(v: boolean) { this._tab.running = v; }
+    private get currentSession(): ChatSession { return this._tab.session; }
+    private set currentSession(s: ChatSession) { this._tab.session = s; }
 
     private readonly storage: ChatStorage;
     private readonly memory: TieredMemoryManager | null;
     private readonly templateManager: TemplateManager;
     private readonly smartContext: SmartContextManager;
     private readonly symbolProvider: SymbolProvider;
-    private currentSession: ChatSession;
     /** Cached workspace file index for @mention autocomplete. Rebuilt on new workspace. */
     private _fileIndex: Awaited<ReturnType<typeof indexWorkspaceFiles>> = [];
     /** Current active preset name (persisted in workspace state). */
@@ -145,16 +166,25 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         this.templateManager = new TemplateManager(context);
         this.symbolProvider = new SymbolProvider();
         this.smartContext = new SmartContextManager();
-        // Bootstrap: restore the last session or start fresh
-        const sessions = this.storage.list();
-        this.currentSession = sessions[0] ?? this.storage.createNew(getConfig().model);
         // Restore active preset from workspace state
         this._activePreset = context.workspaceState.get('ollamaAgent.activePreset', 'balanced');
         // Restore smart context enabled state
         this._smartContextEnabled = context.workspaceState.get('ollamaAgent.smartContextEnabled', false);
         // Restore pinned files
         this._pinnedFiles = context.workspaceState.get('ollamaAgent.pinnedFiles', []);
-        logInfo(`[provider] Loaded session "${this.currentSession.title}" (${this.currentSession.messages.length} msgs)`);
+        // Bootstrap first tab — agent is created in resolveWebviewView once we have workspaceRoot
+        const sessions = this.storage.list();
+        const firstSession = sessions[0] ?? this.storage.createNew(getConfig().model);
+        const firstTabId = `tab_${Date.now()}`;
+        // Temporary placeholder agent — replaced in resolveWebviewView
+        this._tabs.set(firstTabId, {
+            id: firstTabId,
+            agent: null as unknown as Agent,
+            session: firstSession,
+            running: false,
+        });
+        this._activeTabId = firstTabId;
+        logInfo(`[provider] Loaded session "${firstSession.title}" (${firstSession.messages.length} msgs)`);
     }
 
     async resolveWebviewView(webviewView: vscode.WebviewView): Promise<void> {
@@ -162,7 +192,8 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
         this._currentWorkspaceRoot = workspaceRoot;
-        this._agent = new Agent(workspaceRoot, this.memory, this.codeIndexer);
+        // Wire real agent into the first tab now that we have the workspace root
+        this._tab.agent = new Agent(workspaceRoot, this.memory, this.codeIndexer);
 
         // Listen for workspace folder changes
         this._workspaceListener?.dispose();
@@ -180,14 +211,13 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     logInfo(`[provider] Workspace changed: ${this._currentWorkspaceRoot} → ${newRoot}`);
                     this._currentWorkspaceRoot = newRoot;
                     
-                    // Stop running agent before disposing to prevent mid-run corruption
-                    this._agent?.stop();
-                    this._agent?.dispose();
-                    this._running = false;
-                    this._agent = undefined;
-                    
-                    // Recreate agent with new workspace root
-                    this._agent = new Agent(newRoot, this.memory, this.codeIndexer);
+                    // Stop and dispose all tab agents, recreate with new root
+                    for (const tab of this._tabs.values()) {
+                        tab.agent?.stop();
+                        tab.agent?.dispose();
+                        tab.running = false;
+                        tab.agent = new Agent(newRoot, this.memory, this.codeIndexer);
+                    }
                     
                     // Clear file index - will be rebuilt on next use
                     this._fileIndex = [];
@@ -222,10 +252,10 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
         // Restore agent conversation history and task state from the loaded session
         if (this.currentSession.agentHistory.length) {
-            this._agent.restoreHistory(this.currentSession.agentHistory);
+            this._tab.agent.restoreHistory(this.currentSession.agentHistory);
         }
         if (this.currentSession.activeTask) {
-            this._agent.restoreActiveTask(this.currentSession.activeTask);
+            this._tab.agent.restoreActiveTask(this.currentSession.activeTask);
         }
 
         webviewView.webview.options = { enableScripts: true };
@@ -419,6 +449,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                                             this.currentSession.title = title;
                                             this.persistSession();
                                             post({ type: 'sessionSaved', session: { id: this.currentSession.id, title } });
+                                            post({ type: 'tabList', tabs: this.getTabSummaries(), activeTabId: this._activeTabId });
                                             logInfo(`[provider] Auto-title: "${title}"`);
                                         }
                                     }).catch(() => { /* fallback to deriveTitle stays in persistSession */ });
@@ -573,13 +604,13 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     this.currentSession = session;
                     // Dispose old agent and rebuild with the saved history
                     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-                    this._agent?.dispose();
-                    this._agent = new Agent(root, this.memory, this.codeIndexer);
+                    this._tab.agent?.dispose();
+                    this._tab.agent = new Agent(root, this.memory, this.codeIndexer);
                     if (session.agentHistory.length) {
-                        this._agent.restoreHistory(session.agentHistory);
+                        this._tab.agent.restoreHistory(session.agentHistory);
                     }
                     if (session.activeTask) {
-                        this._agent.restoreActiveTask(session.activeTask);
+                        this._tab.agent.restoreActiveTask(session.activeTask);
                     }
                     if (this.memory) {
                         const stats = this.memory.getStats();
@@ -613,6 +644,82 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     post({ type: 'clearChat' });
                     post({ type: 'sessionList', sessions: [], currentId: this.currentSession.id });
                     logInfo('[provider] All sessions cleared');
+                    break;
+                }
+
+                // ── Tab management ────────────────────────────────────────
+                case 'openTab': {
+                    const newTabId = `tab_${Date.now()}`;
+                    const newSession = this.storage.createNew(getConfig().model);
+                    const root = this._currentWorkspaceRoot ?? '';
+                    this._tabs.set(newTabId, {
+                        id: newTabId,
+                        agent: new Agent(root, this.memory, this.codeIndexer),
+                        session: newSession,
+                        running: false,
+                    });
+                    this._activeTabId = newTabId;
+                    post({ type: 'tabOpened', tabId: newTabId, title: 'New Chat' });
+                    post({ type: 'tabList', tabs: this.getTabSummaries(), activeTabId: this._activeTabId });
+                    post({ type: 'clearChat' });
+                    logInfo(`[provider] Opened new tab: ${newTabId}`);
+                    break;
+                }
+
+                case 'closeTab': {
+                    const closeMsg = raw as { command: 'closeTab'; tabId: string };
+                    const tabToClose = this._tabs.get(closeMsg.tabId);
+                    if (!tabToClose) { break; }
+                    tabToClose.agent?.stop();
+                    tabToClose.agent?.dispose();
+                    this._tabs.delete(closeMsg.tabId);
+                    // If we closed the active tab, switch to another
+                    if (this._activeTabId === closeMsg.tabId) {
+                        const remaining = [...this._tabs.keys()];
+                        if (remaining.length === 0) {
+                            // Always keep at least one tab
+                            const fallbackId = `tab_${Date.now()}`;
+                            const fallbackSession = this.storage.createNew(getConfig().model);
+                            const root = this._currentWorkspaceRoot ?? '';
+                            this._tabs.set(fallbackId, {
+                                id: fallbackId,
+                                agent: new Agent(root, this.memory, this.codeIndexer),
+                                session: fallbackSession,
+                                running: false,
+                            });
+                            this._activeTabId = fallbackId;
+                        } else {
+                            this._activeTabId = remaining[remaining.length - 1];
+                        }
+                        post({ type: 'clearChat' });
+                        const active = this._tab;
+                        post({
+                            type: 'sessionLoaded',
+                            session: toSummary(active.session),
+                            messages: active.session.messages,
+                            pinnedMsgIds: active.session.pinnedMsgIds || [],
+                        });
+                    }
+                    post({ type: 'tabList', tabs: this.getTabSummaries(), activeTabId: this._activeTabId });
+                    logInfo(`[provider] Closed tab: ${closeMsg.tabId}`);
+                    break;
+                }
+
+                case 'switchTab': {
+                    const switchMsg = raw as { command: 'switchTab'; tabId: string };
+                    if (!this._tabs.has(switchMsg.tabId)) { break; }
+                    if (this._tab.running) { this._tab.agent?.stop(); this._tab.running = false; }
+                    this._activeTabId = switchMsg.tabId;
+                    const switched = this._tab;
+                    post({ type: 'tabList', tabs: this.getTabSummaries(), activeTabId: this._activeTabId });
+                    post({ type: 'clearChat' });
+                    post({
+                        type: 'sessionLoaded',
+                        session: toSummary(switched.session),
+                        messages: switched.session.messages,
+                        pinnedMsgIds: switched.session.pinnedMsgIds || [],
+                    });
+                    logInfo(`[provider] Switched to tab: ${switchMsg.tabId}`);
                     break;
                 }
 
@@ -777,17 +884,18 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
             webviewView.webview.html = await this.buildHtml();
             logInfo('[provider] Webview HTML loaded');
 
-            // Restore the current session into the freshly-loaded webview
-            if (this.currentSession.messages.length) {
-                setTimeout(() => {
+            // Restore tabs and current session into the freshly-loaded webview
+            setTimeout(() => {
+                post({ type: 'tabList', tabs: this.getTabSummaries(), activeTabId: this._activeTabId });
+                if (this.currentSession.messages.length) {
                     post({
                         type: 'sessionLoaded',
                         session: toSummary(this.currentSession),
                         messages: this.currentSession.messages,
                         pinnedMsgIds: this.currentSession.pinnedMsgIds || [],
                     });
-                }, 300); // small delay so the webview JS has time to initialise
-            }
+                }
+            }, 300); // small delay so the webview JS has time to initialise
 
             // Restore active preset
             setTimeout(() => {
@@ -849,7 +957,8 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         this._workspaceListener?.dispose();
         this._saveListener?.dispose();
         this._messageListener?.dispose();
-        this._agent?.dispose();
+        for (const tab of this._tabs.values()) { tab.agent?.dispose(); }
+        this._tabs.clear();
         this._diffViewManager.dispose();
     }
 
@@ -901,19 +1010,24 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
     private startNewSession(opts: { model?: string }): void {
         const model = opts.model ?? getConfig().model;
-        this.currentSession = this.storage.createNew(model);
         const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
-        
-        // Dispose old agent and create new one with current workspace root
-        this._agent?.dispose();
-        this._agent = new Agent(root, this.memory, this.codeIndexer);
-        
-        // Re-index files for the new session (workspace may have changed)
+        this._tab.session = this.storage.createNew(model);
+        this._tab.agent?.dispose();
+        this._tab.agent = new Agent(root, this.memory, this.codeIndexer);
         if (root && !this._fileIndex.length) {
             indexWorkspaceFiles(root).then(idx => { this._fileIndex = idx; }).catch(() => {});
         }
         logInfo(`[provider] New session: ${this.currentSession.id}`);
         logInfo(`[provider] Workspace root: ${root || '(none)'}`);
+    }
+
+    /** Build tab summaries for sending to the webview. */
+    private getTabSummaries(): Array<{ tabId: string; title: string; active: boolean }> {
+        return [...this._tabs.entries()].map(([id, tab]) => ({
+            tabId: id,
+            title: tab.session.title,
+            active: id === this._activeTabId,
+        }));
     }
 
     private appendToSession(msg: StoredMessage): void {
