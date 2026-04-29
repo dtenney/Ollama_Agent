@@ -6,6 +6,64 @@
 
 TypeScript / Node.js
 
+## Entry points
+
+- `src/main.ts`
+
+## npm scripts
+
+- `vendor`: node scripts/vendor-hljs.js
+- `compile`: npm run vendor && tsc
+- `deploy`: npm run bundle && node scripts/deploy.js
+- `bundle`: npm run vendor && node esbuild.js
+- `bundle:prod`: npm run vendor && node esbuild.js --production
+- `build`: npm run deploy
+- `package`: npm run compile && npx vsce package
+- `vscode:prepublish`: npm run bundle:prod
+- `test`: npm run compile && vscode-test
+- `test:unit`: npm run compile && mocha dist/test/unit/**/*.test.js
+- `test:harness`: npm run compile && mocha --require dist/test/vscode-mock.js --timeout 30000 dist/test/unit/agentHarness.test.js
+- `test:coverage`: npm run compile && nyc mocha dist/test/unit/**/*.test.js
+
+## Dependencies
+
+- @modelcontextprotocol/sdk
+- axios
+
+## Dev dependencies
+
+- @types/mocha
+- @types/node
+- @types/sinon
+- @types/vscode
+- @vscode/test-cli
+- @vscode/test-electron
+- @vscode/vsce
+- esbuild
+
+## Source files (src/)
+
+- `src/agent.ts`: ShellEnvironment, detectShellEnvironment, TOOL_DEFINITIONS, SMALL_MODEL_TOOL_DEFINITIONS, PostFn, Agent
+- `src/chatExporter.ts`: ChatMessage, ChatExporter
+- `src/chatStorage.ts`: ActiveTaskState, StoredMessage, ChatSession, ChatStorage, deriveTitle, relativeTime
+- `src/codeActionsProvider.ts`: OllamaCodeActionsProvider
+- `src/codeIndex.ts`: CodeIndexEntry, RelevantFile, CodeIndexer
+- `src/codeLensProvider.ts`: OllamaCodeLensProvider
+- `src/codeReview.ts`: ReviewRequest, buildReviewRequest, buildCommitReviewRequest
+- `src/config.ts`: ModelPreset, MODEL_PRESETS, OllamaConfig, OperationType, resolveModelForOperation, getConfig
+- `src/context.ts`: WorkspaceContext, getActiveContext, buildContextString
+- `src/contextCalculator.ts`: getModelContextLimit, resolveModelContextLimit, clearContextLimitCache, estimateTokens, calculateHistoryTokens, calculateContextUsage
+- `src/diffView.ts`: DiffViewManager
+- `src/docScanner.ts`: GARBAGE_PATTERNS, scanProjectDocs
+- `src/embeddingService.ts`: EmbeddingService
+- `src/fileSplitter.ts`: FileSplit, FileSplitPlan, analyzeFile, executeSplit
+- `src/gitContext.ts`: GitDiffResult, isGitRepo, getGitDiff, getGitDiffForRange, isChangeRelated, buildGitDiffContext
+- `src/inlineCompletionProvider.ts`: OllamaInlineCompletionProvider
+- `src/logger.ts`: channel, logInfo, logWarn, logError, toErrorMessage
+- `src/main.ts`: activate, deactivate
+- `src/markdownIngest.ts`: ingestMarkdownFiles
+- `src/mcpClient.ts`: MCPTool, MCPServer, startMCPServer, callMCPTool, getAllMCPTools, mcpToolsToOllamaFormat
+
 ## Config
 
 - `src/config.ts`

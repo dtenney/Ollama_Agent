@@ -617,6 +617,20 @@ const MAX_CONTEXT_FILE_BYTES = 8000;
 async function loadHierarchicalContext(workspaceRoot: string): Promise<string> {
     const sections: string[] = [];
     try {
+        // ── .ollamapilot/context.md (highest priority — strategic project/engagement context) ──
+        // This is the intentional home for persistent, session-spanning agent context:
+        // project goals, constraints, rules of engagement, team conventions, environment facts.
+        // Loaded before everything else so it frames all subsequent context.
+        const agentContextPath = path.join(workspaceRoot, '.ollamapilot', 'context.md');
+        try {
+            const stat = fs.statSync(agentContextPath);
+            if (stat.isFile()) {
+                const content = fs.readFileSync(agentContextPath, 'utf8').slice(0, 32_000);
+                sections.push(`### .ollamapilot/context.md (project context — always apply)\n${content.trim()}`);
+                logInfo(`[context-files] Loaded .ollamapilot/context.md (${content.length} chars)`);
+            }
+        } catch { /* file doesn't exist yet — skip */ }
+
         // ── ARCHITECTURE.md (root only, loaded first as project structure reference) ──
         const archPath = path.join(workspaceRoot, 'ARCHITECTURE.md');
         try {
@@ -759,13 +773,17 @@ Tools:
 ${buildShellExamples(detectShellEnvironment(), workspaceRoot)}
 
 ## Rules
-- Call tools directly — never narrate what you're about to do, just do it
+- Before each tool call, output ONE short line saying what you are doing and why (e.g. "Searching for the hashcat script in loot/" or "Creating wifi_crack directory on .29"). Then immediately call the tool. Do NOT write paragraphs — one line max, then act.
+- Never narrate without acting. Never act without a one-line explanation. The explanation and the tool call must appear together in the same response.
 - edit_file: old_string must be copied verbatim from the file (use shell_read first). On failure: re-read, fix, retry once. Stop after second failure.
 - Never create source files with New-Item/touch — use edit_file with old_string=""
+- Local directory creation on Windows: use New-Item -ItemType Directory -Force -Path "folder/name" (NOT mkdir -p, which is Linux syntax). For remote dirs via SSH, use: ssh host "mkdir -p /remote/path" — that is fine.
+- Local file/dir operations use PowerShell cmdlets. Never use mkdir -p locally on Windows.
 - get_diagnostics: call after every edit. Also call first when user asks about errors.
 - Bug fix is complete when edit_file succeeds, not when you've described the fix
 - Never end with a list of things to verify — do the verification yourself with shell_read
 - Docs: cross-check specific claims (numbers, class names, config values) against actual code
+- Local docs first: when asked about hardware, system config, environment, or project-specific setup — ALWAYS search the workspace for documentation files (README.md, docs/, *.md, ai_workstation/, setup*, config*) BEFORE running shell hardware queries. Use shell_read with Get-ChildItem or find to list local docs, then read them. Only fall back to shell system queries if local docs have nothing.
 - Performance: when writing queries or loops, consider scale — a query that works on 100 rows may break on 100k. Prefer indexed columns in WHERE clauses, avoid N+1 queries, flag anything that scans a full table without a limit.
 - Git safety: before overwriting, moving, or deleting anything — run shell_read to check git status first. Never clobber uncommitted work.
 ${memoryGuidelines}
@@ -776,6 +794,14 @@ ${memoryGuidelines}
 - CONFIRM message format: what you found | what you'll change | what you won't touch | one question. SHORT.
 - "go ahead" is a valid trigger to build IF you already presented a plan. If not, present the plan first.
 - Scope: write code files only. Do NOT run migrations, pip install, or start servers — tell the user the exact commands to run.
+
+## Environment awareness — never rediscover what you already know
+Before running ANY command to discover the environment (OS version, available tools, SSH hosts, IPs, Python/Node versions, installed packages):
+1. Check .ollamapilot/context.md first — it has the authoritative environment snapshot
+2. Check memory_search("environment tools ssh") — facts may also be in Tier 0 memory
+3. Only run shell discovery commands if the answer genuinely isn't there
+
+When you learn new environment facts not yet in context.md (new tool installed, new SSH host, new service), write them to memory Tier 0 immediately. Do NOT ask the user to "remember to add this" — just save it.
 
 ## Deploy / apply / run tasks — environment-first protocol
 When the user asks you to apply, run, deploy, execute, or migrate something (not write code — actually *run* it):
@@ -799,6 +825,16 @@ Anything that depends on WHERE or HOW something runs requires verification befor
 - **Credentials/paths:** If a path, user, or key isn't visible in the codebase — ask, never invent.
 
 When you find the answer from memory, .env, deploy scripts, or docs — use it directly. Only ask if you genuinely cannot determine it.
+
+## Session continuity — always do this
+After completing any multi-step task (3+ tool calls, a plan, a fix, a feature), BEFORE giving your final response:
+1. Call memory_tier_write (Tier 2) with a compact summary: what was worked on, what was decided, what is still open. Format: "Session [date]: <topic> — <what was done> — <open items if any>". Max 3 sentences.
+2. If the task revealed something strategic (new architecture decision, key constraint, important project goal), also call memory_tier_write (Tier 1) for that fact alone.
+3. If AGENT_CONTEXT.md exists in the workspace root, append a bullet. If it doesn't exist, create it only when the user explicitly asks to "document this" or "keep track of this".
+
+This is silent — never tell the user you are saving. Never ask permission. Just do it.
+
+The goal: when this session ends and a new one starts, memory_search should be enough to reconstruct what we were doing without asking the user to re-explain.
 
 ## Creative / discovery mode
 Triggered by: "brainstorm", "what could we build", "find examples", "let's build X", "suggest ideas", "what if we", "get creative", "explore options".
@@ -3815,8 +3851,14 @@ Do NOT assume you have no memory — check first.`;
                 displayContent = stripToolBlocks(result.content);
             } else {
                 toolCalls    = result.toolCalls;
-                displayContent = result.content;
-                
+                // Strip native tool-call XML artifacts that qwen3 and similar models leak into
+                // their text content alongside proper native tool calls (e.g. stray </tool_call> tags).
+                displayContent = result.content
+                    .replace(/<\/?tool_call>/g, '')
+                    .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
+                    .replace(/^\s*\n/gm, '\n')  // collapse blank lines left by removal
+                    .trim();
+
                 // Detect if model is outputting fake tool calls (JSON or XML) instead of using native API
                 if (!this.detectedFakeToolCalls && toolCalls.length === 0) {
                     const content = result.content;
@@ -4021,16 +4063,17 @@ Do NOT assume you have no memory — check first.`;
                     const isTaskCompletion = editsAlreadyMade
                         || /\b(no (further |more |additional |other )?changes? (are |is )?(needed|required|necessary)|no (further |more )?edits? (are |is )?(needed|required)|already (implemented|fully implemented|in place|connected|wired up|present|exists?|correct)|implementation (is |looks )?(complete|correct|already|done)|task (is |appears )?(complete|done|finished)|nothing (else |more |further |additional )?(is |are |was )?(needed|required|to do)|fully (connected|wired|implemented|functional)|no (action|update|change|edit) (is |are )?(needed|required|necessary))\b/i.test(resp)
                         || /✅|task complete|no errors or warnings found|following (our |the )?project conventions?/i.test(resp);
-                    // Short "let me check X" statements at turn > 0 with no tool call — model announced
-                    // intent but forgot to follow through. Catch these before the 300-char threshold below.
-                    const isShortIntentWithoutTool = turn > 0 && !toolCalls.length && resp.length < 300
+                    // "let me..." / "I'll..." announcements with no tool call — model stated intent but stopped.
+                    // Fires on any turn (including turn 0) when the response is short and action-oriented.
+                    const intentPattern = /\b(let me (check|look|read|examine|see|find|verify|inspect|search|scan|list|explore|review|run|execute|start|begin|first|now)|i('ll| will) (check|look|read|examine|see|find|verify|inspect|search|scan|list|start|begin|run|execute|first|now|go ahead)|i'll start by|let me start|let me first|let me now|i'll now|first[,\s]+let me|first[,\s]+i('ll| will)|to (do|accomplish|complete) (this|that)[,\s]|i'll (need to|have to) (start|begin|first))\b/i;
+                    const isShortIntentWithoutTool = !toolCalls.length && resp.length < 500
                         && !isTaskCompletion && !responseHasToolBlock && userWantsAction
-                        && /\b(let me (check|look|read|examine|see|find|verify|inspect)|i('ll| will) (check|look|read|examine|see|find|verify|inspect)|checking|looking at|reading)\b/i.test(resp);
-                    if (isShortIntentWithoutTool) {
+                        && intentPattern.test(resp);
+                    if (isShortIntentWithoutTool && this.autoRetryCount < this.MAX_AUTO_RETRIES) {
                         this.autoRetryCount++;
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: short intent statement without tool call (${resp.length} chars, turn ${turn})`);
+                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: intent statement without tool call (${resp.length} chars, turn ${turn})`);
                         this.history.pop();
-                        this.history.push({ role: 'user', content: `[SYSTEM: You said you would check something but did not call a tool. Call the tool NOW — output only a <tool> block.]` });
+                        this.history.push({ role: 'user', content: `[SYSTEM: You announced intent ("let me...", "I'll...") but did not call any tool. Do not narrate — act. Call the tool NOW.]` });
                         post({ type: 'removeLastAssistant' });
                         continue;
                     }
@@ -6445,6 +6488,42 @@ If the code looks correct, respond with exactly: OK`;
                     }
                 }
 
+                // Auto-fix: wmic is deprecated/removed on Windows 11 ARM — convert to Get-CimInstance.
+                if (process.platform === 'win32' && /\bwmic\b/i.test(cmd)) {
+                    // Map common wmic aliases to Get-CimInstance class names
+                    const wmicClassMap: Record<string, string> = {
+                        'cpu': 'Win32_Processor',
+                        'memorychip': 'Win32_PhysicalMemory',
+                        'diskdrive': 'Win32_DiskDrive',
+                        'logicaldisk': 'Win32_LogicalDisk',
+                        'nic': 'Win32_NetworkAdapterConfiguration',
+                        'os': 'Win32_OperatingSystem',
+                        'computersystem': 'Win32_ComputerSystem',
+                        'bios': 'Win32_BIOS',
+                        'baseboard': 'Win32_BaseBoard',
+                        'videocontroller': 'Win32_VideoController',
+                        'sounddev': 'Win32_SoundDevice',
+                        'printer': 'Win32_Printer',
+                        'service': 'Win32_Service',
+                        'process': 'Win32_Process',
+                    };
+                    // Extract the alias (e.g. "wmic cpu get Name" → "cpu")
+                    const wmicAliasMatch = cmd.match(/\bwmic\s+(\w+)/i);
+                    const alias = wmicAliasMatch ? wmicAliasMatch[1].toLowerCase() : '';
+                    const cimClass = wmicClassMap[alias] || 'Win32_ComputerSystem';
+                    // Extract requested properties (e.g. "get Name,MaxClockSpeed")
+                    const propMatch = cmd.match(/\bget\s+([\w,\s]+?)(?:\s+\/|$)/i);
+                    const props = propMatch
+                        ? propMatch[1].split(',').map(p => p.trim()).filter(Boolean)
+                        : [];
+                    const selectClause = props.length > 0
+                        ? ` | Select-Object ${props.join(', ')}`
+                        : '';
+                    const fixedCmd = `Get-CimInstance -ClassName ${cimClass}${selectClause}`;
+                    logInfo(`[shell_read] Auto-converted wmic to Get-CimInstance: "${cmd}" → "${fixedCmd}"`);
+                    cmd = fixedCmd;
+                }
+
                 // Auto-fix: Unix grep on Windows — convert to PowerShell Select-String.
                 // Also handles multi-word patterns like grep -rn "foo bar baz" which would never match
                 // any real file — extract the best single keyword instead.
@@ -6537,6 +6616,27 @@ If the code looks correct, respond with exactly: OK`;
             case 'run_command': {
                 let cmd = String(args.command ?? '');
                 if (!cmd) { throw new Error('command is required'); }
+
+                // Auto-fix: wmic is deprecated/removed on Windows 11 ARM — convert to Get-CimInstance.
+                if (process.platform === 'win32' && /\bwmic\b/i.test(cmd)) {
+                    const wmicClassMap2: Record<string, string> = {
+                        'cpu': 'Win32_Processor', 'memorychip': 'Win32_PhysicalMemory',
+                        'diskdrive': 'Win32_DiskDrive', 'logicaldisk': 'Win32_LogicalDisk',
+                        'nic': 'Win32_NetworkAdapterConfiguration', 'os': 'Win32_OperatingSystem',
+                        'computersystem': 'Win32_ComputerSystem', 'bios': 'Win32_BIOS',
+                        'baseboard': 'Win32_BaseBoard', 'videocontroller': 'Win32_VideoController',
+                        'sounddev': 'Win32_SoundDevice', 'printer': 'Win32_Printer',
+                        'service': 'Win32_Service', 'process': 'Win32_Process',
+                    };
+                    const wmicAlias2 = cmd.match(/\bwmic\s+(\w+)/i);
+                    const alias2 = wmicAlias2 ? wmicAlias2[1].toLowerCase() : '';
+                    const cimClass2 = wmicClassMap2[alias2] || 'Win32_ComputerSystem';
+                    const propMatch2 = cmd.match(/\bget\s+([\w,\s]+?)(?:\s+\/|$)/i);
+                    const props2 = propMatch2 ? propMatch2[1].split(',').map(p => p.trim()).filter(Boolean) : [];
+                    const fixedCmd2 = `Get-CimInstance -ClassName ${cimClass2}${props2.length ? ` | Select-Object ${props2.join(', ')}` : ''}`;
+                    logInfo(`[run_command] Auto-converted wmic to Get-CimInstance: "${cmd}" → "${fixedCmd2}"`);
+                    cmd = fixedCmd2;
+                }
 
                 // Auto-fix forward slashes in path arguments on Windows (not flags like /S /N)
                 if (process.platform === 'win32') {
@@ -7027,21 +7127,40 @@ If the code looks correct, respond with exactly: OK`;
             const post = this.postFn;
             post({ type: 'commandStart', id: cmdId, cmd });
 
-            // Strip newlines to prevent newline-injection (cmd1\ncmd2 becoming two shell commands).
-            const safeCmd = cmd.replace(/[\r\n]+/g, ' ').trim();
-
             // Routing priority:
-            //   1. python/python3/py -c "..." → spawn python directly (cross-platform, no shell needed)
-            //   2. PowerShell cmdlets on Windows → powershell.exe array args (safe)
-            //   3. Everything else → shell:true (needed for pipelines/redirects)
-            const pyMatch = safeCmd.match(/^(python3?|py)\s+-c\s+"([\s\S]*)"\s*$/);
-            const isPSCmd = !pyMatch && process.platform === 'win32'
-                && /Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Measure-Object|Sort-Object|\$_|\$PSItem/.test(safeCmd);
-            const child = pyMatch
-                ? spawn(pyMatch[1], ['-c', pyMatch[2]], { cwd, env: { ...process.env } })
-                : isPSCmd
-                    ? spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', safeCmd], { cwd, env: { ...process.env } })
-                    : spawn(safeCmd, { cwd, env: { ...process.env }, shell: true, windowsHide: true });
+            //   1. python/python3/py -c "..." → spawn python directly, preserving newlines in script body
+            //   2. PowerShell cmdlets OR mkdir/mv/cp on Windows → powershell.exe array args (safe)
+            //   3. ssh / scp / sftp → shell:true, command passed verbatim (remote paths must not be touched)
+            //   4. Everything else → collapse newlines (injection guard) then shell:true
+
+            // Routing priority (checked in order — first match wins):
+            //   1. ssh/scp/sftp → shell:true verbatim. MUST be first — quoted remote payloads
+            //      can contain PS keywords that would trigger rule 3, causing the wrong executor.
+            //   2. python/python3/py -c "..." → spawn python directly, newlines preserved in script body
+            //   3. PowerShell cmdlets / local mkdir/mv/cp/rm on Windows → powershell.exe array args
+            //   4. Everything else → collapse newlines (injection guard) then shell:true
+
+            const isSshCmd = /^\s*(ssh|scp|sftp)\s/.test(cmd);
+            const pyMatch  = !isSshCmd && cmd.trimStart().match(/^(python3?|py)\s+-c\s+"([\s\S]*)"\s*$/);
+            let safeCmd = cmd;
+            if (!isSshCmd && !pyMatch) {
+                safeCmd = cmd.replace(/[\r\n]+/g, ' ').trim();
+            }
+
+            // Only test PS keywords on the first token of the command (before any quoted args)
+            // to avoid matching keywords inside quoted remote-command payloads.
+            const firstToken = safeCmd.trimStart().split(/\s/)[0];
+            const isPSCmd = !isSshCmd && !pyMatch && process.platform === 'win32'
+                && (/^(Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Measure-Object|Sort-Object|mkdir|md|rmdir)$/.test(firstToken)
+                    || /\$_|\$PSItem/.test(safeCmd));
+
+            const child = isSshCmd
+                ? spawn(cmd.trim(), { cwd, env: { ...process.env }, shell: true, windowsHide: true })
+                : pyMatch
+                    ? spawn(pyMatch[1], ['-c', pyMatch[2]], { cwd, env: { ...process.env } })
+                    : isPSCmd
+                        ? spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', safeCmd], { cwd, env: { ...process.env } })
+                        : spawn(safeCmd, { cwd, env: { ...process.env }, shell: true, windowsHide: true });
             this.trackChild(child);
 
             let output = '';
@@ -7101,16 +7220,33 @@ If the code looks correct, respond with exactly: OK`;
 
             // Routing priority:
             //   1. python/python3/py -c "..." → spawn python directly (cross-platform, no shell needed)
-            //   2. PowerShell cmdlets on Windows → powershell.exe array args (safe)
+            //   2. PowerShell cmdlets OR mkdir/mv/cp on Windows → powershell.exe array args (safe)
             //   3. Everything else → shell:true (needed for pipelines/redirects)
-            const pyMatchR = cmd.match(/^(python3?|py)\s+-c\s+"([\s\S]*)"\s*$/);
-            const isPowerShellCmd = !pyMatchR && process.platform === 'win32'
-                && /Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Out-Host|Measure-Object|Sort-Object|\$_|\$PSItem/.test(cmd);
-            const spawnArgs: [string, string[], object] = pyMatchR
-                ? [pyMatchR[1], ['-c', pyMatchR[2]], { cwd, env: { ...process.env } }]
-                : isPowerShellCmd
-                    ? ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmd], { cwd, env: { ...process.env } }]
-                    : [cmd, [], { cwd, env: { ...process.env }, shell: true }];
+            // Routing priority (same rules as runCommandStreaming — ssh must be first):
+            //   1. ssh/scp/sftp → shell:true verbatim (remote payloads must not trigger PS detection)
+            //   2. python/python3/py -c "..." → spawn python directly, newlines preserved
+            //   3. PowerShell cmdlets / local mkdir on Windows → powershell.exe array args
+            //   4. Everything else → collapse newlines then shell:true
+
+            const isSshCmdR = /^\s*(ssh|scp|sftp)\s/.test(cmd);
+            const pyMatchR  = !isSshCmdR && cmd.trimStart().match(/^(python3?|py)\s+-c\s+"([\s\S]*)"\s*$/);
+            let cmdR = cmd;
+            if (!isSshCmdR && !pyMatchR) {
+                cmdR = cmd.replace(/[\r\n]+/g, ' ').trim();
+            }
+
+            const firstTokenR = cmdR.trimStart().split(/\s/)[0];
+            const isPowerShellCmd = !isSshCmdR && !pyMatchR && process.platform === 'win32'
+                && (/^(Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Out-Host|Measure-Object|Sort-Object|mkdir|md|rmdir)$/.test(firstTokenR)
+                    || /\$_|\$PSItem/.test(cmdR));
+
+            const spawnArgs: [string, string[], object] = isSshCmdR
+                ? [cmd.trim(), [], { cwd, env: { ...process.env }, shell: true }]
+                : pyMatchR
+                    ? [pyMatchR[1], ['-c', pyMatchR[2]], { cwd, env: { ...process.env } }]
+                    : isPowerShellCmd
+                        ? ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmdR], { cwd, env: { ...process.env } }]
+                        : [cmdR, [], { cwd, env: { ...process.env }, shell: true }];
             const child = spawn(...spawnArgs);
             this.trackChild(child);
 

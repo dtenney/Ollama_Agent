@@ -774,6 +774,19 @@ function stripToolBlocksClient(text) {
     return result.replace(/\n{2,}/g, '\n').trim();
 }
 
+/** Show a transient system note in the chat (e.g. "message queued"). Auto-fades after 4s. */
+function appendSystemNote(text) {
+    const div = document.createElement('div');
+    div.className = 'msg system-note';
+    div.style.cssText = 'opacity:0.7;font-size:0.85em;padding:4px 12px;color:var(--vscode-descriptionForeground);transition:opacity 3s ease 1s;';
+    div.textContent = text;
+    chatEl.appendChild(div);
+    chatEl.scrollTop = chatEl.scrollHeight;
+    // Fade out and remove
+    requestAnimationFrame(() => { div.style.opacity = '0'; });
+    setTimeout(() => div.remove(), 4500);
+}
+
 function finalizeMessage() {
     if (!currentMsgEl) { return; }
 
@@ -1270,13 +1283,24 @@ function addCommandBlock(id, cmd) {
     div.className = 'cmd-block';
     div.id = `cmd-${id}`;
     div.innerHTML =
-        `<div class="cmd-header">` +
+        `<div class="cmd-header" title="Click to expand/collapse output">` +
             `<span class="cmd-icon">⚡</span>` +
             `<span class="cmd-label">${escHtml(cmd)}</span>` +
             `<div class="dots"><span></span><span></span><span></span></div>` +
         `</div>` +
-        `<div class="cmd-output"></div>`;
+        `<div class="cmd-output" style="display:none"></div>`;
     messagesEl.insertBefore(div, scrollBtn);
+
+    // Click header to toggle output visibility
+    const header = div.querySelector('.cmd-header');
+    const output = div.querySelector('.cmd-output');
+    if (header && output) {
+        header.style.cursor = 'pointer';
+        header.addEventListener('click', () => {
+            const isHidden = output.style.display === 'none';
+            output.style.display = isHidden ? 'block' : 'none';
+        });
+    }
     scrollBottom();
 }
 
@@ -1291,10 +1315,13 @@ function appendCommandChunk(id, text, stream) {
     const output = block.querySelector('.cmd-output');
     if (!output) { return; }
     const span = document.createElement('span');
-    if (stream === 'stderr') { span.className = 'stderr'; }
+    if (stream === 'stderr') {
+        span.className = 'stderr';
+        // Auto-expand on any stderr output so errors are visible immediately
+        output.style.display = 'block';
+    }
     span.textContent = text;
     output.appendChild(span);
-    // Auto-scroll the output pane itself
     output.scrollTop = output.scrollHeight;
     scrollBottom();
 }
@@ -1306,16 +1333,38 @@ function appendCommandChunk(id, text, stream) {
 function finalizeCommandBlock(id, exitCode) {
     const block = document.getElementById(`cmd-${id}`);
     if (!block) { return; }
-    block.classList.add(exitCode === 0 ? 'success' : 'error');
+    const ok = exitCode === 0;
+    block.classList.add(ok ? 'success' : 'error');
     const dots = block.querySelector('.dots');
     if (dots) { dots.remove(); }
     const header = block.querySelector('.cmd-header');
+    const output = block.querySelector('.cmd-output');
+    const hasOutput = output && output.textContent.trim().length > 0;
+
     if (header) {
         const badge = document.createElement('span');
         badge.className = 'cmd-exit';
-        badge.textContent = `exit ${exitCode}`;
+        // Show green check or red X with exit code
+        badge.textContent = ok ? `✓ exit 0` : `✗ exit ${exitCode}`;
+        badge.style.color = ok ? '#4ec94e' : '#f44747';
         header.appendChild(badge);
+
+        // Show line/char count hint when collapsed
+        if (hasOutput) {
+            const lines = output.textContent.split('\n').filter(l => l.trim()).length;
+            const hint = document.createElement('span');
+            hint.className = 'cmd-exit';
+            hint.textContent = `${lines} line${lines !== 1 ? 's' : ''} — click to view`;
+            hint.style.opacity = '0.5';
+            header.appendChild(hint);
+        }
     }
+
+    // Auto-expand output on failure so errors are immediately visible
+    if (!ok && output) {
+        output.style.display = 'block';
+    }
+
     scrollBottom();
 }
 
@@ -2299,6 +2348,22 @@ window.addEventListener('message', (event) => {
             scrollBtn.classList.remove('visible');
             sendBtn.disabled = modelSelect.value === '';
             promptEl.focus();
+            break;
+
+        case 'info':
+            // Lightweight status message — show in a transient system bubble
+            appendSystemNote(msg.text);
+            break;
+
+        case 'dispatchQueued':
+            // Extension is re-sending a queued message after the previous run finished.
+            // Re-post it directly to the extension — bypass the normal send path so we
+            // don't need to re-render the input or touch prompt state.
+            if (msg.msg) {
+                setStreaming(true);
+                startAssistantMessage();
+                vscode.postMessage(msg.msg);
+            }
             break;
 
         case 'toolCall':

@@ -90,9 +90,10 @@ coverage/
 qdrant_storage/
 .qdrant/
 
-# ── User-specific runtime data ────────────────────────────────────────────────
+# ── User-specific runtime data (personal IPs, keys, environment facts) ────────
 .ollamapilot/mcp.json
 .ollamapilot/memory.json
+.ollamapilot/context.md
 
 # ── Internal test notes ──────────────────────────────────────────────────────
 MANUAL_TESTS.md

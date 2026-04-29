@@ -19,6 +19,7 @@ import { buildReviewRequest, buildCommitReviewRequest } from './codeReview';
 import { showManageTemplatesUI } from './promptTemplates';
 import { scanProjectDocs } from './docScanner';
 import { CodeIndexer } from './codeIndex';
+import { ensureEnvironmentContext } from './environmentProbe';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -154,6 +155,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     }
                 } catch (err) {
                     logError(`[memory] Initial maintenance failed: ${toErrorMessage(err)}`);
+                }
+
+                // Probe local environment and write/refresh .ollamapilot/context.md
+                // Runs on first activation and whenever the file is >7 days stale.
+                const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                if (root) {
+                    ensureEnvironmentContext(root).catch(err =>
+                        logError(`[env-probe] Unexpected error: ${toErrorMessage(err)}`)
+                    );
                 }
             }, 5000); // 5 seconds after startup
         } catch (error) {

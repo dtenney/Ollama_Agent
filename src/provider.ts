@@ -106,6 +106,8 @@ interface TabState {
     agent: Agent;
     session: ChatSession;
     running: boolean;
+    /** Message queued while agent was running — delivered after current run finishes. */
+    pendingMessage?: { text: string; model: string; raw: MsgSendMessage };
 }
 
 // ── Provider ──────────────────────────────────────────────────────────────────
@@ -282,7 +284,13 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                 // ── Send a message ────────────────────────────────────────
                 case 'sendMessage': {
                     if (this._running) {
-                        post({ type: 'error', text: 'Please wait for the current response to finish.' });
+                        // Queue the message — deliver it after the current run finishes.
+                        // If another message is already queued, the newer one wins (last context wins).
+                        const qtext = raw.text?.trim() ?? '';
+                        if (qtext) {
+                            this._tab.pendingMessage = { text: qtext, model: raw.model ?? getConfig().model, raw };
+                            post({ type: 'info', text: '⏳ Added to queue — will send when current response finishes.' });
+                        }
                         break;
                     }
                     const text  = raw.text?.trim() ?? '';
@@ -507,6 +515,17 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         }
                         runTab.running = false;
                         post({ type: 'agentDone' });
+
+                        // Drain pending message — post it back to the webview so it
+                        // re-sends as a normal sendMessage after agentDone renders.
+                        const pending = runTab.pendingMessage;
+                        if (pending) {
+                            runTab.pendingMessage = undefined;
+                            logInfo(`[provider] Draining queued message: "${pending.text.slice(0, 80)}"`);
+                            setTimeout(() => {
+                                post({ type: 'dispatchQueued', msg: pending.raw });
+                            }, 150);
+                        }
                     }
                     break;
                 }

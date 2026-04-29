@@ -24,9 +24,23 @@
   "ollamaAgent.memory.embeddingModel": "nomic-embed-text",
 
   // ── Web search ──────────────────────────────────────────────────────────────
-  // SearXNG instance for web_search and web_fetch agent tools.
-  // Leave empty to disable (agent will not have access to web search).
-  "ollamaAgent.search.url": "",
+  // Point the agent at a SearXNG instance to enable web_search and web_fetch.
+  // SearXNG is a free, self-hosted meta-search engine — no API key required.
+  //
+  // Quickstart (Docker):
+  //   docker run -d --name searxng -p 8888:8080 \
+  //     -e SEARXNG_SECRET=$(openssl rand -hex 32) \
+  //     searxng/searxng:latest
+  //
+  // Then set the URL below to http://<your-host>:8888
+  // The agent appends /search?q={query}&format=json automatically.
+  //
+  // SearXNG must have the JSON output format enabled (it is by default in the
+  // Docker image). If you self-compiled, add "json" to search.formats in
+  // your searxng/settings.yml.
+  //
+  // Leave empty to keep the agent fully offline.
+  "ollamaAgent.search.url": "http://192.168.1.100:8888",
   "ollamaAgent.search.resultsLimit": 5,
 
   // ── Context & turns ─────────────────────────────────────────────────────────

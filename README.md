@@ -511,16 +511,38 @@ Open `Settings` (`Ctrl+,` / `Cmd+,`) and search for **"Ollama"** to see all opti
 
 ### Example: Enable web search via SearXNG
 
-The agent can search the web and fetch pages when you point it at a [SearXNG](https://searxng.github.io/searxng/) instance:
+The agent can search the web and read pages when you point it at a [SearXNG](https://searxng.github.io/searxng/) instance. SearXNG is a free, self-hosted meta-search engine — no API key, no account, no rate limits.
+
+**Step 1 — Run SearXNG (Docker):**
+
+```bash
+docker run -d --name searxng -p 8888:8080 \
+  -e SEARXNG_SECRET=$(openssl rand -hex 32) \
+  searxng/searxng:latest
+```
+
+SearXNG can run on the same machine as Ollama — one host serves both. The Docker image enables the JSON output format by default, which the agent requires.
+
+> If you self-compiled SearXNG, make sure `json` is listed under `search.formats` in your `searxng/settings.yml`.
+
+**Step 2 — Configure the extension:**
 
 ```json
 {
-  "ollamaAgent.search.url": "http://your-searxng-host:8888",
+  "ollamaAgent.search.url": "http://192.168.1.100:8888",
   "ollamaAgent.search.resultsLimit": 5
 }
 ```
 
-Once configured, the agent will automatically use `web_search` when asked to find examples, libraries, documentation, or anything requiring current information. Leave `search.url` empty to keep the agent fully offline.
+Replace `192.168.1.100` with the IP or hostname of the machine running SearXNG.
+
+**What the agent does with it:**
+
+Once configured, the agent gains two tools:
+- `web_search` — queries SearXNG and returns titles, URLs, and snippets
+- `web_fetch` — fetches any URL as readable plain text (strips HTML)
+
+The agent uses these automatically when asked about libraries, documentation, current events, or anything that benefits from live information. Leave `search.url` empty to keep the agent fully offline.
 
 ---
 

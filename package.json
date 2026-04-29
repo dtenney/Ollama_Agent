@@ -461,12 +461,14 @@
         "ollamaAgent.search.url": {
           "type": "string",
           "default": "",
-          "markdownDescription": "SearXNG instance URL for web search, e.g. `http://192.168.1.100:8888`. Leave empty to disable `web_search`. The agent will append `/search?q={query}&format=json` automatically."
+          "markdownDescription": "URL of your [SearXNG](https://searxng.github.io/searxng/) instance, e.g. `http://192.168.1.100:8888`. Leave empty to disable web search (agent stays fully offline).\n\nSearXNG is a free, self-hosted meta-search engine — no API key required. Run it alongside Ollama on the same host:\n```\ndocker run -d --name searxng -p 8888:8080 \\\n  -e SEARXNG_SECRET=$(openssl rand -hex 32) \\\n  searxng/searxng:latest\n```\nThe agent appends `/search?q={query}&format=json` automatically. SearXNG must have the `json` output format enabled (on by default in the Docker image)."
         },
         "ollamaAgent.search.resultsLimit": {
           "type": "number",
           "default": 5,
-          "markdownDescription": "Maximum number of search results to return per `web_search` call (1–20)."
+          "minimum": 1,
+          "maximum": 20,
+          "markdownDescription": "Maximum number of search results returned per `web_search` call (1–20, default 5). Higher values give the agent more context but use more tokens."
         },
         "ollamaAgent.openClaw.baseUrl": {
           "type": "string",
