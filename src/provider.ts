@@ -1339,8 +1339,16 @@ Be specific and factual — only write what you can confirm from the code, not g
                 .charAt(Math.floor(Math.random() * 62))
         ).join('');
 
+        const webview = this._view!.webview;
+        const logoUri = webview.asWebviewUri(
+            vscode.Uri.joinPath(this.context.extensionUri, 'images', 'logo.png')
+        ).toString();
+        const cspSource = webview.cspSource;
+
         return html
             .replace(/\{\{nonce\}\}/g, nonce)
+            .replace(/\{\{cspSource\}\}/g, cspSource)
+            .replace(/\{\{logoUri\}\}/g, logoUri)
             .replace('{{inlineHljs}}', () => hljs)
             .replace('{{inlineScript}}', () => js);
     }

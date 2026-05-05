@@ -23,11 +23,13 @@ console.log('Deployed dist/main.js');
 
 // --- Copy webview ---
 fs.mkdirSync(path.join(extRoot, 'webview'), { recursive: true });
-fs.copyFileSync(
-    path.join(srcRoot, 'webview/webview.js'),
-    path.join(extRoot, 'webview/webview.js')
-);
-console.log('Deployed webview/webview.js');
+for (const f of ['webview.js', 'webview.html']) {
+    fs.copyFileSync(
+        path.join(srcRoot, 'webview', f),
+        path.join(extRoot, 'webview', f)
+    );
+    console.log(`Deployed webview/${f}`);
+}
 
 // --- Copy root files ---
 for (const f of ['package.json', 'mcp.example.json', 'settings.example.json']) {
