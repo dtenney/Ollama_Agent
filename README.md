@@ -78,7 +78,7 @@ Before installing the extension you need **Ollama** running on your machine.
 |---|---|
 | **macOS** | `brew install ollama` or download from [ollama.com](https://ollama.com/download) |
 | **Linux** | `curl -fsSL https://ollama.com/install.sh \| sh` |
-| **Windows** | Download the installer from [ollama.com/download](https://ollama.com/download) |
+| **Windows** | Download the installer from [ollama.com/download](https://ollama.com/download). Also install [Git for Windows](https://git-scm.com/download/win) (or `winget install Git.Git`) — the agent uses Git Bash for full Unix shell support (`grep`, `find`, `ssh`, etc.) |
 
 ### 2. Pull a model
 
@@ -322,7 +322,7 @@ The AI can autonomously call the following tools during a conversation:
 | `append_to_file` | Append text to an existing file | — |
 | `rename_file` | Rename or move a file | ✅ |
 | `delete_file` | Delete a file | ✅ |
-| `run_command` | Execute shell commands with live output streaming | ✅ |
+| `run_command` | Execute shell commands with live output streaming. On Windows, routes through Git Bash when available (full Unix tooling); falls back to PowerShell | ✅ |
 | `memory_list` | Recall all saved project notes for this workspace | — |
 | `memory_write` | Save a persistent note (fact, decision, convention) about the project | — |
 | `memory_delete` | Delete a saved note by id | — |
@@ -614,18 +614,23 @@ The extension is built in clean TypeScript modules:
 
 ```
 src/
-├── main.ts           Entry point — activate() registers commands and the sidebar provider
-├── provider.ts       WebviewViewProvider — routes messages, manages sessions, resolves @mentions
-├── agent.ts          Agent loop — multi-turn tool calling, mode switching, history
-├── ollamaClient.ts   HTTP client for Ollama API (/api/chat, /api/tags)
-├── chatStorage.ts    Session persistence via vscode.ExtensionContext.globalState
-├── projectMemory.ts  Workspace-scoped project notes via vscode.ExtensionContext.workspaceState
-├── mentions.ts       Workspace file indexer and fuzzy search for @mention autocomplete
-├── gitContext.ts     Git diff extraction — staged + unstaged changes, auto-truncated
-├── config.ts         Configuration reader (maps VS Code settings → typed OllamaConfig)
-├── context.ts        Active file / selection extraction from the editor
-├── workspace.ts      Project scanner — file tree, project type, key files, recent files
-└── logger.ts         Shared OutputChannel logger
+├── main.ts                    Entry point — activate() registers commands and the sidebar provider
+├── provider.ts                WebviewViewProvider — routes messages, manages sessions, resolves @mentions
+├── agent.ts                   Agent loop — multi-turn tool calling, shell routing, mode switching, history
+├── dreamAgent.ts              Background self-healing agent — harvests feedback logs, proposes behavioral rules
+├── ollamaClient.ts            HTTP client for Ollama API (/api/chat, /api/tags)
+├── chatStorage.ts             Session persistence via vscode.ExtensionContext.globalState
+├── memoryCore.ts              6-tier memory system with semantic search support
+├── codeIndex.ts               Workspace file indexer — relevance scoring, import parsing
+├── contextCalculator.ts       Token estimation and model context window limits
+├── gitContext.ts              Git diff extraction — staged + unstaged changes, auto-truncated
+├── config.ts                  Configuration reader (maps VS Code settings → typed OllamaConfig)
+├── context.ts                 Active file / selection extraction from the editor
+├── sessionLog.ts              Structured per-task interaction log (read by dream agent)
+├── markdownIngest.ts          Ingest .md files into memory from the command palette
+├── diffView.ts                Diff preview manager for code block apply
+├── embeddingService.ts        Embedding client for Qdrant semantic search
+└── logger.ts                  Shared OutputChannel logger
 
 webview/
 ├── webview.html      Chat panel UI — VS Code theme variables, no frameworks
@@ -668,6 +673,7 @@ Any model available in Ollama works with this extension. Models known to work we
 | `qwen3:14b` | ~9 GB | ⭐⭐ Best results for most setups — thinking mode, strong agentic reasoning |
 | `qwen2.5-coder:1.5b` | ~1 GB | Fastest, good for quick tasks and low-VRAM machines |
 | `gemma3:27b` | ~17 GB | Google model; self-talk hidden automatically, "Final Answer:" prefix stripped |
+| `gemma4:26b` / `gemma4:26b-65k` | ~17 GB | Google Gemma 4; self-talk filtered; 65k context window supported |
 | `llama3.1:8b` | ~5 GB | General purpose, high quality |
 | `phi3:mini` | ~2 GB | Very fast, good for simple tasks |
 | `codellama:7b` | ~4 GB | Specialized for code generation |

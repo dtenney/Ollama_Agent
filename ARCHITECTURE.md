@@ -88,3 +88,14 @@ The self-healing feedback loop runs as a background Agent instance:
 - Splits on `"Final Answer:"` (Gemma4 / some Qwen3 variants) — everything before the marker is treated as self-talk
 - Falls back to stripping leading paragraphs that match known self-talk prefixes (e.g. "Let me think", "Okay, so")
 - Self-talk is routed into the collapsible thinking panel alongside `<think>` blocks
+
+## Shell routing (Windows)
+
+`detectShellEnvironment()` in `src/agent.ts` probes for the best available shell at extension startup and caches the result:
+
+1. **Windows + Git Bash** (preferred) — probes `C:\Program Files\Git\bin\bash.exe` and common Git install paths, then `where bash`. When found, all `run_command` and `shell_read` commands (including `ssh`/`scp`/`sftp`) are routed through `bash.exe -c "…"`. SSH non-interactive flags (`-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new`) are injected directly into the command string before passing to bash.
+2. **Windows + PowerShell** (fallback) — cmdlets matching `PS_CMDLETS` (shared constant) are spawned via `powershell.exe -Command`. Other commands use `shell: true`.
+3. **Windows + cmd** (last resort) — used if PowerShell probe also fails.
+4. **Unix/macOS** — uses `$SHELL` env var; defaults to `bash`.
+
+`ShellEnvironment.bashPath` stores the Git Bash path so both `runCommandStreaming` and `runShellRead` can reference the same value without re-probing.

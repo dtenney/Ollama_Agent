@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`OllamaPilot: Accept Proposed Rules` command** — merges `## Rule:` blocks from `proposed_rules.md` into `context.md` under `## Learned Rules`, then clears the proposals file
 - **`extractModelSelfTalk` in webview.js** — detects Gemma4 / Qwen3 internal monologue (splits on "Final Answer:", then strips leading self-talk paragraphs) and routes it into the collapsible thinking panel
 - **Gemma4 / Qwen3 think-block support** — `<think>` blocks collapsed by default; self-talk hidden from the main chat view
-- **SSH non-interactive mode** — `run_command` SSH calls use `BatchMode=yes` and `ConnectTimeout=10` to prevent agent hangs on interactive prompts
+- **SSH non-interactive mode** — `run_command` SSH calls use `BatchMode=yes`, `ConnectTimeout=10`, and `StrictHostKeyChecking=accept-new` to prevent agent hangs on interactive prompts
+- **Windows bash/Git Bash routing** — on Windows, `run_command` and `shell_read` now probe for Git Bash (`C:\Program Files\Git\bin\bash.exe` and common paths) before falling back to PowerShell; when found, all commands (including `ssh`/`scp`/`sftp`) are routed through `bash.exe -c "…"`, giving the agent full Unix tooling (`grep`, `find`, `sed`, `head`, etc.); if bash is not installed, the system prompt includes a `winget install Git.Git` hint
+- **Gemma4:26b-65k model support** — added to `MODEL_CONTEXT_LIMITS` in `contextCalculator.ts`
 - **Per-task plan files** — `plans/<task-slug>.md` auto-created at agent run start for each task
 - **`OllamaPilot: Ingest Markdown` command** — wired up `ingestMarkdownFiles` to a registered command so users can import workspace `.md` files into memory from the command palette
 - **`ollamaAgent.acceptDiff` / `ollamaAgent.rejectDiff` commands** — registered handlers for the `Alt+A` / `Alt+R` keybindings (close the active diff editor; the confirmation dialog drives the actual accept/reject)
@@ -25,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Path traversal bypass in file tool validation
 - Logger over-redaction stripping legitimate content
 - Tab race conditions and UI state bugs in multi-tab chat
+- **PowerShell cmdlet list inconsistency** — `Out-Host` was missing from the `runCommandStreaming` routing; unified both functions to use a shared `PS_CMDLETS` constant
+- **Multi-plan stop race** — `setImmediate` callback now re-checks `stopRef.stop` before launching the next plan step; prevents orphaned agent runs when `stop()` is called between steps
+- **SSH regex in `runShellRead`** — regex `/^s[sc]p?h?$/` was malformed and could match unrelated binaries; corrected to `/^(ssh|scp|sftp)$/`
+- **Silent memory write failures** — all fire-and-forget `.catch(() => {})` calls on memory operations now log a warning via `logWarn` instead of silently dropping errors
 
 ## [Unreleased] — prior
 

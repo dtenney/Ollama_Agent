@@ -27,11 +27,13 @@ import type { ActiveTaskState } from './chatStorage';
 
 export interface ShellEnvironment {
     os: 'windows' | 'macos' | 'linux';
-    shell: string;           // e.g. 'powershell', 'cmd', 'bash', 'zsh'
-    /** Short label for prompts, e.g. "Windows (PowerShell)" */
+    shell: string;           // e.g. 'bash', 'powershell', 'cmd', 'zsh'
+    /** Short label for prompts, e.g. "Windows (bash/Git Bash)" */
     label: string;
     /** Python executable name (e.g. 'python3', 'python') — empty string if not found */
     pythonCmd: string;
+    /** Full path to bash executable (Git Bash on Windows), empty if not found */
+    bashPath: string;
     /** Find files by name */
     findCmd: string;
     /** Search text in files */
@@ -53,6 +55,10 @@ interface FilePlan {
 }
 
 let _cachedShellEnv: ShellEnvironment | null = null;
+
+/** PowerShell cmdlet names that require spawning powershell.exe rather than shell:true.
+ *  Shared between runCommandStreaming and runShellRead to ensure consistent routing. */
+const PS_CMDLETS = /^(Get-ChildItem|Get-Content|Set-Content|Out-File|Out-Host|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Measure-Object|Sort-Object|mkdir|md|rmdir)$/;
 
 /**
  * Strip PowerShell Select-String -Context output prefixes so the model
@@ -127,13 +133,44 @@ export function detectShellEnvironment(): ShellEnvironment {
     const isMac = platform === 'darwin';
 
     let shell = '';
+    let bashPath = '';
     if (isWin) {
-        // Check if PowerShell is available (preferred on Windows)
-        try {
-            execSync('powershell -NoProfile -ExecutionPolicy Bypass -Command "echo ok"', { stdio: 'pipe', timeout: 3000 });
-            shell = 'powershell';
-        } catch {
-            shell = 'cmd';
+        // Prefer bash (Git Bash) over PowerShell on Windows — gives full Unix tooling.
+        // Probe common Git Bash install paths, then fall back to `where bash`.
+        const bashCandidates = [
+            'C:\\Program Files\\Git\\bin\\bash.exe',
+            'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+            'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+        ];
+        for (const candidate of bashCandidates) {
+            try {
+                execSync(`"${candidate}" -c "echo ok"`, { stdio: 'pipe', timeout: 3000 });
+                bashPath = candidate;
+                break;
+            } catch { /* not at this path */ }
+        }
+        if (!bashPath) {
+            // Try PATH lookup as last resort
+            try {
+                const found = execSync('where bash', { stdio: 'pipe', timeout: 3000 }).toString().trim().split('\n')[0].trim();
+                if (found && found.toLowerCase().endsWith('.exe')) {
+                    execSync(`"${found}" -c "echo ok"`, { stdio: 'pipe', timeout: 3000 });
+                    bashPath = found;
+                }
+            } catch { /* bash not in PATH */ }
+        }
+        if (bashPath) {
+            shell = 'bash';
+            logInfo(`[shell-env] Git Bash found: ${bashPath}`);
+        } else {
+            // Fall back to PowerShell, then cmd
+            try {
+                execSync('powershell -NoProfile -ExecutionPolicy Bypass -Command "echo ok"', { stdio: 'pipe', timeout: 3000 });
+                shell = 'powershell';
+            } catch {
+                shell = 'cmd';
+            }
+            logWarn('[shell-env] bash not found on Windows — falling back to PowerShell/cmd. Install Git for Windows for full Unix shell support.');
         }
     } else {
         // Unix: check SHELL env var, fall back to detection
@@ -160,23 +197,41 @@ export function detectShellEnvironment(): ShellEnvironment {
     const osName: ShellEnvironment['os'] = isWin ? 'windows' : isMac ? 'macos' : 'linux';
 
     if (isWin) {
+        const hasBash = shell === 'bash';
         _cachedShellEnv = {
             os: 'windows',
             shell,
             pythonCmd,
-            label: `Windows (${shell === 'powershell' ? 'PowerShell' : 'cmd'})`,
-            findCmd: 'dir /s /b *pattern*',
-            grepCmd: 'findstr /S /N /I "text" *.py',
-            treeCmd: 'tree /F folder',
-            mkdirCmd: 'mkdir folder1 && mkdir folder2',
-            moveCmd: 'move old\\path new\\path',
-            catCmd: 'type file.txt',
+            bashPath,
+            label: hasBash
+                ? 'Windows (bash/Git Bash)'
+                : `Windows (${shell === 'powershell' ? 'PowerShell' : 'cmd'})`,
+            // When bash is available use Unix commands, otherwise Windows equivalents
+            findCmd: hasBash
+                ? "find . -name '*pattern*' -not -path '*__pycache__*'"
+                : 'dir /s /b *pattern*',
+            grepCmd: hasBash
+                ? "grep -rn 'text' --include='*.py' ."
+                : 'findstr /S /N /I "text" *.py',
+            treeCmd: hasBash
+                ? 'find folder -type f | head -50'
+                : 'tree /F folder',
+            mkdirCmd: hasBash
+                ? 'mkdir -p folder1 folder2'
+                : 'mkdir folder1 && mkdir folder2',
+            moveCmd: hasBash
+                ? 'mv old/path new/path'
+                : 'move old\\path new\\path',
+            catCmd: hasBash
+                ? 'cat file.txt'
+                : 'type file.txt',
         };
     } else {
         _cachedShellEnv = {
             os: osName,
             shell,
             pythonCmd,
+            bashPath: '',
             label: `${isMac ? 'macOS' : 'Linux'} (${shell})`,
             findCmd: "find . -name '*pattern*' -not -path '*__pycache__*'",
             grepCmd: "grep -rn 'text' --include='*.py' .",
@@ -206,13 +261,14 @@ function buildShellExamples(env: ShellEnvironment, workspaceRoot?: string): stri
 
     const gitSection = `- Git status/log/diff:       shell_read → git status  |  git log --oneline -20  |  git diff`;
 
-    const fallbackSection = env.os === 'windows'
-        ? `## PowerShell fallback (Windows only — use Python above when possible)
+    const fallbackSection = env.os === 'windows' && !env.bashPath
+        ? `## PowerShell fallback (Windows, no bash — use Python above when possible)
 - Find files: Get-ChildItem -Path '${ws}' -Recurse -Filter '*pattern*' | Select-Object FullName
 - Search code: Get-ChildItem -Path '${ws}' -Recurse -Filter '*.py' | Select-String -Pattern 'def foo' | Select-Object Path,LineNumber,Line -First 20
 - Read file: Get-Content 'FULL/PATH/file.py'
-- Read line range: (Get-Content 'FULL/PATH/file.py' | Select-Object -Skip 473 -First 107)`
-        : `## Shell fallback (Unix — use Python above when possible)
+- Read line range: (Get-Content 'FULL/PATH/file.py' | Select-Object -Skip 473 -First 107)
+NOTE: bash is not installed. For full Unix shell support, install Git for Windows: winget install Git.Git`
+        : `## Shell fallback (${env.os === 'windows' ? 'Windows bash/Git Bash' : 'Unix'} — use Python above when possible)
 - Find files: find '${ws}' -name '*pattern*' -not -path '*__pycache__*'
 - Search code: grep -rn 'def fetch_user' --include='*.py' '${ws}'
 - Read file: cat '/full/path/file.py'
@@ -2510,7 +2566,7 @@ export class Agent {
                     // Save to Tier 2 memory so facts survive across sessions
                     if (this.memory && lines.length > 1) {
                         const memContent = lines.slice(1).join('\n'); // skip header line
-                        this.memory.addEntry(2, memContent, ['compaction', 'session']).catch(() => {});
+                        this.memory.addEntry(2, memContent, ['compaction', 'session']).catch((e) => logWarn(`[memory] background write failed: ${toErrorMessage(e)}`));
                         logInfo(`[context] Saved compaction summary to Tier 2 memory`);
                     }
                 } catch (err) {
@@ -4009,7 +4065,7 @@ Do NOT assume you have no memory — check first.`;
                         const syncMemNote = wipLines
                             .filter(l => !l.startsWith('[WORK IN PROGRESS') && !l.startsWith('IMPORTANT:'))
                             .join('\n');
-                        this.memory.addEntry(2, syncMemNote, ['auto-compact', 'session', 'wip-sync']).catch(() => {});
+                        this.memory.addEntry(2, syncMemNote, ['auto-compact', 'session', 'wip-sync']).catch((e) => logWarn(`[memory] background write failed: ${toErrorMessage(e)}`));
                         logInfo(`[context] Synchronous WIP snapshot saved to Tier 2 (${wipLines.length} lines)`);
                     }
 
@@ -4119,7 +4175,7 @@ Do NOT assume you have no memory — check first.`;
                                 }
                                 lines.push(`(auto-compact ${new Date().toLocaleTimeString()})`);
                                 const memNote = lines.join('\n');
-                                this.memory!.addEntry(2, memNote, ['auto-compact', 'session']).catch(() => {});
+                                this.memory!.addEntry(2, memNote, ['auto-compact', 'session']).catch((e) => logWarn(`[memory] background write failed: ${toErrorMessage(e)}`));
                                 logInfo(`[context] Auto-compact: saved structured snapshot to Tier 2 memory (${lines.length} facts)`);
                             } catch (err) {
                                 logWarn(`[context] Auto-compact: structured extraction failed, falling back to regex: ${toErrorMessage(err)}`);
@@ -4139,7 +4195,7 @@ Do NOT assume you have no memory — check first.`;
                                         editFacts.length ? `Progress: ${editFacts.join(', ')}` : '',
                                         `(auto-compact fallback ${new Date().toLocaleTimeString()})`,
                                     ].filter(Boolean).join('\n');
-                                    this.memory!.addEntry(2, fallbackNote, ['auto-compact', 'session']).catch(() => {});
+                                    this.memory!.addEntry(2, fallbackNote, ['auto-compact', 'session']).catch((e) => logWarn(`[memory] background write failed: ${toErrorMessage(e)}`));
                                 }
                             }
                         })();
@@ -4764,7 +4820,7 @@ Do NOT assume you have no memory — check first.`;
                     // Tier 3 duplicates are harmless and get evicted naturally.
                     // Include feature keywords as tags so future memory_search("weekly summary") finds this entry.
                     const sessionTags = ['session-end', 'completed', 'completed-feature', ...featureKws.slice(0, 6).map(k => k.toLowerCase())];
-                    this.memory!.addEntry(3, sessionNote, sessionTags).catch(() => {});
+                    this.memory!.addEntry(3, sessionNote, sessionTags).catch((e) => logWarn(`[memory] background write failed: ${toErrorMessage(e)}`));
                     logInfo(`[memory] Session-end: saved completed-feature to Tier 3 (${editedPaths.length} files, ${featureKws.length} keywords)`);
 
                     // Mark the active plan file done when the session ends cleanly
@@ -6195,10 +6251,16 @@ Do NOT assume you have no memory — check first.`;
             const remaining = this._pendingPlanSteps.length;
             logInfo(`[multi-plan] Step complete — auto-advancing to next: ${nextStep.relPath} (${remaining} remaining)`);
             post({ type: 'planProgress', step: nextStep, remaining });
-            // Enqueue the next run as a microtask so the current call stack unwinds first
+            // Enqueue the next run as a microtask so the current call stack unwinds first.
+            // Re-check stopRef inside the callback — stop() may have been called during unwind.
             const stepMessage = `Continue multi-file plan — implement ${nextStep.relPath}`;
             const stepModel = getConfig().model;
+            const stepStopRef = this.stopRef;
             setImmediate(() => {
+                if (stepStopRef.stop) {
+                    logInfo('[multi-plan] stop() called during step transition — aborting plan');
+                    return;
+                }
                 this.run(stepMessage, stepModel, post).catch(e => {
                     logWarn(`[multi-plan] Step failed: ${toErrorMessage(e)}`);
                 });
@@ -6673,7 +6735,7 @@ If the code looks correct, respond with exactly: OK`;
                             : `Function ${fnMatch![1]}() added to ${rel}`;
                         // Write unconditionally — skip isSemanticDuplicate to avoid
                         // contending with Ollama while it's mid-generation.
-                        this.memory!.addEntry(2, what, ['auto-edit', 'structure']).catch(() => {});
+                        this.memory!.addEntry(2, what, ['auto-edit', 'structure']).catch((e) => logWarn(`[memory] background write failed: ${toErrorMessage(e)}`));
                         logInfo(`[memory] Auto-saved edit fact: ${what}`);
                     }
                 }
@@ -6706,7 +6768,7 @@ If the code looks correct, respond with exactly: OK`;
                             this._activeTask.stepsPending.length ? `Pending: ${this._activeTask.stepsPending.join(' | ')}` : 'All steps done',
                             `Files done: ${this._activeTask.filesConfirmed.join(', ')}`,
                         ].join('\n');
-                        this.memory.addEntry(2, sweepNote, ['sweep-progress', 'auto-edit', 'wip-sync']).catch(() => {});
+                        this.memory.addEntry(2, sweepNote, ['sweep-progress', 'auto-edit', 'wip-sync']).catch((e) => logWarn(`[memory] background write failed: ${toErrorMessage(e)}`));
                     }
                 }
 
@@ -8043,9 +8105,14 @@ ${sampleHtml}
             //   3. PowerShell cmdlets / local mkdir/mv/cp/rm on Windows → powershell.exe array args
             //   4. Everything else → collapse newlines (injection guard) then shell:true
 
+            // Resolve bash path for Windows bash routing — when present, bash handles
+            // ALL commands including ssh/scp/sftp (Git Bash ships its own OpenSSH).
+            const winBashPath = process.platform === 'win32' ? detectShellEnvironment().bashPath : '';
+
             // A command starting with ssh/scp/sftp that also contains && or ; is a chained shell
-            // command — it must go through shell:true so the shell interprets the separator.
+            // command — it must go through a shell so the separator is interpreted.
             // parseSshArgs only handles single ssh/scp invocations; chaining breaks its tokenizer.
+            // When winBashPath is set we skip parseSshArgs entirely and let bash handle quoting.
             const isSshCmd = /^\s*(ssh|scp|sftp)\s/.test(cmd);
             const isSshChained = isSshCmd && /(?:^|[^&])&&|;/.test(cmd); // && or ; present
             const pyMatch  = !isSshCmd && cmd.trimStart().match(/^(python3?|py)\s+-c\s+"([\s\S]*)"\s*$/);
@@ -8054,12 +8121,21 @@ ${sampleHtml}
                 safeCmd = cmd.replace(/[\r\n]+/g, ' ').trim();
             }
 
+            // For SSH commands routed through bash, inject non-interactive options into the
+            // command string so bash passes them to ssh/scp/sftp as arguments.
+            if (isSshCmd && winBashPath) {
+                safeCmd = safeCmd.replace(
+                    /^(\s*(?:ssh|scp|sftp))\s/,
+                    '$1 -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new '
+                );
+                logInfo(`[ssh/bash] Injected non-interactive SSH options into: ${safeCmd}`);
+            }
+
             // Only test PS keywords on the first token of the command (before any quoted args)
             // to avoid matching keywords inside quoted remote-command payloads.
             const firstToken = safeCmd.trimStart().split(/\s/)[0];
             const isPSCmd = !isSshCmd && !pyMatch && process.platform === 'win32'
-                && (/^(Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Measure-Object|Sort-Object|mkdir|md|rmdir)$/.test(firstToken)
-                    || /\$_|\$PSItem/.test(safeCmd));
+                && (PS_CMDLETS.test(firstToken) || /\$_|\$PSItem/.test(safeCmd));
 
             // PowerShell 5 doesn't support && — rewrite to ; for PS-routed commands.
             // We only rewrite && that appear OUTSIDE quoted strings to avoid mangling remote payloads.
@@ -8069,25 +8145,25 @@ ${sampleHtml}
                 logInfo(`[run_command] Rewrote && → ; for PowerShell compatibility`);
             }
 
-            const child = (isSshCmd && !isSshChained)
-                ? (() => {
-                    const args = Agent.parseSshArgs(cmd.trim());
-                    const exe = args.shift()!;
-                    // Inject non-interactive SSH options immediately after the binary so
-                    // the command never blocks waiting for a password or host-key prompt.
-                    // StrictHostKeyChecking=accept-new auto-accepts new host keys (safe for
-                    // first-time connections) but refuses changed keys (MITM protection).
-                    if (/^(ssh|scp|sftp)$/.test(exe.split(/[\\/]/).pop() ?? exe)) {
-                        args.unshift('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=accept-new');
-                    }
-                    logInfo(`[ssh] Spawning without shell: ${exe} ${args.map(a => JSON.stringify(a)).join(' ')}`);
-                    return spawn(exe, args, { cwd, env: { ...process.env }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-                })()
+            const child = winBashPath
+                // Git Bash available: route everything through bash (handles ssh/scp/sftp/unix cmds)
+                ? spawn(winBashPath, ['-c', safeCmd], { cwd, env: { ...process.env }, windowsHide: true })
                 : pyMatch
                     ? spawn(pyMatch[1], ['-c', pyMatch[2]], { cwd, env: { ...process.env } })
-                    : isPSCmd
-                        ? spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', safeCmd], { cwd, env: { ...process.env } })
-                        : spawn(safeCmd, { cwd, env: { ...process.env }, shell: true, windowsHide: true });
+                    : (isSshCmd && !isSshChained)
+                        ? (() => {
+                            // No bash: use parseSshArgs to safely tokenize and spawn ssh directly
+                            const args = Agent.parseSshArgs(cmd.trim());
+                            const exe = args.shift()!;
+                            if (/^(ssh|scp|sftp)$/.test(exe.split(/[\\/]/).pop() ?? exe)) {
+                                args.unshift('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=accept-new');
+                            }
+                            logInfo(`[ssh] Spawning without shell: ${exe} ${args.map(a => JSON.stringify(a)).join(' ')}`);
+                            return spawn(exe, args, { cwd, env: { ...process.env }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+                        })()
+                        : isPSCmd
+                            ? spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', safeCmd], { cwd, env: { ...process.env } })
+                            : spawn(safeCmd, { cwd, env: { ...process.env }, shell: true, windowsHide: true });
             this.trackChild(child);
 
             let output = '';
@@ -8146,15 +8222,14 @@ ${sampleHtml}
             const post = this.postFn;
             post({ type: 'commandStart', id: cmdId, cmd });
 
-            // Routing priority:
-            //   1. python/python3/py -c "..." → spawn python directly (cross-platform, no shell needed)
-            //   2. PowerShell cmdlets OR mkdir/mv/cp on Windows → powershell.exe array args (safe)
-            //   3. Everything else → shell:true (needed for pipelines/redirects)
-            // Routing priority (same rules as runCommandStreaming — ssh must be first):
-            //   1. ssh/scp/sftp → shell:true verbatim (remote payloads must not trigger PS detection)
-            //   2. python/python3/py -c "..." → spawn python directly, newlines preserved
+            // Routing priority (when Git Bash is available on Windows, it handles everything):
+            //   0. Windows + bash: spawn bash -c "cmd" for all commands including ssh/scp/sftp
+            //   1. python/python3/py -c "..." → spawn python directly, newlines preserved
+            //   2. ssh/scp/sftp (no bash) → parseSshArgs + direct spawn, non-interactive flags injected
             //   3. PowerShell cmdlets / local mkdir on Windows → powershell.exe array args
             //   4. Everything else → collapse newlines then shell:true
+
+            const winBashPathR = process.platform === 'win32' ? detectShellEnvironment().bashPath : '';
 
             const isSshCmdR = /^\s*(ssh|scp|sftp)\s/.test(cmd);
             const isSshChainedR = isSshCmdR && /(?:^|[^&])&&|;/.test(cmd);
@@ -8164,10 +8239,18 @@ ${sampleHtml}
                 cmdR = cmd.replace(/[\r\n]+/g, ' ').trim();
             }
 
+            // For SSH commands routed through bash, inject non-interactive options into the command string.
+            if (isSshCmdR && winBashPathR) {
+                cmdR = cmdR.replace(
+                    /^(\s*(?:ssh|scp|sftp))\s/,
+                    '$1 -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new '
+                );
+                logInfo(`[ssh/bash/shell_read] Injected non-interactive SSH options into: ${cmdR}`);
+            }
+
             const firstTokenR = cmdR.trimStart().split(/\s/)[0];
             const isPowerShellCmd = !isSshCmdR && !pyMatchR && process.platform === 'win32'
-                && (/^(Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Out-Host|Measure-Object|Sort-Object|mkdir|md|rmdir)$/.test(firstTokenR)
-                    || /\$_|\$PSItem/.test(cmdR));
+                && (PS_CMDLETS.test(firstTokenR) || /\$_|\$PSItem/.test(cmdR));
 
             // PowerShell 5 doesn't support && — rewrite to ; for PS-routed commands.
             if (isPowerShellCmd && cmdR.includes('&&')) {
@@ -8176,16 +8259,20 @@ ${sampleHtml}
             }
 
             let child;
-            if (isSshCmdR && !isSshChainedR) {
+            if (winBashPathR) {
+                // Git Bash available: route everything (including ssh/scp/sftp) through bash
+                child = spawn(winBashPathR, ['-c', cmdR], { cwd, env: { ...process.env }, windowsHide: true });
+            } else if (pyMatchR) {
+                child = spawn(pyMatchR[1], ['-c', pyMatchR[2]], { cwd, env: { ...process.env } });
+            } else if (isSshCmdR && !isSshChainedR) {
+                // No bash: use parseSshArgs to safely tokenize and spawn ssh directly
                 const args = Agent.parseSshArgs(cmd.trim());
                 const exe = args.shift()!;
-                if (/^s[sc]p?h?$/.test(exe.split(/[\\/]/).pop() ?? exe)) {
+                if (/^(ssh|scp|sftp)$/.test(exe.split(/[\\/]/).pop() ?? exe)) {
                     args.unshift('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=accept-new');
                 }
                 logInfo(`[ssh/shell_read] Spawning without shell: ${exe} ${args.map(a => JSON.stringify(a)).join(' ')}`);
                 child = spawn(exe, args, { cwd, env: { ...process.env }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-            } else if (pyMatchR) {
-                child = spawn(pyMatchR[1], ['-c', pyMatchR[2]], { cwd, env: { ...process.env } });
             } else if (isPowerShellCmd) {
                 child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmdR], { cwd, env: { ...process.env } });
             } else {
@@ -9921,7 +10008,7 @@ ${sampleHtml}
                     // Save discovery to memory
                     if (this.memory) {
                         const memNote = `Stub redirect: stub at "${stubOrigPath}" → real template: "${stubRealFile.relPath}" (${stubRealFile.content.split('\n').length} lines).`;
-                        this.memory.addEntry(2, memNote, ['stub', 'template', 'auto-discovery']).catch(() => {});
+                        this.memory.addEntry(2, memNote, ['stub', 'template', 'auto-discovery']).catch((e) => logWarn(`[memory] background write failed: ${toErrorMessage(e)}`));
                     }
                 } else {
                     stubWarning = `⚠ STUB WARNING: "${targetRelPath}" appears to be a stub placeholder (${stubLineCount} lines, no HTML structure). ` +
@@ -10065,7 +10152,7 @@ ${sampleHtml}
                                 // Save to memory
                                 if (this.memory) {
                                     const memNote = `Column \`${colMatch[1]}\` confirmed in app/models/${mf} (checked ${new Date().toLocaleDateString()}).`;
-                                    this.memory.addEntry(2, memNote, ['schema', 'auto-discovery']).catch(() => {});
+                                    this.memory.addEntry(2, memNote, ['schema', 'auto-discovery']).catch((e) => logWarn(`[memory] background write failed: ${toErrorMessage(e)}`));
                                 }
                                 break;
                             }
@@ -10129,7 +10216,7 @@ ${sampleHtml}
                             this.memory.addEntry(2,
                                 `JS submit handler for ${entityKw || 'form'}: ${formJsHandler.relPath} ~line ${submitIdx + 1}`,
                                 ['js-handler', 'form', 'auto-discovery']
-                            ).catch(() => {});
+                            ).catch((e) => logWarn(`[memory] background write failed: ${toErrorMessage(e)}`));
                         }
                         break;
                     }
@@ -10162,7 +10249,7 @@ ${sampleHtml}
                                 this.memory.addEntry(2,
                                     `Backend POST route for ${entityKw || 'form'}: ${formBackendRoute.relPath} ~line ${postIdx + 1}`,
                                     ['route', 'form', 'auto-discovery']
-                                ).catch(() => {});
+                                ).catch((e) => logWarn(`[memory] background write failed: ${toErrorMessage(e)}`));
                             }
                             break outer;
                         }
@@ -10332,9 +10419,9 @@ ${sampleHtml}
             const memNote = `Target file for "${userMessage.slice(0, 60)}": ${targetRelPath} (${lineCount} lines, resolved ${new Date().toLocaleDateString()})`;
             this.memory.isSemanticDuplicate(targetRelPath, 0.9).then(isDupe => {
                 if (!isDupe) {
-                    this.memory!.addEntry(2, memNote, ['file-resolution', 'auto-discovery']).catch(() => {});
+                    this.memory!.addEntry(2, memNote, ['file-resolution', 'auto-discovery']).catch((e) => logWarn(`[memory] background write failed: ${toErrorMessage(e)}`));
                 }
-            }).catch(() => {});
+            }).catch((e) => logWarn(`[memory] background write failed: ${toErrorMessage(e)}`));
         }
 
         // ── 5c. Static bug scan on target file ───────────────────────────────
