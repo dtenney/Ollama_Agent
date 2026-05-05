@@ -648,6 +648,34 @@ export const TOOL_DEFINITIONS = [
     {
         type: 'function',
         function: {
+            name: 'save_skill',
+            description: 'Save a reusable helper script to .ollamapilot/skills/ so it can be reused across future sessions. Use this when you write a script that solves a recurring problem (e.g. a CSV differ, a log parser, a code search utility). Skills persist permanently and are listed at the start of each dream cycle.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    filename: { type: 'string', description: 'Filename including extension, e.g. "compare_csvs.py" or "find_large_files.sh". Use snake_case, no spaces.' },
+                    content:  { type: 'string', description: 'Full content of the script. Add a comment block at the top with: description, usage example, and parameters.' },
+                    description: { type: 'string', description: 'One-line description of what this skill does, shown in the skills list.' },
+                },
+                required: ['filename', 'content', 'description'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'list_skills',
+            description: 'List all saved skills in .ollamapilot/skills/ with their descriptions. Call this before writing a new script to avoid duplicating an existing skill.',
+            parameters: {
+                type: 'object',
+                properties: {},
+                required: [],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
             name: 'refactor_multi_file',
             description: 'Propose coordinated changes across multiple files. Use this when a refactoring affects multiple files (e.g., renaming a function used in many places, restructuring modules). Shows a preview of all changes before applying.',
             parameters: {
@@ -1210,6 +1238,13 @@ You don't need to gold-plate every interaction — but the basics (empty state, 
 
 ## Compliance/security questions
 When asked about PII, encryption, retention, or security: read the docs file first (docs/*.md), then cross-check against actual source code. Report mismatches with ⚠️.
+
+## Skills system — reuse before reinventing
+The workspace may have a .ollamapilot/skills/ directory containing reusable helper scripts saved from prior sessions.
+- Before writing any new processing, transformation, or utility script: call list_skills to check if a matching skill already exists.
+- If a skill matches the task (even partially), use it via shell_read or run_command rather than writing a new script.
+- After writing a script that solved a recurring or general problem (CSV diffing, log parsing, remote file sync, etc.): call save_skill to persist it for future sessions. Choose a descriptive filename like compare_csvs.py or sync_remote_logs.sh.
+- Skills are plain scripts — no special runtime needed. Treat them like a local tool library.
 ${projectGuidance ?? (workspaceRoot ? buildProjectTypeGuidance(workspaceRoot) : '')}${hierarchicalCtx ? `\n\n${hierarchicalCtx}` : ''}`;
 }
 
@@ -8040,6 +8075,43 @@ ${sampleHtml}
                 }
 
                 return `Logged to .ollamapilot/tasks/${taskId}/log.md [${status}]`;
+            }
+
+            // ── save_skill ─────────────────────────────────────────────────────
+            case 'save_skill': {
+                const skillFilename = String(args.filename ?? '').trim();
+                const skillContent  = String(args.content  ?? '').trim();
+                const skillDesc     = String(args.description ?? '').trim();
+                if (!skillFilename || !skillContent) { throw new Error('filename and content are required'); }
+                // Sanitize filename — no path traversal, letters/digits/underscores/hyphens/dots only
+                const safeFilename = skillFilename.replace(/[^a-zA-Z0-9._-]/g, '_');
+                const skillsDir = path.join(this.workspaceRoot, '.ollamapilot', 'skills');
+                if (!fs.existsSync(skillsDir)) { fs.mkdirSync(skillsDir, { recursive: true }); }
+                const skillPath = path.join(skillsDir, safeFilename);
+                // Validate path stays inside skills dir
+                if (!skillPath.startsWith(skillsDir + path.sep) && skillPath !== skillsDir) {
+                    throw new Error('Invalid skill filename — path traversal not allowed');
+                }
+                fs.writeFileSync(skillPath, skillContent, 'utf8');
+                logInfo(`[skill] Saved skill: ${safeFilename} — ${skillDesc}`);
+                return `Skill saved to .ollamapilot/skills/${safeFilename}`;
+            }
+
+            // ── list_skills ────────────────────────────────────────────────────
+            case 'list_skills': {
+                const skillsDir = path.join(this.workspaceRoot, '.ollamapilot', 'skills');
+                if (!fs.existsSync(skillsDir)) { return 'No skills saved yet. Use save_skill to create reusable helper scripts.'; }
+                const skills = fs.readdirSync(skillsDir).filter(f => !f.startsWith('.'));
+                if (skills.length === 0) { return 'No skills saved yet. Use save_skill to create reusable helper scripts.'; }
+                const lines = skills.map(f => {
+                    try {
+                        // Read the first comment block for the description
+                        const content = fs.readFileSync(path.join(skillsDir, f), 'utf8');
+                        const firstLines = content.split('\n').slice(0, 5).join(' ').replace(/[#\/*]/g, '').trim();
+                        return `- ${f}: ${firstLines.slice(0, 100)}`;
+                    } catch { return `- ${f}`; }
+                });
+                return `Skills in .ollamapilot/skills/:\n${lines.join('\n')}\n\nUse shell_read or run_command to execute a skill.`;
             }
 
             default:

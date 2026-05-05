@@ -997,6 +997,12 @@ function finalizeMessage() {
         retryBtn.title = 'Retry this response';
         retryBtn.textContent = '↺ Retry';
         actions.appendChild(retryBtn);
+        const thumbsUpBtn = document.createElement('button');
+        thumbsUpBtn.className = 'msg-action-btn thumbsup-btn';
+        thumbsUpBtn.title = 'This response was helpful';
+        thumbsUpBtn.textContent = '👍';
+        thumbsUpBtn.dataset.msgText = cleanRaw.slice(0, 800);
+        actions.appendChild(thumbsUpBtn);
         const feedbackBtn = document.createElement('button');
         feedbackBtn.className = 'msg-action-btn feedback-btn';
         feedbackBtn.title = 'Report issue with this response';
@@ -1432,6 +1438,18 @@ messagesEl.addEventListener('click', (e) => {
         }
     };
     setTimeout(() => document.addEventListener('click', close, true), 0);
+});
+
+// ── Thumbs-up button via event delegation ─────────────────────────────────────
+
+messagesEl.addEventListener('click', (e) => {
+    const btn = /** @type {HTMLElement} */ (e.target);
+    if (!btn.classList.contains('thumbsup-btn')) { return; }
+    const msgText = btn.dataset.msgText || '';
+    btn.classList.remove('thumbsup-btn'); // prevent double-click
+    btn.style.opacity = '1';
+    btn.title = 'Marked as helpful';
+    vscode.postMessage({ command: 'submitPositiveFeedback', msgText });
 });
 
 // ── Context bar ───────────────────────────────────────────────────────────────

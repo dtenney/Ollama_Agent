@@ -23,24 +23,31 @@ import type { SessionLogEntry } from './sessionLog';
 
 const MIN_NEW_FEEDBACK_ENTRIES = 3;
 const MIN_HOURS_BETWEEN_RUNS   = 6;
-const MAX_LOG_CHARS            = 12_000;
+const MAX_LOG_CHARS            = 16_000;
 const MAX_TASK_LOGS            = 10;
-const MAX_SESSION_LINES        = 30;
+const MAX_SESSION_LINES        = 40;
 const IN_FLIGHT_GUARD_MINUTES  = 10;
+
+/** Sessions with ≤ this many turns and no guard events are considered efficient */
+const EFFICIENT_TURN_THRESHOLD = 3;
+/** Sessions with ≥ this many turns or any guard events are considered slow */
+const SLOW_TURN_THRESHOLD      = 6;
 
 // ── Dream state ────────────────────────────────────────────────────────────────
 
 interface DreamState {
     last_run_ts: number;
     last_feedback_count: number;
+    last_positive_count: number;
 }
 
 function readDreamState(workspaceRoot: string): DreamState {
     const p = path.join(workspaceRoot, '.ollamapilot', 'dream_state.json');
     try {
-        return JSON.parse(fs.readFileSync(p, 'utf8'));
+        const s = JSON.parse(fs.readFileSync(p, 'utf8'));
+        return { last_run_ts: s.last_run_ts ?? 0, last_feedback_count: s.last_feedback_count ?? 0, last_positive_count: s.last_positive_count ?? 0 };
     } catch {
-        return { last_run_ts: 0, last_feedback_count: 0 };
+        return { last_run_ts: 0, last_feedback_count: 0, last_positive_count: 0 };
     }
 }
 
@@ -55,8 +62,9 @@ function writeDreamState(workspaceRoot: string, state: DreamState): void {
 interface GateResult {
     run: boolean;
     reason: string;
-    currentCount: number;
+    currentFeedbackCount: number;
     newFeedbackCount: number;
+    currentPositiveCount: number;
 }
 
 function shouldRunDream(workspaceRoot: string): GateResult {
@@ -66,31 +74,39 @@ function shouldRunDream(workspaceRoot: string): GateResult {
     try {
         const stat = fs.statSync(proposedPath);
         if ((Date.now() - stat.mtimeMs) < IN_FLIGHT_GUARD_MINUTES * 60 * 1000) {
-            return { run: false, reason: 'proposed_rules.md written recently — another cycle may be in flight', currentCount: 0, newFeedbackCount: 0 };
+            return { run: false, reason: 'proposed_rules.md written recently — another cycle may be in flight', currentFeedbackCount: 0, newFeedbackCount: 0, currentPositiveCount: 0 };
         }
     } catch { /* file doesn't exist — fine */ }
 
     const state = readDreamState(workspaceRoot);
     const hoursSinceLast = (Date.now() - state.last_run_ts) / 3_600_000;
 
-    // Count feedback entries
-    let currentCount = 0;
+    // Count negative feedback entries
+    let currentFeedbackCount = 0;
     const feedbackPath = path.join(workspaceRoot, '.ollamapilot', 'feedback.md');
     try {
         const content = fs.readFileSync(feedbackPath, 'utf8');
-        currentCount = (content.match(/^## \[/gm) || []).length;
+        currentFeedbackCount = (content.match(/^## \[/gm) || []).length;
     } catch { /* no feedback yet */ }
 
-    const newFeedbackCount = currentCount - state.last_feedback_count;
+    // Count positive feedback entries (used as signal, not as gate condition)
+    let currentPositiveCount = 0;
+    const positivePath = path.join(workspaceRoot, '.ollamapilot', 'positive_feedback.md');
+    try {
+        const content = fs.readFileSync(positivePath, 'utf8');
+        currentPositiveCount = (content.match(/^## \[/gm) || []).length;
+    } catch { /* no positive feedback yet */ }
+
+    const newFeedbackCount = currentFeedbackCount - state.last_feedback_count;
 
     if (newFeedbackCount < MIN_NEW_FEEDBACK_ENTRIES) {
-        return { run: false, reason: `only ${newFeedbackCount} new feedback entries (need ${MIN_NEW_FEEDBACK_ENTRIES})`, currentCount, newFeedbackCount };
+        return { run: false, reason: `only ${newFeedbackCount} new feedback entries (need ${MIN_NEW_FEEDBACK_ENTRIES})`, currentFeedbackCount, newFeedbackCount, currentPositiveCount };
     }
     if (hoursSinceLast < MIN_HOURS_BETWEEN_RUNS) {
-        return { run: false, reason: `last run was ${hoursSinceLast.toFixed(1)}h ago (need ${MIN_HOURS_BETWEEN_RUNS}h)`, currentCount, newFeedbackCount };
+        return { run: false, reason: `last run was ${hoursSinceLast.toFixed(1)}h ago (need ${MIN_HOURS_BETWEEN_RUNS}h)`, currentFeedbackCount, newFeedbackCount, currentPositiveCount };
     }
 
-    return { run: true, reason: 'conditions met', currentCount, newFeedbackCount };
+    return { run: true, reason: 'conditions met', currentFeedbackCount, newFeedbackCount, currentPositiveCount };
 }
 
 // ── Log harvesting ─────────────────────────────────────────────────────────────
@@ -99,30 +115,57 @@ function harvestLogs(workspaceRoot: string): string {
     const parts: string[] = [];
     const ollamaDir = path.join(workspaceRoot, '.ollamapilot');
 
-    // 1. Feedback entries
+    // 1. Negative feedback entries (problems the user flagged)
     try {
         const content = fs.readFileSync(path.join(ollamaDir, 'feedback.md'), 'utf8');
-        parts.push(`## Feedback entries (behaviors the user flagged as problems)\n${content.trim()}`);
+        parts.push(`## Negative feedback (behaviors the user flagged as problems)\n${content.trim()}`);
     } catch { /* no feedback file */ }
 
-    // 2. Recent session logs (last N lines of sessions.jsonl)
+    // 2. Positive feedback entries (responses the user marked helpful)
+    try {
+        const content = fs.readFileSync(path.join(ollamaDir, 'positive_feedback.md'), 'utf8');
+        parts.push(`## Positive feedback (responses the user found helpful — reinforce these patterns)\n${content.trim()}`);
+    } catch { /* no positive feedback yet */ }
+
+    // 3. Session quality analysis — bucket into efficient vs slow for contrast
     try {
         const raw = fs.readFileSync(path.join(ollamaDir, 'sessions.jsonl'), 'utf8');
         const lines = raw.trim().split('\n').filter(Boolean).slice(-MAX_SESSION_LINES);
-        const summaries = lines.map(line => {
+
+        const efficient: string[] = [];
+        const slow: string[] = [];
+        const other: string[] = [];
+
+        for (const line of lines) {
             try {
                 const e: SessionLogEntry = JSON.parse(line);
                 const guards = e.guardEvents?.map(g => g.type).join(', ') || 'none';
                 const tools  = e.toolCalls?.map(t => t.name).join(', ') || 'none';
-                return `[${e.ts?.slice(0, 10) ?? '?'}] ${e.outcome} | ${e.turns} turns | model:${e.model} | task:${e.task?.slice(0, 120)} | tools:${tools} | guards:${guards} | files:${(e.filesChanged || []).join(', ')}`;
-            } catch { return null; }
-        }).filter(Boolean);
-        if (summaries.length) {
-            parts.push(`## Recent session logs (last ${summaries.length} runs)\n${summaries.join('\n')}`);
+                const summary = `[${e.ts?.slice(0, 10) ?? '?'}] ${e.outcome} | ${e.turns} turns | task:${e.task?.slice(0, 100)} | tools:${tools} | guards:${guards}`;
+                const hasGuards = guards !== 'none';
+                const turns = e.turns ?? 0;
+                if (!hasGuards && turns <= EFFICIENT_TURN_THRESHOLD) {
+                    efficient.push(summary);
+                } else if (hasGuards || turns >= SLOW_TURN_THRESHOLD) {
+                    slow.push(summary);
+                } else {
+                    other.push(summary);
+                }
+            } catch { /* skip malformed line */ }
+        }
+
+        if (efficient.length) {
+            parts.push(`## Efficient sessions (≤${EFFICIENT_TURN_THRESHOLD} turns, no guards — what is working well)\n${efficient.join('\n')}`);
+        }
+        if (slow.length) {
+            parts.push(`## Slow/problematic sessions (≥${SLOW_TURN_THRESHOLD} turns or guards fired — what needs improvement)\n${slow.join('\n')}`);
+        }
+        if (other.length) {
+            parts.push(`## Other sessions\n${other.join('\n')}`);
         }
     } catch { /* no sessions file */ }
 
-    // 3. Recent task logs (most recently modified, capped)
+    // 4. Recent task logs (most recently modified, capped)
     try {
         const tasksDir = path.join(ollamaDir, 'tasks');
         const subdirs = fs.readdirSync(tasksDir, { withFileTypes: true })
@@ -148,40 +191,71 @@ function harvestLogs(workspaceRoot: string): string {
         }
     } catch { /* no tasks dir */ }
 
+    // 5. Existing learned rules (so the dream agent can identify stale/contradictory ones)
+    try {
+        const contextPath = path.join(ollamaDir, 'context.md');
+        const content = fs.readFileSync(contextPath, 'utf8');
+        const rulesIdx = content.indexOf('## Learned Rules');
+        if (rulesIdx !== -1) {
+            const rulesSection = content.slice(rulesIdx).slice(0, 2000).trim();
+            parts.push(`## Currently active learned rules (identify any that are stale, contradicted by new evidence, or should be removed)\n${rulesSection}`);
+        }
+    } catch { /* no context.md */ }
+
+    // 6. Existing skills (so the dream agent knows what reusable helpers exist)
+    try {
+        const skillsDir = path.join(ollamaDir, 'skills');
+        const skills = fs.readdirSync(skillsDir).filter(f => f.endsWith('.py') || f.endsWith('.sh') || f.endsWith('.js'));
+        if (skills.length) {
+            const skillList = skills.map(f => {
+                try {
+                    const header = fs.readFileSync(path.join(skillsDir, f), 'utf8').split('\n').slice(0, 3).join(' | ');
+                    return `  - ${f}: ${header.slice(0, 120)}`;
+                } catch { return `  - ${f}`; }
+            }).join('\n');
+            parts.push(`## Available skills (.ollamapilot/skills/)\n${skillList}`);
+        }
+    } catch { /* no skills dir */ }
+
     return parts.join('\n\n').slice(0, MAX_LOG_CHARS);
 }
 
 // ── Dream agent prompt ─────────────────────────────────────────────────────────
 
 const DREAM_SYSTEM_PROMPT = `\
-You are a meta-learning agent for OllamaPilot. Your ONLY job is to read interaction \
-history and extract durable behavioral rules. Do NOT write code. Do NOT use tools.
+You are a meta-learning agent for OllamaPilot. Your job is to analyze interaction history \
+and produce a set of proposed changes to the agent's behavioral rules. Do NOT write code. Do NOT use tools.
 
 You will receive:
-- feedback.md entries: behaviors the user flagged as problems (second-guessed, verbose, extra loops, etc.)
-- Session logs: tasks run, tools called, turns taken, guard events that fired
-- Task logs: step traces from multi-step agent tasks
+- Negative feedback: responses the user flagged as problematic (second-guessing, verbosity, wrong tools, etc.)
+- Positive feedback: responses the user marked as helpful — these patterns should be reinforced
+- Session quality analysis: efficient sessions (≤3 turns, no guards) vs slow/problematic ones (≥6 turns or guards fired)
+- Recent task logs: step traces from multi-step agent tasks
+- Currently active learned rules: the rules already in context.md — review for staleness or contradictions
+- Available skills: reusable helper scripts already in .ollamapilot/skills/
 
-From this evidence, produce a concise list of proposed behavioral rules for the main agent to follow \
-in future sessions. Rules must be:
-- Grounded in observed evidence (cite the pattern you saw)
-- Actionable (specific enough that an agent can comply without ambiguity)
-- Non-redundant (do not restate obvious things like "be concise")
-- Scoped to this user's actual usage patterns
-
-Output format — output ONLY rule blocks, nothing else:
+From this evidence, produce proposed rule changes. Each output block must be one of:
 
 ## Rule: <short imperative title>
-<One to three sentences. Describe what to do differently and cite the evidence. Should read \
-naturally as a rule in a context.md "Learned Rules" section.>
+<One to three sentences. Describe what the agent should do and cite the evidence. Must be \
+grounded in observed patterns — positive OR negative. Should read naturally as a rule in \
+a context.md "Learned Rules" section.>
 
-## Rule: <next title>
-...
+## Remove Rule: <exact title of existing rule to remove>
+<One sentence explaining why this rule is now stale, contradicted, or no longer needed.>
 
-If you find no actionable patterns worth proposing, output exactly:
+Rules you ADD must be:
+- Grounded in observed evidence (cite the pattern — both good and bad sessions)
+- Actionable (specific enough that an agent can comply without ambiguity)
+- Non-redundant (do not restate rules already in the active learned rules section)
+- Covering both things to STOP doing (from negative feedback) and things to KEEP doing (from positive feedback)
+
+Rules you REMOVE must match the exact title of an existing rule in the "Currently active learned rules" section.
+
+If you find no actionable changes, output exactly:
 NO_NEW_RULES
 
-Do NOT output any preamble, explanation, commentary, or text outside the ## Rule: blocks.`;
+Do NOT output any preamble, explanation, commentary, or text outside the ## Rule: and ## Remove Rule: blocks.`;
 
 // ── Dream execution ────────────────────────────────────────────────────────────
 
@@ -207,25 +281,49 @@ async function executeDream(
 
 // ── Rule parsing and writing ───────────────────────────────────────────────────
 
-function parseAndWriteRules(workspaceRoot: string, rawOutput: string): number {
+interface ParsedProposals {
+    addBlocks: string[];
+    removeBlocks: string[];  // each is "## Remove Rule: <title>\n<reason>"
+}
+
+function parseProposals(rawOutput: string): ParsedProposals {
     const trimmed = rawOutput.trim();
-    if (!trimmed || trimmed === 'NO_NEW_RULES' || !trimmed.includes('## Rule:')) {
-        return 0;
+    if (!trimmed || trimmed === 'NO_NEW_RULES') {
+        return { addBlocks: [], removeBlocks: [] };
     }
 
-    // Split on ## Rule: boundaries
-    const blocks = trimmed.split(/(?=^## Rule:)/m).map(b => b.trim()).filter(Boolean);
-    if (blocks.length === 0) { return 0; }
+    // Split on ## Rule: or ## Remove Rule: boundaries
+    const blocks = trimmed.split(/(?=^## (?:Remove )?Rule:)/m).map(b => b.trim()).filter(Boolean);
+    const addBlocks = blocks.filter(b => b.startsWith('## Rule:'));
+    const removeBlocks = blocks.filter(b => b.startsWith('## Remove Rule:'));
+    return { addBlocks, removeBlocks };
+}
+
+function parseAndWriteRules(workspaceRoot: string, rawOutput: string): { added: number; removed: number } {
+    const { addBlocks, removeBlocks } = parseProposals(rawOutput);
+    if (addBlocks.length === 0 && removeBlocks.length === 0) {
+        return { added: 0, removed: 0 };
+    }
 
     const now = new Date().toISOString();
-    const header = `<!-- dream-agent: proposed rules generated ${now} -->\n<!-- Accept with command: OllamaPilot: Accept Proposed Rules -->\n\n`;
-    const content = header + blocks.join('\n\n') + '\n';
+    const parts: string[] = [
+        `<!-- dream-agent: proposed changes generated ${now} -->`,
+        `<!-- Accept with command: OllamaPilot: Accept Proposed Rules -->`,
+        '',
+    ];
+
+    if (addBlocks.length) {
+        parts.push('<!-- NEW RULES TO ADD -->', ...addBlocks.map(b => b + '\n'));
+    }
+    if (removeBlocks.length) {
+        parts.push('<!-- EXISTING RULES TO REMOVE -->', ...removeBlocks.map(b => b + '\n'));
+    }
 
     const ollamaDir = path.join(workspaceRoot, '.ollamapilot');
     if (!fs.existsSync(ollamaDir)) { fs.mkdirSync(ollamaDir, { recursive: true }); }
-    fs.writeFileSync(path.join(ollamaDir, 'proposed_rules.md'), content, 'utf8');
+    fs.writeFileSync(path.join(ollamaDir, 'proposed_rules.md'), parts.join('\n'), 'utf8');
 
-    return blocks.length;
+    return { added: addBlocks.length, removed: removeBlocks.length };
 }
 
 // ── Public entry point ─────────────────────────────────────────────────────────
@@ -241,7 +339,7 @@ export async function runDreamCycle(
         return;
     }
 
-    logInfo(`[dream] Starting cycle (${gate.newFeedbackCount} new feedback entries, ${gate.currentCount} total)`);
+    logInfo(`[dream] Starting cycle (${gate.newFeedbackCount} new negative feedback entries, ${gate.currentPositiveCount} positive total)`);
 
     const logContent = harvestLogs(workspaceRoot);
     if (!logContent.trim()) {
@@ -258,20 +356,29 @@ export async function runDreamCycle(
         return;
     }
 
-    const ruleCount = parseAndWriteRules(workspaceRoot, rawOutput);
+    const { added, removed } = parseAndWriteRules(workspaceRoot, rawOutput);
 
     // Always update state so we don't re-run on every reload if conditions remain met
-    writeDreamState(workspaceRoot, { last_run_ts: Date.now(), last_feedback_count: gate.currentCount });
+    writeDreamState(workspaceRoot, {
+        last_run_ts: Date.now(),
+        last_feedback_count: gate.currentFeedbackCount,
+        last_positive_count: gate.currentPositiveCount,
+    });
 
-    if (ruleCount === 0) {
-        logInfo('[dream] No actionable rules extracted');
+    if (added === 0 && removed === 0) {
+        logInfo('[dream] No actionable rule changes proposed');
         return;
     }
 
-    logInfo(`[dream] Proposed ${ruleCount} rule(s) — notifying user`);
+    logInfo(`[dream] Proposed ${added} new rule(s), ${removed} removal(s) — notifying user`);
+
+    const summary = [
+        added   ? `${added} new rule${added === 1 ? '' : 's'}` : '',
+        removed ? `${removed} rule${removed === 1 ? '' : 's'} to remove` : '',
+    ].filter(Boolean).join(' and ');
 
     const choice = await vscode.window.showInformationMessage(
-        `OllamaPilot: Agent proposed ${ruleCount} new rule${ruleCount === 1 ? '' : 's'} from your feedback. Review and accept to apply.`,
+        `OllamaPilot: Agent proposed ${summary} based on your feedback. Review and accept to apply.`,
         'Review', 'Dismiss'
     );
     if (choice === 'Review') {

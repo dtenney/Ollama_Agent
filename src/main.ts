@@ -854,25 +854,59 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             }
 
             const proposed = fs.readFileSync(proposedPath, 'utf8').trim();
-            const firstRule = proposed.indexOf('## Rule:');
-            if (firstRule === -1) {
-                vscode.window.showWarningMessage('proposed_rules.md contains no ## Rule: blocks — nothing to accept.');
+            const hasAdd    = proposed.includes('## Rule:');
+            const hasRemove = proposed.includes('## Remove Rule:');
+            if (!hasAdd && !hasRemove) {
+                vscode.window.showWarningMessage('proposed_rules.md contains no ## Rule: or ## Remove Rule: blocks — nothing to accept.');
                 return;
             }
-            const rulesContent = proposed.slice(firstRule).trim();
 
-            // Merge into .ollamapilot/context.md under ## Learned Rules
+            // Parse new rules and removal requests
+            const addBlocks = proposed.split(/(?=^## Rule:)/m)
+                .map(b => b.trim()).filter(b => b.startsWith('## Rule:'));
+            const removeBlocks = proposed.split(/(?=^## Remove Rule:)/m)
+                .map(b => b.trim()).filter(b => b.startsWith('## Remove Rule:'));
+
+            // Extract just the titles from Remove Rule blocks (first line after "## Remove Rule: ")
+            const titlesToRemove = removeBlocks.map(b => {
+                const title = b.split('\n')[0].replace(/^## Remove Rule:\s*/, '').trim();
+                return title;
+            }).filter(Boolean);
+
+            // Load or create context.md
             let existing = '';
             if (fs.existsSync(contextPath)) {
                 existing = fs.readFileSync(contextPath, 'utf8');
             }
 
             const SECTION_HEADER = '## Learned Rules';
-            if (existing.includes(SECTION_HEADER)) {
-                existing = existing.trimEnd() + '\n\n' + rulesContent + '\n';
-            } else {
-                existing = (existing.trimEnd() ? existing.trimEnd() + '\n\n' : '') + SECTION_HEADER + '\n\n' + rulesContent + '\n';
+
+            // Apply removals: find and delete existing ## Rule: <title> blocks matching removal list
+            let removedCount = 0;
+            for (const title of titlesToRemove) {
+                // Match "## Rule: <title>" block up to the next "## Rule:" or end of section
+                const escapedTitle = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const ruleBlockRe = new RegExp(`## Rule: ${escapedTitle}[\\s\\S]*?(?=\\n## Rule:|\\n## |$)`, 'g');
+                const before = existing;
+                existing = existing.replace(ruleBlockRe, '');
+                if (existing !== before) {
+                    removedCount++;
+                    logInfo(`[dream] Removed rule: "${title}"`);
+                }
             }
+
+            // Apply additions: append new rules under ## Learned Rules
+            if (addBlocks.length > 0) {
+                const addContent = addBlocks.join('\n\n');
+                if (existing.includes(SECTION_HEADER)) {
+                    existing = existing.trimEnd() + '\n\n' + addContent + '\n';
+                } else {
+                    existing = (existing.trimEnd() ? existing.trimEnd() + '\n\n' : '') + SECTION_HEADER + '\n\n' + addContent + '\n';
+                }
+            }
+
+            // Clean up any double-blank lines left by removals
+            existing = existing.replace(/\n{3,}/g, '\n\n');
 
             const ollamaDir = path.join(root, '.ollamapilot');
             if (!fs.existsSync(ollamaDir)) { fs.mkdirSync(ollamaDir, { recursive: true }); }
@@ -881,10 +915,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             // Clear proposed_rules.md so stale rules can't be double-accepted
             fs.writeFileSync(proposedPath, `<!-- accepted ${new Date().toISOString()} — cleared -->\n`, 'utf8');
 
-            const ruleCount = (rulesContent.match(/^## Rule:/gm) || []).length;
-            logInfo(`[dream] Accepted ${ruleCount} rule(s) into context.md`);
+            const summary = [
+                addBlocks.length ? `${addBlocks.length} rule${addBlocks.length === 1 ? '' : 's'} added` : '',
+                removedCount     ? `${removedCount} rule${removedCount === 1 ? '' : 's'} removed` : '',
+            ].filter(Boolean).join(', ');
+            logInfo(`[dream] Accepted: ${summary}`);
             vscode.window.showInformationMessage(
-                `Accepted ${ruleCount} rule${ruleCount === 1 ? '' : 's'} — merged into .ollamapilot/context.md.`
+                `${summary} — .ollamapilot/context.md updated.`
             );
 
             // Show context.md so user can see what was added

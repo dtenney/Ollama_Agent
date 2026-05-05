@@ -77,7 +77,8 @@ type WebviewMsg =
     | { command: 'openTab' }
     | { command: 'closeTab'; tabId: string }
     | { command: 'switchTab'; tabId: string }
-    | { command: 'submitFeedback'; label: string; msgText: string };
+    | { command: 'submitFeedback'; label: string; msgText: string }
+    | { command: 'submitPositiveFeedback'; msgText: string };
 
 // ── Serialised session summary sent to the webview ───────────────────────────
 
@@ -972,6 +973,21 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         fs.appendFileSync(feedbackPath, entry, 'utf8');
                         logInfo(`[feedback] Recorded: ${raw.label}`);
                         post({ type: 'info', text: '📝 Feedback recorded — the agent will learn from this.' });
+                    }
+                    break;
+                }
+
+                // ── Positive feedback: user marks a response as helpful ───────
+                case 'submitPositiveFeedback': {
+                    if (this._currentWorkspaceRoot) {
+                        const dir = path.join(this._currentWorkspaceRoot, '.ollamapilot');
+                        if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
+                        const feedbackPath = path.join(dir, 'positive_feedback.md');
+                        const date = new Date().toISOString().slice(0, 10);
+                        const snippet = (raw.msgText || '').replace(/\n/g, ' ').slice(0, 300);
+                        const entry = `\n## [${date}] Helpful response\n> ${snippet}\n`;
+                        fs.appendFileSync(feedbackPath, entry, 'utf8');
+                        logInfo('[feedback] Positive feedback recorded');
                     }
                     break;
                 }
