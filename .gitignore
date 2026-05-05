@@ -90,10 +90,12 @@ coverage/
 qdrant_storage/
 .qdrant/
 
-# ── User-specific runtime data (personal IPs, keys, environment facts) ────────
-.ollamapilot/mcp.json
-.ollamapilot/memory.json
-.ollamapilot/context.md
+# ── Runtime operational data — belongs in the workspace under test, not here ──
+# All .ollamapilot/ runtime files are ignored. Only committed files in this
+# directory are example/template files (e.g. mcp.example.json).
+.ollamapilot/
+# Exception: keep example configs that ship with the extension
+!.ollamapilot/*.example.*
 
 # ── Internal test notes ──────────────────────────────────────────────────────
 MANUAL_TESTS.md
