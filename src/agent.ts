@@ -7887,21 +7887,22 @@ If the code looks correct, respond with exactly: OK`;
                 const rptSample: string[][] = Array.isArray(args.sample) ? args.sample : [];
 
                 const rptDate = new Date().toISOString().replace('T', ' ').slice(0, 19);
-                const statsRows = rptStats.map(s => `<tr><td>${s.label}</td><td><strong>${s.value}</strong></td></tr>`).join('\n');
+                const escHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+                const statsRows = rptStats.map(s => `<tr><td>${escHtml(String(s.label))}</td><td><strong>${escHtml(String(s.value))}</strong></td></tr>`).join('\n');
                 const sampleHtml = rptSample.length > 1
-                    ? `<h2>Sample</h2><table><thead><tr>${rptSample[0].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rptSample.slice(1).map(row => `<tr>${row.map(c => `<td>${c}</td>`).join('')}</tr>`).join('\n')}</tbody></table>`
+                    ? `<h2>Sample</h2><table><thead><tr>${rptSample[0].map(h => `<th>${escHtml(h)}</th>`).join('')}</tr></thead><tbody>${rptSample.slice(1).map(row => `<tr>${row.map(c => `<td>${escHtml(c)}</td>`).join('')}</tr>`).join('\n')}</tbody></table>`
                     : '';
 
-                const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>${rptTitle}</title>
+                const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>${escHtml(rptTitle)}</title>
 <style>body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#e0e0e0;background:#1e1e1e}
 h1{color:#4ec9b0;border-bottom:1px solid #444;padding-bottom:.5rem}h2{color:#9cdcfe;margin-top:2rem}
 table{width:100%;border-collapse:collapse;margin-top:1rem}th,td{padding:.5rem .75rem;border:1px solid #444;text-align:left}
 th{background:#2d2d2d;color:#9cdcfe}tr:nth-child(even){background:#252525}
 .summary{background:#2d2d2d;border-left:4px solid #4ec9b0;padding:1rem;border-radius:4px;margin:1rem 0}
 .meta{color:#888;font-size:.85rem}</style></head>
-<body><h1>${rptTitle}</h1>
-<p class="meta">Generated: ${rptDate} | Task: <code>${rptTaskId}</code></p>
-<div class="summary">${rptSummary}</div>
+<body><h1>${escHtml(rptTitle)}</h1>
+<p class="meta">Generated: ${rptDate} | Task: <code>${escHtml(rptTaskId)}</code></p>
+<div class="summary">${escHtml(rptSummary)}</div>
 <h2>Statistics</h2><table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>${statsRows}</tbody></table>
 ${sampleHtml}
 </body></html>`;
@@ -8168,15 +8169,9 @@ ${sampleHtml}
             const post = this.postFn;
             post({ type: 'commandStart', id: cmdId, cmd });
 
-            // Routing priority:
-            //   1. python/python3/py -c "..." → spawn python directly, preserving newlines in script body
-            //   2. PowerShell cmdlets OR mkdir/mv/cp on Windows → powershell.exe array args (safe)
-            //   3. ssh / scp / sftp → shell:true, command passed verbatim (remote paths must not be touched)
-            //   4. Everything else → collapse newlines (injection guard) then shell:true
-
             // Routing priority (checked in order — first match wins):
-            //   1. ssh/scp/sftp → shell:true verbatim. MUST be first — quoted remote payloads
-            //      can contain PS keywords that would trigger rule 3, causing the wrong executor.
+            //   0. Windows + Git Bash → bash.exe -c "cmd" for ALL commands (ssh/scp/sftp/unix)
+            //   1. ssh/scp/sftp (no bash) → parseSshArgs + direct spawn, non-interactive flags injected
             //   2. python/python3/py -c "..." → spawn python directly, newlines preserved in script body
             //   3. PowerShell cmdlets / local mkdir/mv/cp/rm on Windows → powershell.exe array args
             //   4. Everything else → collapse newlines (injection guard) then shell:true

@@ -182,11 +182,11 @@ That's it. The agent will start responding immediately.
 - **New chat button** — start a fresh conversation
 - **Welcome screen** with quick-start hints
 - **Smart scrolling** — auto-scrolls during generation, pauses when you scroll up with a ↓ button to return
-- **Feedback button** — thumbs-down (👎) on any assistant message to log negative feedback for the dream agent
+- **Feedback buttons** — thumbs-down (👎) to log negative feedback and thumbs-up (👍) to record what worked well — both feed the dream agent's self-improvement loop
 
 ### 🤖 AI Agent
 - Multi-turn **agentic tool loop** — the AI can call tools, read results, then continue reasoning
-- Supports **23 workspace tools** including web search and web fetch (see [Agent Tools](#-agent-tools) below)
+- Supports **30 workspace tools** including web search, task logging, workspace indexing, and a reusable skills library (see [Agent Tools](#-agent-tools) below)
 - **Live command output** — terminal output streams directly into the chat
 - **Diff preview** before applying file edits
 - **Confirmation dialogs** for all destructive actions (write, delete, run command)
@@ -195,11 +195,14 @@ That's it. The agent will start responding immediately.
 - **Diagnostics-aware** — checks VS Code errors/warnings after edits and self-corrects
 - **Terminal reading** — reads output from VS Code integrated terminals
 
-### 🌙 Dream Agent (Self-Healing Loop)
-- **Background consolidation** — after 3+ thumbs-down interactions or 6 hours of idle time, a background agent reads `feedback.md` and session logs and distills candidate behavioral rules
+### 🌙 Dream Agent (Self-Improving Loop)
+- **Background consolidation** — after 3+ feedback interactions or 6 hours of idle time, a background agent reads all feedback signals and distills candidate behavioral rules
+- **Dual feedback signals** — reads both thumbs-down (`feedback.md`) and thumbs-up (`positive_feedback.md`) entries to understand what to improve and what to preserve
+- **Session quality analysis** — buckets recent sessions as "efficient" (≤3 turns, no guards) or "slow" (≥6 turns or repeated guard hits) to contrast good vs. struggling patterns
 - **Proposed rules** — output written to `.ollamapilot/proposed_rules.md` with a VS Code notification prompting review
-- **Accept rules** — run `OllamaPilot: Accept Proposed Rules` (command palette) to merge the reviewed rules into `.ollamapilot/context.md` under `## Learned Rules`; stale entries in `proposed_rules.md` are cleared automatically
-- **Context pipeline** — `feedback.md` → `proposed_rules.md` → (user accepts) → `context.md` → injected into every agent system prompt
+- **Rule pruning** — the dream agent can emit `## Remove Rule: <title>` blocks to retire stale or counterproductive learned rules
+- **Accept rules** — run `OllamaPilot: Accept Proposed Rules` (command palette) to merge additions and apply removals to `.ollamapilot/context.md`; `proposed_rules.md` is cleared automatically
+- **Context pipeline** — `feedback.md` + `positive_feedback.md` → `proposed_rules.md` → (user accepts) → `context.md` → injected into every agent system prompt
 
 ### 📎 @File Mentions
 - Type `@` in the input to trigger fuzzy file search
@@ -313,16 +316,10 @@ The AI can autonomously call the following tools during a conversation:
 | Tool | Description | Confirmation Required |
 |---|---|---|
 | `workspace_summary` | Full project tree, type detection, key files, recently modified | — |
-| `read_file` | Read any file in the workspace | — |
-| `list_files` | List directory contents | — |
-| `search_files` | Search for text across all workspace files | — |
-| `create_file` | Create a new file with content | — |
 | `edit_file` | Targeted patch edit (old → new string) with VS Code diff preview | ✅ |
-| `write_file` | Overwrite a file entirely | ✅ |
-| `append_to_file` | Append text to an existing file | — |
-| `rename_file` | Rename or move a file | ✅ |
-| `delete_file` | Delete a file | ✅ |
-| `run_command` | Execute shell commands with live output streaming. On Windows, routes through Git Bash when available (full Unix tooling); falls back to PowerShell | ✅ |
+| `edit_file_at_line` | Replace lines at a specific line number range in a file | ✅ |
+| `shell_read` | Read-only shell commands (grep, find, cat, git diff, wc) — no confirmation | — |
+| `run_command` | State-changing shell commands with live output streaming. On Windows, routes through Git Bash when available; falls back to PowerShell | ✅ |
 | `memory_list` | Recall all saved project notes for this workspace | — |
 | `memory_write` | Save a persistent note (fact, decision, convention) about the project | — |
 | `memory_delete` | Delete a saved note by id | — |
@@ -332,9 +329,16 @@ The AI can autonomously call the following tools during a conversation:
 | `memory_stats` | Get memory statistics (entry count and tokens per tier) | — |
 | `read_terminal` | Read recent output from VS Code integrated terminals | — |
 | `get_diagnostics` | Get VS Code errors/warnings for a file or workspace | — |
-| `refactor_multi_file` | Coordinated changes across multiple files with preview | ✅ |
 | `web_search` | Search the web via SearXNG (requires `ollamaAgent.search.url` to be configured) | — |
 | `web_fetch` | Fetch and read any web page as plain text | — |
+| `task_checkpoint` | Save a checkpoint record (stage + offset + state JSON) so long-running scripts can resume from the last completed position | — |
+| `task_report` | Generate an HTML summary report for a completed task and open it in VS Code Simple Browser | — |
+| `workspace_index` | Scan large files and write concise summaries to `.ollamapilot/index/` — use these instead of reading raw files over ~500 lines | — |
+| `schedule_task` | Persist a script + cron-like interval to `.ollamapilot/schedules/` so it runs automatically on extension activation | — |
+| `task_log` | Append a structured step entry (started / step / validated / done / failed) to `.ollamapilot/tasks/<id>/log.md`. On `done`, also appends a bullet to `CHANGES.md` | — |
+| `save_skill` | Save a reusable helper script to `.ollamapilot/skills/<filename>` so it can be retrieved and run in future sessions | — |
+| `list_skills` | List all scripts saved in `.ollamapilot/skills/` with their descriptions | — |
+| `refactor_multi_file` | Coordinated changes across multiple files with preview | ✅ |
 
 > **Safety:** All file modifications and command executions require explicit confirmation via a VS Code dialog. Paths are validated to stay within the workspace root. Dangerous command patterns (`rm -rf /`, `mkfs`, etc.) are blocked before the confirmation dialog even appears.
 
@@ -764,10 +768,10 @@ npx vsce package
 ### Adding a new agent tool
 
 1. Add the tool definition to `TOOL_DEFINITIONS` in `src/agent.ts`
-2. Add the execution case in `Agent.executeTool()`
+2. Add the execution case in `dispatchTool()` in `src/agent.ts`
 3. Add an icon to `TOOL_ICONS` in `webview/webview.js`
-4. Update `TEXT_MODE_TOOL_INSTRUCTIONS` in `src/agent.ts`
-5. Update the system prompt in `DEFAULT_SYSTEM_PROMPT` in `src/agent.ts`
+4. Add a text-mode instruction block to `buildTextModeToolInstructions()` in `src/agent.ts`
+5. Update the system prompt in `buildSystemPrompt()` in `src/agent.ts` if the tool needs guidance
 6. Add the tool to this README's [Agent Tools](#-agent-tools) table
 
 ### Running tests

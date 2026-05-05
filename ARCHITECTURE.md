@@ -63,7 +63,7 @@ TypeScript / Node.js
 - `src/main.ts`: activate, deactivate
 - `src/markdownIngest.ts`: ingestMarkdownFiles
 - `src/mcpClient.ts`: MCPTool, MCPServer, startMCPServer, callMCPTool, getAllMCPTools, mcpToolsToOllamaFormat
-- `src/dreamAgent.ts`: DreamState, runDreamCycle — background consolidation of feedback logs into proposed behavioral rules
+- `src/dreamAgent.ts`: DreamState, runDreamCycle — background self-improvement loop; reads both positive and negative feedback, session quality buckets, skills list, and existing rules to propose additions and removals
 - `src/sessionLog.ts`: SessionLogEntry — structured per-task interaction log written by the agent and read by the dream agent
 
 ## Config
@@ -72,14 +72,29 @@ TypeScript / Node.js
 
 ## Dream Agent pipeline
 
-The self-healing feedback loop runs as a background Agent instance:
+The self-improving feedback loop runs as a background Agent instance:
 
 1. User clicks 👎 on an assistant message → entry appended to `.ollamapilot/feedback.md`
-2. After 3+ new feedback entries or 6 hours idle, `runDreamCycle()` in `src/dreamAgent.ts` fires
-3. The background agent reads `feedback.md`, per-task logs in `.ollamapilot/tasks/`, and recent session lines
-4. Output is written to `.ollamapilot/proposed_rules.md` and a VS Code notification is shown
-5. User runs `OllamaPilot: Accept Proposed Rules` → rules merged into `.ollamapilot/context.md` under `## Learned Rules`
-6. `context.md` is injected into every agent system prompt at run time
+2. User clicks 👍 on an assistant message → entry appended to `.ollamapilot/positive_feedback.md`
+3. After 3+ new feedback entries (positive or negative) or 6 hours idle, `runDreamCycle()` in `src/dreamAgent.ts` fires
+4. `harvestLogs()` collects: negative feedback, positive feedback, session quality buckets (efficient ≤3 turns / slow ≥6 turns), per-task logs, existing learned rules, and the skills list
+5. The background agent contrasts efficient vs. slow sessions and both signal types to produce candidate rules
+6. Output is written to `.ollamapilot/proposed_rules.md`:
+   - `## Rule: <title>` blocks add new rules
+   - `## Remove Rule: <title>` blocks mark stale rules for deletion
+7. A VS Code notification is shown; user runs `OllamaPilot: Accept Proposed Rules`
+8. `acceptProposedRules` merges additions and removes matching blocks from `.ollamapilot/context.md`; clears `proposed_rules.md`
+9. `context.md` is injected into every agent system prompt at run time
+
+## Skills system
+
+Reusable helper scripts persist across sessions in `.ollamapilot/skills/`:
+
+- `save_skill` tool — agent writes a script to `.ollamapilot/skills/<filename>` after solving a recurring problem
+- `list_skills` tool — returns names + first-line descriptions of all saved skills; the agent calls this before writing a new script
+- The system prompt instructs the agent to check the skills directory before writing new processing scripts
+- Dream agent includes the skills list in `harvestLogs()` so it can reference available skills when proposing rules
+- Skills are plain scripts (Python, bash, etc.) with no special runtime — executed via `shell_read` or `run_command`
 
 ## Self-talk filtering (webview)
 
@@ -88,6 +103,25 @@ The self-healing feedback loop runs as a background Agent instance:
 - Splits on `"Final Answer:"` (Gemma4 / some Qwen3 variants) — everything before the marker is treated as self-talk
 - Falls back to stripping leading paragraphs that match known self-talk prefixes (e.g. "Let me think", "Okay, so")
 - Self-talk is routed into the collapsible thinking panel alongside `<think>` blocks
+
+## Data pipeline tools
+
+Six tools support large-file and multi-stage pipeline workflows:
+
+| Tool | Output path | Purpose |
+|---|---|---|
+| `task_log` | `.ollamapilot/tasks/<id>/log.md` | Structured audit trail: started / step / validated / done / failed. On `done`, also appends a bullet to `CHANGES.md` at workspace root. |
+| `task_checkpoint` | `.ollamapilot/tasks/<id>/checkpoint.json` | Saves stage + offset + state so scripts can resume with `--resume` after failure. |
+| `task_report` | `.ollamapilot/tasks/<id>/report.html` | Generates a dark-themed HTML summary report and opens it in VS Code Simple Browser. |
+| `workspace_index` | `.ollamapilot/index/<relpath>.summary.md` | Writes a concise summary of large files (signatures for code, column headers for CSV, head+tail for others). Agent checks the index before reading raw files > ~500 lines. Summaries older than 7 days are regenerated. |
+| `schedule_task` | `.ollamapilot/schedules/<name>.json` | Persists a script path + interval. `OllamaAgentProvider` reads schedules on activation and runs overdue tasks silently in background. |
+
+System prompt rules guide the agent to:
+- Write processing scripts rather than reading large files raw
+- Use `task_log` to record every step (started → step → validated → done)
+- Use `task_checkpoint` every ~1000 rows for long-running scripts
+- Write each pipeline stage as a separate script with JSON handoff via `stage_N_summary.json`
+- Write test scripts to `.ollamapilot/tasks/<id>/test_<issue>.py` after fixing data bugs
 
 ## Shell routing (Windows)
 
