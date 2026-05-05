@@ -387,10 +387,17 @@ function renderMarkdown(text) {
         return id;
     });
 
-    // 3. Extract <think> blocks → placeholders
+    // 3. Extract <think> and <scratch_pad> blocks → placeholders
+    // <think> is used by Qwen3/DeepSeek/Hermes4; <scratch_pad> is Hermes 3 GOAP reasoning.
+    // Both are routed into the collapsible "Thought process" details block.
     /** @type {string[]} */
     const thinks = [];
     text = text.replace(/<think>([\s\S]*?)<\/think>/gi, (_, content) => {
+        const id = `\x01TH${thinks.length}\x01`;
+        thinks.push(content.trim());
+        return id;
+    });
+    text = text.replace(/<scratch_pad>([\s\S]*?)<\/scratch_pad>/gi, (_, content) => {
         const id = `\x01TH${thinks.length}\x01`;
         thinks.push(content.trim());
         return id;
@@ -726,10 +733,12 @@ function appendToken(token) {
         // in-progress (unclosed) tool block at the tail so partial JSON doesn't show.
         let display = stripToolBlocksClient(currentRaw);
 
-        // Strip inline <think>...</think> blocks (Qwen3 embeds these in content stream).
-        // Completed blocks: extract content into a collapsible <details> block above the message.
-        // In-progress (unclosed) block: hide everything from <think> to end of string.
+        // Strip inline <think>...</think> and <scratch_pad>...</scratch_pad> blocks.
+        // Qwen3 embeds <think> in content; Hermes 3 uses <scratch_pad> for GOAP reasoning.
+        // Completed blocks: extract content into the collapsible thinking block.
+        // In-progress (unclosed) block: hide everything from the open tag to end of string.
         const thinkRe = /<think>([\s\S]*?)<\/think>/gi;
+        const scratchRe = /<scratch_pad>([\s\S]*?)<\/scratch_pad>/gi;
         let thinkMatch;
         let hasCompletedThink = false;
         let collectedThinking = '';
@@ -737,9 +746,14 @@ function appendToken(token) {
             collectedThinking += thinkMatch[1];
             hasCompletedThink = true;
         }
+        while ((thinkMatch = scratchRe.exec(display)) !== null) {
+            collectedThinking += (collectedThinking ? '\n\n' : '') + thinkMatch[1];
+            hasCompletedThink = true;
+        }
         display = display.replace(/<think>[\s\S]*?<\/think>/gi, '');
+        display = display.replace(/<scratch_pad>[\s\S]*?<\/scratch_pad>/gi, '');
 
-        // Render completed thinking into the collapsed details block (once)
+        // Render collected thinking into the collapsed details block
         if (hasCompletedThink && collectedThinking.trim()) {
             let thinkEl = currentMsgEl.querySelector('.thinking-block');
             if (!thinkEl) {
@@ -758,10 +772,14 @@ function appendToken(token) {
             if (pre) { pre.textContent = collectedThinking.trim(); }
         }
 
-        // Hide any in-progress (unclosed) <think> block at the tail
+        // Hide any in-progress (unclosed) <think> or <scratch_pad> block at the tail
         const openThinkIdx = display.toLowerCase().lastIndexOf('<think>');
         if (openThinkIdx !== -1 && display.toLowerCase().indexOf('</think>', openThinkIdx) === -1) {
             display = display.slice(0, openThinkIdx);
+        }
+        const openScratchIdx = display.toLowerCase().lastIndexOf('<scratch_pad>');
+        if (openScratchIdx !== -1 && display.toLowerCase().indexOf('</scratch_pad>', openScratchIdx) === -1) {
+            display = display.slice(0, openScratchIdx);
         }
 
         // If an unclosed <tool> is still open at the end, hide everything from it onward

@@ -674,6 +674,8 @@ Any model available in Ollama works with this extension. Models known to work we
 | `qwen2.5-coder:1.5b` | ~1 GB | Fastest, good for quick tasks and low-VRAM machines |
 | `gemma3:27b` | ~17 GB | Google model; self-talk hidden automatically, "Final Answer:" prefix stripped |
 | `gemma4:26b` / `gemma4:26b-65k` | ~17 GB | Google Gemma 4; self-talk filtered; 65k context window supported |
+| `hermes3:8b` | ~5 GB | Nous Research; ChatML format; 128K context; native tool calling; GOAP `<scratch_pad>` reasoning routed to thinking panel |
+| `hermes3:70b` | ~40 GB | Same as above; larger, higher quality |
 | `llama3.1:8b` | ~5 GB | General purpose, high quality |
 | `phi3:mini` | ~2 GB | Very fast, good for simple tasks |
 | `codellama:7b` | ~4 GB | Specialized for code generation |

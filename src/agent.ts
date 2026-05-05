@@ -4427,8 +4427,10 @@ Do NOT assume you have no memory — check first.`;
                 // Strip native tool-call XML artifacts that qwen3 and similar models leak into
                 // their text content alongside proper native tool calls (e.g. stray </tool_call> tags).
                 displayContent = result.content
-                    .replace(/<think>[\s\S]*?<\/think>/g, '')  // strip full think blocks that leaked into content
-                    .replace(/<think>[\s\S]*/g, '')            // strip unclosed think blocks (model cut off mid-think)
+                    .replace(/<think>[\s\S]*?<\/think>/g, '')              // strip full think blocks that leaked into content
+                    .replace(/<think>[\s\S]*/g, '')                        // strip unclosed think blocks (model cut off mid-think)
+                    .replace(/<scratch_pad>[\s\S]*?<\/scratch_pad>/g, '')  // Hermes 3 GOAP scratchpad blocks
+                    .replace(/<scratch_pad>[\s\S]*/g, '')                  // unclosed scratchpad
                     .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')  // full tool_call blocks
                     .replace(/<\/?tool_call>/g, '')             // stray open/close tool_call tags
                     .replace(/<function_calls>[\s\S]*?<\/function_calls>/g, '')  // full function_calls blocks
@@ -4526,13 +4528,15 @@ Do NOT assume you have no memory — check first.`;
             // context bloat and think-spiral loops where the model re-reads its own reasoning.
             const historyContent = (displayContent || result.content)
                 .replace(/<think>[\s\S]*?<\/think>/gi, '')
-                .replace(/<think>[\s\S]*/gi, '') // remove any unclosed block
+                .replace(/<think>[\s\S]*/gi, '')                        // remove any unclosed think block
+                .replace(/<scratch_pad>[\s\S]*?<\/scratch_pad>/gi, '')  // Hermes 3 GOAP scratchpad
+                .replace(/<scratch_pad>[\s\S]*/gi, '')                  // unclosed scratchpad
                 .trim();
 
-            // Store clean content in history (no raw tool XML, no think blocks)
+            // Store clean content in history (no raw tool XML, no think/scratchpad blocks)
             this.history.push({
                 role: 'assistant',
-                content: historyContent || result.content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim(),
+                content: historyContent || result.content.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<scratch_pad>[\s\S]*?<\/scratch_pad>/gi, '').trim(),
                 ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
             });
 

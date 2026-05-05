@@ -78,6 +78,14 @@ const MODEL_CONTEXT_LIMITS: Record<string, number> = {
     'gemma4:12b': 65536,
     'gemma4:26b': 65536,
     'gemma4:26b-65k': 65536,
+
+    // Hermes models (Nous Research — ChatML format, 128K context)
+    'hermes3': 131072,
+    'hermes3:3b': 131072,
+    'hermes3:8b': 131072,
+    'hermes3:70b': 131072,
+    'hermes3:405b': 131072,
+    'hermes': 131072,
 };
 
 /** Default context limit for unknown models */
