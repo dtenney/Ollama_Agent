@@ -12,7 +12,7 @@ import { logInfo, logError, logWarn, toErrorMessage } from './logger';
 import { buildWorkspaceSummary, clearWorkspaceSummaryCache, SKIP_DIRS, detectPythonEnvironment, formatPythonEnvironment, PythonEnvironment } from './workspace';
 import { TieredMemoryManager } from './memoryCore';
 import { isMCPTool, parseMCPToolName, callMCPTool, mcpToolsToOllamaFormat } from './mcpClient';
-import { calculateContextStats, compactHistory, ContextLevel, resolveModelContextLimit } from './contextCalculator';
+import { calculateContextStats, compactHistory, shrinkLargeToolMessages, ContextLevel, resolveModelContextLimit } from './contextCalculator';
 import { DiffViewManager } from './diffView';
 import { CodeIndexer } from './codeIndex';
 import { MultiFileRefactoringManager, RefactoringPlan } from './multiFileRefactor';
@@ -508,6 +508,90 @@ export const TOOL_DEFINITIONS = [
     {
         type: 'function',
         function: {
+            name: 'task_checkpoint',
+            description: 'Write a checkpoint to .ollamapilot/tasks/<task_id>/checkpoint.json so a long-running script can resume from where it left off if interrupted. Call this after every major stage or every ~1000 rows processed. Also appends a step entry to the task log.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    task_id: { type: 'string', description: 'Task identifier (same as used in task_log).' },
+                    stage: { type: 'string', description: 'Name of the current stage, e.g. "compare", "fix", "verify".' },
+                    offset: { type: 'number', description: 'Row or line number processed so far (so the script can skip ahead on resume).' },
+                    state: { type: 'object', description: 'Optional: arbitrary JSON state the script needs to resume correctly (e.g. last seen key, current file path).' },
+                },
+                required: ['task_id', 'stage', 'offset'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'task_report',
+            description: 'Generate an HTML summary report for a completed or validated task and open it in VS Code Simple Browser. Use this after the validation step to give the user a human-readable view of what changed. Include stats table and a sample of rows/items affected.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    task_id: { type: 'string', description: 'Task identifier (same as used in task_log).' },
+                    title: { type: 'string', description: 'Report title, e.g. "Orders CSV Comparison — 2026-04-30".' },
+                    summary: { type: 'string', description: 'One-paragraph plain-text summary of what the task did and what it found.' },
+                    stats: { type: 'array', items: { type: 'object', properties: { label: { type: 'string' }, value: { type: 'string' } }, required: ['label', 'value'] }, description: 'Key stats to show in a summary table, e.g. [{label: "Rows processed", value: "12,450"}, {label: "Mismatches", value: "37"}].' },
+                    sample: { type: 'array', items: { type: 'array', items: { type: 'string' } }, description: 'Optional: sample rows to display as a table. First inner array = headers, remaining = data rows.' },
+                },
+                required: ['task_id', 'title', 'summary', 'stats'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'workspace_index',
+            description: 'Scan one or more file paths or globs and write a concise summary of each large file to .ollamapilot/index/<path>.summary.md. Use this BEFORE trying to read a large file — check the index first (shell_read the summary) and only call workspace_index if no fresh summary exists. Summaries are skipped if < 7 days old unless force=true.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    paths: { type: 'array', items: { type: 'string' }, description: 'File paths or glob patterns to index, relative to workspace root. E.g. ["src/**/*.ts", "data/orders.csv"].' },
+                    force: { type: 'boolean', description: 'Re-index even if a fresh summary already exists (default: false).' },
+                },
+                required: ['paths'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'schedule_task',
+            description: 'Persist a recurring task to .ollamapilot/schedules/<name>.json. The extension will automatically run the script when the interval elapses (checked on VS Code startup). Use this for validation scripts, data sync checks, or any task that should repeat on a regular basis.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    name: { type: 'string', description: 'Short snake_case name for the schedule, e.g. "daily_csv_validation".' },
+                    script_path: { type: 'string', description: 'Path to the script to run, relative to workspace root.' },
+                    interval_hours: { type: 'number', description: 'How often to run (in hours). E.g. 24 for daily, 168 for weekly.' },
+                    description: { type: 'string', description: 'Human-readable description of what this scheduled task does.' },
+                },
+                required: ['name', 'script_path', 'interval_hours', 'description'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'task_log',
+            description: 'Write a structured log entry to the task scratchpad at .ollamapilot/tasks/<task_id>/log.md. Use this to track progress, record script paths, capture output summaries, and note validation results for long-running data tasks. Call at the start of a task (status=started), after each major step (status=step), after validation (status=validated or status=failed), and when done (status=done).',
+            parameters: {
+                type: 'object',
+                properties: {
+                    task_id: { type: 'string', description: 'Short snake_case identifier for the task, e.g. "csv_compare_orders_2024". Use the same id across all log entries for a task.' },
+                    status: { type: 'string', enum: ['started', 'step', 'validated', 'failed', 'done'], description: 'Stage of the task.' },
+                    message: { type: 'string', description: 'What happened. For steps: what script was run and what it produced. For validation: the key numbers (rows processed, errors found, changes made). Max 500 chars.' },
+                    script_path: { type: 'string', description: 'Optional: path to the script written/run in this step, relative to workspace root.' },
+                },
+                required: ['task_id', 'status', 'message'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
             name: 'refactor_multi_file',
             description: 'Propose coordinated changes across multiple files. Use this when a refactoring affects multiple files (e.g., renaming a function used in many places, restructuring modules). Shows a preview of all changes before applying.',
             parameters: {
@@ -631,6 +715,19 @@ async function loadHierarchicalContext(workspaceRoot: string): Promise<string> {
             }
         } catch { /* file doesn't exist yet — skip */ }
 
+        // ── .ollamapilot/feedback.md (self-improvement: past response issues flagged by user) ──
+        // Loaded early so the agent sees its own failure patterns before generating responses.
+        // Each entry is a labeled example of what went wrong — agent should avoid repeating them.
+        const feedbackPath = path.join(workspaceRoot, '.ollamapilot', 'feedback.md');
+        try {
+            const stat = fs.statSync(feedbackPath);
+            if (stat.isFile()) {
+                const content = fs.readFileSync(feedbackPath, 'utf8').slice(0, 8_000);
+                sections.push(`### .ollamapilot/feedback.md (past response issues — avoid repeating these)\nThe following are behaviors the user has flagged as problems in previous responses. Study them and do NOT repeat these patterns:\n${content.trim()}`);
+                logInfo(`[context-files] Loaded feedback.md (${content.length} chars)`);
+            }
+        } catch { /* file doesn't exist yet — skip */ }
+
         // ── ARCHITECTURE.md (root only, loaded first as project structure reference) ──
         const archPath = path.join(workspaceRoot, 'ARCHITECTURE.md');
         try {
@@ -683,8 +780,54 @@ async function loadHierarchicalContext(workspaceRoot: string): Promise<string> {
         }
     } catch { /* never let context scanning break agent startup */ }
 
+    // ── Pending proposed rules reminder ──────────────────────────────────────
+    // If the dream agent has written proposed_rules.md with unaccepted rules,
+    // inject a one-line reminder so the agent mentions it to the user naturally.
+    try {
+        const proposedPath = path.join(workspaceRoot, '.ollamapilot', 'proposed_rules.md');
+        const stat = fs.statSync(proposedPath);
+        if (stat.isFile()) {
+            const content = fs.readFileSync(proposedPath, 'utf8');
+            const ruleCount = (content.match(/^## Rule:/gm) || []).length;
+            if (ruleCount > 0) {
+                sections.push(`### Pending: proposed behavioral rules\nThe dream agent has proposed ${ruleCount} new rule${ruleCount === 1 ? '' : 's'} based on past feedback. Remind the user once per session: "You have ${ruleCount} proposed rule${ruleCount === 1 ? '' : 's'} ready to review — run \`OllamaPilot: Accept Proposed Rules\` from the command palette to apply them."`);
+                logInfo(`[context-files] Found ${ruleCount} pending proposed rule(s)`);
+            }
+        }
+    } catch { /* no proposed_rules.md — skip */ }
+
     if (sections.length === 0) { return ''; }
     return `## Project Context Files\nThe following files define project conventions, architecture, and guidelines:\n\n${sections.join('\n\n')}`;
+}
+
+/** Snapshot the mtime (ms) of each context file currently on disk. */
+function snapshotContextFileMtimes(workspaceRoot: string): Map<string, number> {
+    const result = new Map<string, number>();
+    const roots = [workspaceRoot];
+    try {
+        const entries = fs.readdirSync(workspaceRoot, { withFileTypes: true });
+        for (const e of entries) {
+            if (e.isDirectory() && !SKIP_DIRS.has(e.name) && !e.name.startsWith('.')) {
+                roots.push(path.join(workspaceRoot, e.name));
+            }
+        }
+    } catch { /* ignore */ }
+    // Also check .ollamapilot/context.md
+    const specialFiles = [
+        path.join(workspaceRoot, '.ollamapilot', 'context.md'),
+        path.join(workspaceRoot, 'ARCHITECTURE.md'),
+        path.join(workspaceRoot, 'PLAN.md'),
+    ];
+    for (const fpath of specialFiles) {
+        try { result.set(fpath, fs.statSync(fpath).mtimeMs); } catch { /* skip */ }
+    }
+    for (const dir of roots) {
+        for (const fname of CONTEXT_FILE_NAMES) {
+            const fpath = path.join(dir, fname);
+            try { result.set(fpath, fs.statSync(fpath).mtimeMs); } catch { /* skip */ }
+        }
+    }
+    return result;
 }
 
 async function buildSystemPromptAsync(autoSaveMemory: boolean, workspaceRoot?: string): Promise<string> {
@@ -751,10 +894,11 @@ Current date: ${dateStr}, ${timeStr}.${activeLanguage ? ` Active file: ${activeF
 
 You are operating INSIDE A REAL PROJECT. Always search actual project files — never answer from training data.
 
-Memory-first sequence (mandatory for any feature/change/question):
+Lookup sequence (mandatory for any feature/change/question):
   1. memory_search("<topic>") — check what you already know
-  2. shell_read / grep — find the specific files
-  3. edit_file — make the change
+  2. shell_read locally — search the workspace for the file (Get-ChildItem / find). Local copies exist for most remote scripts/configs.
+  3. SSH to remote — only if the file is genuinely not in the local workspace
+  4. edit_file — make the change to the local copy, then scp to remote
 ${autoSaveBlock}
 Tools:
   workspace_summary  — project structure (call first on a new project)
@@ -772,20 +916,72 @@ Tools:
 ## Shell patterns
 ${buildShellExamples(detectShellEnvironment(), workspaceRoot)}
 
+## Output format — this rule applies on EVERY turn with no exceptions
+
+Every response must be exactly one of:
+  A) One short line of plain text (what you are doing and why) + one or more tool calls
+  B) A final answer with no tool calls — only when the task is fully done or you hit a genuine blocker
+
+Nothing else is valid. Specifically:
+- NEVER write a line of text and stop without calling a tool (even on turn 0, even after a failed tool)
+- NEVER announce what you are about to do without immediately doing it ("Let me find..." with no tool = wrong)
+- NEVER summarize a tool result and stop — after each result, call the NEXT tool or give the final answer
+- Do not ask a clarifying question when you can simply search or read the answer yourself — use your tools first. BUT: if answering correctly requires a decision or preference only the user can make, or if you've searched and genuinely have no relevant data (e.g. measurements, credentials, sample data the user hasn't provided), ask the user directly rather than guessing or spiraling
+- The one-line explanation must appear in visible response text, NOT inside <think> tags
+
+## Response hygiene — never do any of the following
+- NEVER add a "💭 Thought process", "## Analysis", "## Summary", or similar section header before your answer — just give the answer directly
+- NEVER use decorative emoji as bullet markers or section headers (✅, ⚡️, 💭, 🔍, etc.) unless the user explicitly requested emojis — plain text is cleaner
+- NEVER end with filler sign-offs like "Let me know how it runs", "Let me know if you need anything else", "Happy to help", "Feel free to ask"
+- NEVER build a table for a result that could be expressed in one or two sentences — tables are only useful for genuinely comparative or multi-column data
+- NEVER narrate your thinking as a visible section — internal reasoning stays internal; the user gets only the result
+
+When a tool fails: do NOT explain the failure and stop. Immediately try an alternative approach and call that tool. If SSH fails with a path error, try a different quoting strategy or scp the script. If edit_file fails, re-read the file and retry with the exact current content. Keep acting.
+
+When a CLI flag is rejected as unrecognized: NEVER guess a variant. Run "<tool> --help | grep -i <keyword>" on the machine where the tool is installed to find the correct flag from the tool's own output. Only use a flag you have seen in that output.
+
 ## Rules
-- Before each tool call, output ONE short line saying what you are doing and why (e.g. "Searching for the hashcat script in loot/" or "Creating wifi_crack directory on .29"). Then immediately call the tool. Do NOT write paragraphs — one line max, then act.
-- Never narrate without acting. Never act without a one-line explanation. The explanation and the tool call must appear together in the same response.
+- Proposed rules reminder: if the context files include a "Pending: proposed behavioral rules" section, mention it naturally at the end of your FIRST response this session only (e.g. "By the way, you have N proposed rules ready — run 'OllamaPilot: Accept Proposed Rules' from the command palette to apply them."). Do NOT repeat it in subsequent responses.
+- Use what you already know: before searching for a file path, command, or piece of information, check whether it appeared earlier in this conversation. If you already read the script path, the OPTS line, or the remote host details — use that. Do NOT re-search for things you already have.
+- Pre-action check (required before every edit_file or destructive run_command): verify internally — (1) have you read the current file/state this session? (2) does your old_string appear verbatim in that read? (3) is the change correct and complete, with no unintended side effects? Do not narrate this check — just do it silently before acting.
+- Steelman check (required before irreversible actions only): before deleting more than one file, overwriting a remote file via scp, or executing a plan touching more than 4 files — silently ask yourself: "What is the strongest reason NOT to do this?" If you cannot refute that reason in one sentence, stop and ask the user to confirm before proceeding. This check is silent and internal — do not narrate it. Only surface it if you cannot refute the objection.
 - edit_file: old_string must be copied verbatim from the file (use shell_read first). On failure: re-read, fix, retry once. Stop after second failure.
 - Never create source files with New-Item/touch — use edit_file with old_string=""
 - Local directory creation on Windows: use New-Item -ItemType Directory -Force -Path "folder/name" (NOT mkdir -p, which is Linux syntax). For remote dirs via SSH, use: ssh host "mkdir -p /remote/path" — that is fine.
+- SSH remote commands: prefer unquoted multi-word commands when possible (e.g. ssh host find /root/payloads -type d -name foo). When quoting is required, use double quotes around the remote command (e.g. ssh host "python3 -c 'script'" — double on outside, single inside). Never use a single-quoted outer wrapper on SSH commands (e.g. ssh host 'cmd') as this is not reliably handled cross-platform. For complex scripts with embedded quotes, scp the script file then execute it: scp /local/script.py host:/tmp/script.py then ssh host python3 /tmp/script.py.
+- Remote path rule — CRITICAL: remote paths in ssh/scp commands must be absolute paths that came directly from a previous shell_read/find result on the remote machine. NEVER construct a remote path by appending a local relative path or workspace-relative path to a remote base. Example of the bug to avoid: if the remote base is /srv/app/myproject and the local workspace folder is also named myproject, do NOT produce /srv/app/myproject/srv/app/myproject. The correct path is simply /srv/app/myproject. When in doubt about the remote path, run ssh host "find /srv -name <filename> -type f" to get the exact path before using it.
+- PowerShell chaining: PowerShell 5 (default on Windows) does NOT support &&. Use ; to chain commands (e.g. Get-Content file | ssh host 'cat > /tmp/f'; ssh host python3 /tmp/f). Never write cmd1 && cmd2 when the first command is a PowerShell cmdlet. Use separate run_command calls if the second command should only run on success — call run_command for the upload, check the result, then call run_command for the execution.
+- Never write Python scripts as inline one-liners via python3 -c "...". Inline scripts break with any embedded quotes or newlines. Always: (1) write the script to a local file with edit_file, (2) scp it to /tmp/ on the remote, (3) run it with ssh host python3 /tmp/script.py. This applies even for short 3-line scripts.
+- SSH failure recovery: if an SSH command exits non-zero due to path or quoting issues (e.g. "No such file or directory", exit 127, exit 255), do NOT explain and stop — immediately retry using the scp+exec pattern: write the logic to a local .py file, scp it to /tmp/ on the remote, then ssh host python3 /tmp/script.py.
 - Local file/dir operations use PowerShell cmdlets. Never use mkdir -p locally on Windows.
 - get_diagnostics: call after every edit. Also call first when user asks about errors.
 - Bug fix is complete when edit_file succeeds, not when you've described the fix
 - Never end with a list of things to verify — do the verification yourself with shell_read
+- Stop after done: once you have stated the task is complete (or copied files, archived a directory, confirmed a fix), do NOT call any further tools. One verification pass is allowed; after that, give the final answer and stop. Do not re-verify, re-list, or re-confirm what you already confirmed.
+- No second-guessing mid-response: never write "Wait...", "Actually...", "Let me reconsider...", or "I should also check..." in a response. If you have already called a tool and seen a result, use that result. Do not talk yourself into calling additional tools when the task is already done. Decide once, act, report.
+- One verification pass only: after a state-changing command (ip link set, nmcli, systemctl, etc.) succeeds (exit 0), ONE follow-up shell_read to confirm the new state is allowed and encouraged. After that one check, stop — do not loop back to re-read the same state again.
 - Docs: cross-check specific claims (numbers, class names, config values) against actual code
+- Local workspace first: before SSHing to a remote host to read or find a file, ALWAYS check the local workspace first. The user typically keeps a local copy of remote scripts and configs in the project folder (synced via scp/git). Use shell_read with Get-ChildItem or find to search locally before going remote. Only SSH to find/read a file if it's genuinely not present locally. This applies even when the task is focused on a remote machine — local copy is faster and avoids unnecessary SSH round-trips.
 - Local docs first: when asked about hardware, system config, environment, or project-specific setup — ALWAYS search the workspace for documentation files (README.md, docs/, *.md, ai_workstation/, setup*, config*) BEFORE running shell hardware queries. Use shell_read with Get-ChildItem or find to list local docs, then read them. Only fall back to shell system queries if local docs have nothing.
+- Multi-step tasks: after each tool result, if there are more steps to complete, call the NEXT tool immediately — do NOT summarize what you just found and stop. Keep going until the task is done or you hit a genuine blocker.${searchCfg.url ? `
+- web_search: answer from training data first (it's faster). Use web_search only when you hit a genuine gap: specific version numbers you're unsure of, post-cutoff releases, exact CLI flags/config syntax you're not confident about, or CVE/exploit details. Do not search for things you already know well.` : ''}
+- Large file rule (applies to ANY file type — CSV, JSON, logs, source code, config, SQL, markdown): if a file is likely over ~500 lines, NEVER read it raw into context. Instead: (1) write a script that processes or queries the file and outputs only what matters (counts, matches, diffs, summaries, samples); (2) run the script; (3) work from the output. For source code: use grep/ast tools in the script rather than catting the whole file. Use task_log to track each step, script path, and output summary.
+- Validation is mandatory: after any script that modifies files or data, you MUST run a verification step before declaring done. The verification must confirm: items processed, items changed, items with errors, and a short sample of changes. Never say "done" without running this check.
+- Script output contract: every processing or transformation script you write must print a structured summary as its last line: {"processed": N, "changed": N, "errors": N, "sample": [...]}. This makes validation easy to parse without reading output files into context.
+- Workspace index: before reading any file over ~500 lines, check if .ollamapilot/index/<relpath>.summary.md exists (shell_read it). If found and dated within 7 days, use the summary instead of the full file. If not found, call workspace_index to generate it first, then read the summary.
+- Diff-aware editing for large source files: instead of string-replacing inside a 1000+ line file directly, write a Python/Node script that (1) reads the file, (2) applies the targeted change programmatically (regex, line-range, AST), (3) outputs a unified diff to stdout with --dry-run, then (4) applies with --apply. Run dry-run first, show user the diff summary via task_log, then run with --apply. This is safer and auditable.
+- Remote execution pattern: for files that live on a remote host — write the processing script locally, scp it to the remote (run_command), execute it remotely via ssh (run_command), capture stdout summary only. Never scp large output files back — the script must summarize remotely and print JSON to stdout. Log each step with task_log including the script_path.
+- Pipeline pattern for multi-stage tasks: break long transformations into named stages (stage_1_extract.py, stage_2_transform.py, stage_3_load.py). Each stage reads from its input, writes ONLY a summary JSON to .ollamapilot/tasks/<id>/stage_N_summary.json, and prints {"stage": N, "status": "ok", "next_input": "path"} to stdout. The next stage reads that file to know its input. Call task_checkpoint between stages so work can be resumed if a stage fails.
+- Checkpoint/resume pattern: write long-running scripts with a --resume flag that reads .ollamapilot/tasks/<id>/checkpoint.json on startup and skips already-processed items (by row offset or key). Call task_checkpoint tool after every ~1000 rows or each completed stage. If a script fails mid-run, the agent can re-run with --resume to continue from the last checkpoint rather than starting over.
+- Regression tests: after fixing a data issue or validating a transformation, write a short test script to .ollamapilot/tasks/<id>/test_<issue_name>.py that asserts the problem is gone. Run it immediately. Log with task_log(validated). These accumulate as a regression suite — run them before re-processing similar data in the future.
 - Performance: when writing queries or loops, consider scale — a query that works on 100 rows may break on 100k. Prefer indexed columns in WHERE clauses, avoid N+1 queries, flag anything that scans a full table without a limit.
 - Git safety: before overwriting, moving, or deleting anything — run shell_read to check git status first. Never clobber uncommitted work.
+- Dry-run first for destructive scripts: any script that moves, renames, or deletes files MUST be run with a --dry-run flag first (print what would happen, make no changes). Show the dry-run output. Only proceed with the real run if the output looks correct. If the script doesn't support --dry-run, add a DRY_RUN=True guard that prints "Would delete: X" instead of deleting. Never skip the dry-run preview for scripts that touch more than one file.
+- Minimum change: make the smallest edit that satisfies the request. Do not refactor surrounding code unless asked. If you notice an unrelated improvement, mention it with ⚠️ but do not apply it.
+- Scope before starting: before writing any multi-step plan, state how many files and phases are needed. If more than 3 files or 2 phases, present the plan and wait for confirmation. Do not invent phases the user didn't request.
+- Plan sizing: a "review two folders for duplicates" task is 1-3 scripts. Do not add phases for edge cases the user hasn't seen yet — handle them when they arise.
+- File count ceiling: if a task requires editing more than 4 files, present a CONFIRM plan listing all files before touching any of them. Exception: sweep tasks ("all", "every", "each") may batch without per-file confirmation.
+- Progress tracking: for multi-file tasks, after each file edit output one line: ✓ filename — what changed | → Next: nextfile. This keeps you on track across long sessions.
 ${memoryGuidelines}
 ## Action vs Confirm
 - Specific narrow tasks (fix bug, rename, add route): DO IT immediately. No asking.
@@ -794,6 +990,8 @@ ${memoryGuidelines}
 - CONFIRM message format: what you found | what you'll change | what you won't touch | one question. SHORT.
 - "go ahead" is a valid trigger to build IF you already presented a plan. If not, present the plan first.
 - Scope: write code files only. Do NOT run migrations, pip install, or start servers — tell the user the exact commands to run.
+- After completing a phase or major step: give a SHORT summary (3-5 bullets max), then stop and ask "Continue?" — do NOT automatically start the next phase unless the user explicitly said to do all phases.
+- Never invent follow-on work. If the user asked to "review X for duplicates", do that and stop. Do not add phases for "what if there are 5-copy clusters" unless the user asks.
 
 ## Environment awareness — never rediscover what you already know
 Before running ANY command to discover the environment (OS version, available tools, SSH hosts, IPs, Python/Node versions, installed packages):
@@ -801,7 +999,10 @@ Before running ANY command to discover the environment (OS version, available to
 2. Check memory_search("environment tools ssh") — facts may also be in Tier 0 memory
 3. Only run shell discovery commands if the answer genuinely isn't there
 
-When you learn new environment facts not yet in context.md (new tool installed, new SSH host, new service), write them to memory Tier 0 immediately. Do NOT ask the user to "remember to add this" — just save it.
+When you learn new environment facts not yet in context.md (new tool installed, new SSH host, new service, remote host paths, hardware specs discovered via SSH):
+- Write them to memory Tier 0 immediately (do NOT ask the user to "remember to add this" — just save it)
+- ALSO append them to .ollamapilot/context.md using edit_file — this is the persistent human-readable record that survives memory resets. Use the "Known remote hosts" section if it exists, or add one.
+- For remote hosts: record the SSH connection string (e.g. "ssh user@192.168.1.100"), key directories, hardware, and running services discovered during the session.
 
 ## Deploy / apply / run tasks — environment-first protocol
 When the user asks you to apply, run, deploy, execute, or migrate something (not write code — actually *run* it):
@@ -1690,6 +1891,59 @@ function parseTextToolCalls(text: string): OllamaToolCall[] {
 }
 
 /** Remove <tool>...</tool> blocks, raw JSON tool calls, and markdown code blocks with tool calls from content. */
+/**
+ * Strip model self-talk that leaks into visible output.
+ *
+ * Some models (Gemma4, Llama3, etc.) emit a reasoning preamble before the real
+ * answer, then repeat the answer under a "Final Answer:" label. This function:
+ *  1. If "Final Answer:" appears, keeps only the text after its last occurrence.
+ *  2. Strips leading self-talk paragraphs (model narrating its own reasoning).
+ */
+function stripModelSelfTalk(text: string): string {
+    if (!text) { return text; }
+
+    // 1. "Final Answer:" splitter — keep only what follows the last marker.
+    //    Handles "Final Answer:", "**Final Answer:**", "## Final Answer", etc.
+    const finalAnswerRe = /(?:^|\n)\s*(?:\*{0,2}#{0,3}\s*)?final\s+answer[:\s*]*/gi;
+    let lastMatch: RegExpExecArray | null = null;
+    let m: RegExpExecArray | null;
+    while ((m = finalAnswerRe.exec(text)) !== null) { lastMatch = m; }
+    if (lastMatch) {
+        const afterMarker = text.slice(lastMatch.index + lastMatch[0].length).trim();
+        if (afterMarker.length > 0) { return afterMarker; }
+    }
+
+    // 2. Strip leading self-talk paragraphs (lines that are clearly internal monologue).
+    //    Only strip from the top — stop at the first paragraph that doesn't look like self-talk.
+    const selfTalkPrefixes = [
+        /^the user (?:is asking|asked|wants|needs)\b/i,
+        /^(?:from|based on) the (?:previous|earlier|above|context)\b/i,
+        /^i (?:have|already have|now have|can see|know|found)\b/i,
+        /^i (?:don['']t|do not) need to (?:call|use|run|check)\b/i,
+        /^(?:looking at|checking|reviewing) the (?:previous|earlier|above)\b/i,
+        /^(?:since|as) (?:the|i|we) (?:previous|already|can see)\b/i,
+        /^note[:\s]/i,
+    ];
+
+    const paragraphs = text.split(/\n\n+/);
+    let startIdx = 0;
+    for (let i = 0; i < paragraphs.length; i++) {
+        const para = paragraphs[i].trim();
+        const isSelfTalk = selfTalkPrefixes.some(re => re.test(para));
+        if (isSelfTalk) {
+            startIdx = i + 1;
+        } else {
+            break; // Stop at first non-self-talk paragraph
+        }
+    }
+
+    if (startIdx > 0) {
+        return paragraphs.slice(startIdx).join('\n\n').trim();
+    }
+
+    return text;
+}
+
 function stripToolBlocks(text: string): string {
     let result = text;
     
@@ -1791,11 +2045,57 @@ function stripToolBlocks(text: string): string {
     return out;
 }
 
+// ── Tool Middleware Chain ──────────────────────────────────────────────────────
+// Inspired by the Thoth hook middleware pattern: each middleware is a pair of
+// optional functions applied around every tool call.
+//   - preHook(name, args): transform or validate args before dispatch; return null to abort the call
+//   - postHook(name, args, result): transform result before it's injected into history
+//
+// Middlewares are applied in registration order (pre) and reverse order (post).
+// Register via Agent.use(middleware); unregister via Agent.unuse(id).
+//
+// Usage example (in provider.ts or extension.ts):
+//   Agent.use({ id: 'rate-limit', preHook: (name) => { trackCallRate(name); return undefined; } });
+
+export interface ToolMiddleware {
+    /** Stable identifier for unregistering. */
+    id: string;
+    /**
+     * Called before the tool is dispatched.
+     * Return a (possibly modified) args object to continue, or null to abort the tool call entirely.
+     * Return undefined/void to pass args through unchanged.
+     */
+    preHook?: (name: string, args: Record<string, unknown>) => Record<string, unknown> | null | undefined;
+    /**
+     * Called after the tool completes (even on error).
+     * Return a (possibly modified) result string, or undefined to pass through unchanged.
+     */
+    postHook?: (name: string, args: Record<string, unknown>, result: string) => string | undefined;
+}
+
 // ── Agent ─────────────────────────────────────────────────────────────────────
 
 export type PostFn = (msg: object) => void;
 
 export class Agent {
+    // ── Middleware registry ────────────────────────────────────────────────────
+    private static _middlewares: ToolMiddleware[] = [];
+
+    /** Register a tool middleware. No-op if a middleware with the same id is already registered. */
+    static use(mw: ToolMiddleware): void {
+        if (Agent._middlewares.some(m => m.id === mw.id)) { return; }
+        Agent._middlewares.push(mw);
+        logInfo(`[middleware] Registered: ${mw.id}`);
+    }
+
+    /** Unregister a middleware by id. */
+    static unuse(id: string): void {
+        const before = Agent._middlewares.length;
+        Agent._middlewares = Agent._middlewares.filter(m => m.id !== id);
+        if (Agent._middlewares.length < before) { logInfo(`[middleware] Unregistered: ${id}`); }
+    }
+
+    // ── Instance fields ────────────────────────────────────────────────────────
     private history: OllamaMessage[] = [];
     private stopRef: { stop: boolean; destroy?: () => void } = { stop: false };
     /** Current post function — set at the start of each run() call */
@@ -1828,6 +2128,17 @@ export class Agent {
         'magicoder',
         'codegemma',
         'yi-coder',
+        // Models that don't reliably produce parseable native tool calls in Ollama
+        'gemma',
+        'llama3',
+        'llama-3',
+        'llama3.1',
+        'llama3.2',
+        'llama3.3',
+        'mistral',
+        'codestral',
+        'phi3',
+        'phi4',
     ];
 
     private static isKnownTextModeModel(model: string): boolean {
@@ -1850,6 +2161,15 @@ export class Agent {
     /** Track consecutive calls to the same tool name (even with different args) */
     private lastToolName = '';
     private consecutiveSameToolCalls = 0;
+    /**
+     * Sliding window of recent tool call signatures (tool_name + args hash).
+     * Used to detect loops where the same call recurs non-consecutively
+     * (e.g. search → read → search → read → ...). Break after 4 occurrences
+     * of any single signature within the last 12 calls (Thoth pattern).
+     */
+    private _recentToolSigs: string[] = [];
+    private readonly RECENT_TOOL_SIG_WINDOW = 12;
+    private readonly RECENT_TOOL_SIG_MAX_REPEATS = 4;
     /** Total shell_read calls this run — used to cap plan-task exploration regardless of interleaving */
     /** Higher limit for action tools (rename, run_command) during batch operations */
     private readonly MAX_CONSECUTIVE_SAME_TOOL_ACTION = 20;
@@ -1871,7 +2191,8 @@ export class Agent {
 
     /** Track auto-retries for permission-asking / plan-dumping to prevent infinite loops */
     private autoRetryCount = 0;
-    private readonly MAX_AUTO_RETRIES = 5;
+    private readonly MAX_AUTO_RETRIES = 12;
+    private _readOnlyTurnsSinceLastEdit = 0; // tracks consecutive read-only turns without an edit
 
     private diffViewManager: DiffViewManager;
     private refactorManager: MultiFileRefactoringManager;
@@ -1880,6 +2201,14 @@ export class Agent {
     private _editsThisRun = 0; // count of successful file edits in current agent run
     private _lastEditedFilePath: string = ''; // path of last successfully edited file
     private _wrapUpSuggested = false; // true once the wrap-up nudge has been shown this session
+    /** Set when the model has given completion language — next clean tool result breaks the loop */
+    private _completionSignaled = false;
+    /** Anti-thrash: track auto-compaction savings ratios this run to detect futile compaction cycles */
+    private _compactionRatios: number[] = [];
+    /** Mtime-based drift detection: snapshot of context file mtimes at prompt-build time */
+    private _contextFileMtimes: Map<string, number> = new Map();
+    /** Whether the drift warning has already been injected this run */
+    private _contextDriftWarned = false;
     /** Pending inline confirmation resolver */
     private _confirmResolver: ((accepted: boolean) => void) | null = null;
     /** Timeout for pending confirmation to prevent hanging forever */
@@ -1906,6 +2235,8 @@ export class Agent {
     private _lastSystemContent: string = '';
     /** Last memory context — used by compactContext for accurate token counting */
     private _lastMemoryContext: string = '';
+    /** Last model name — used to compute context limit for getContextStats() */
+    private _lastModel: string = '';
     /** Whether preProcessEditTask() successfully injected file context this run */
     private _editContextInjected: boolean = false;
     /** When true, enforce edit_file-before-delete rule (set during merge operations) */
@@ -2006,6 +2337,13 @@ export class Agent {
     }
 
     get historyLength(): number { return this.history.length; }
+
+    /** Return current context usage stats for display. Returns null if no run has occurred. */
+    getContextStats(): { percentage: number; usedTokens: number; totalTokens: number } | null {
+        if (!this._lastModel || this.history.length === 0) { return null; }
+        const stats = calculateContextStats(this.history, this._lastSystemContent, this._lastMemoryContext, this._lastModel);
+        return { percentage: stats.usagePercentage, usedTokens: stats.totalTokens, totalTokens: stats.modelLimit };
+    }
 
     reset(): void {
         this.history = [];
@@ -2244,6 +2582,11 @@ export class Agent {
         this.resolveConfirmation(true);
     }
 
+    /** Seed persistent approvals from workspace state so the agent skips confirmation for previously approved tools. */
+    seedPersistentApprovals(toolNames: Iterable<string>): void {
+        for (const t of toolNames) { this._autoApprovedTools.add(t); }
+    }
+
     /** Request inline confirmation from the webview chat UI (with 120s timeout).
      *  @param toolName — the tool name, used for "Accept All" batch approval.
      */
@@ -2357,6 +2700,7 @@ export class Agent {
         }
 
         this._failedCommandSignatures.clear(); // Reset failed command tracking
+        this._recentToolSigs = [];             // Reset sliding-window loop detector
         // NOTE: _failedEditSignatures intentionally NOT cleared between turns — persistent across
         // the session so the same broken old_string doesn't retry indefinitely across user replies.
         this._focusedGrepInjectedThisTurn = false; // Reset focused-grep dedup flag
@@ -2371,6 +2715,9 @@ export class Agent {
             this._schemaChangeConfirmed = false;
         }
         this._exploreShellReadCount = 0;
+        this._completionSignaled = false;
+        this._compactionRatios = [];
+        this._contextDriftWarned = false;
         this._lastEditedFilePath = '';
         // Per-run session log accumulators
         this._toolCallsThisRun = [];
@@ -2382,6 +2729,46 @@ export class Agent {
         { const rc = getConfig(); this._routedCriticModel = rc.modelRoutingEnabled ? (rc.criticModel || model) : model; }
 
         logInfo(`Agent run — model: ${model}, mode: ${this.toolMode}, history: ${this.history.length}`);
+
+        // ── Auto-create git branch for modification tasks ─────────────────
+        // If the task involves file modifications and the current branch is main/master,
+        // automatically create a feature branch so changes don't land directly on main.
+        // Only fires once per session (first user turn involving edits) and only on git repos.
+        const isModificationTask = this._activeTask?.type !== 'query'
+            && /\b(add|fix|create|implement|build|update|modify|refactor|rename|move|delete|remove|change|edit|write|install|migrate|sweep|convert|replace)\b/i.test(userMessage);
+        if (isModificationTask && this.history.length <= 3) { // Only on first or second turn
+            try {
+                const gitDir = path.join(this.workspaceRoot, '.git');
+                if (fs.existsSync(gitDir)) {
+                    const currentBranch = execSync('git rev-parse --abbrev-ref HEAD', {
+                        cwd: this.workspaceRoot, timeout: 5000, encoding: 'utf8'
+                    }).trim();
+                    if (currentBranch === 'main' || currentBranch === 'master') {
+                        // Generate a branch name from the task message
+                        const branchSlug = userMessage
+                            .toLowerCase()
+                            .replace(/[^a-z0-9\s-]/g, '')
+                            .trim()
+                            .split(/\s+/)
+                            .slice(0, 5)
+                            .join('-')
+                            .slice(0, 40);
+                        const timestamp = new Date().toISOString().slice(0, 10);
+                        const newBranch = `agent/${timestamp}-${branchSlug}`;
+                        try {
+                            execSync(`git checkout -b "${newBranch}"`, {
+                                cwd: this.workspaceRoot, timeout: 10000, encoding: 'utf8'
+                            });
+                            logInfo(`[agent] Auto-created branch: ${newBranch}`);
+                            post({ type: 'token', text: `\n🌿 Working on branch \`${newBranch}\` (created from ${currentBranch}).\n\n` });
+                        } catch (branchErr) {
+                            // Branch creation failed (e.g. dirty working tree) — just warn, don't block
+                            logWarn(`[agent] Could not auto-create branch: ${toErrorMessage(branchErr)}`);
+                        }
+                    }
+                }
+            } catch { /* git not available or not a git repo — skip silently */ }
+        }
 
         // ── Deploy/apply/run preflight — environment verification ─────────
         // When the user asks to apply, run, deploy, or execute something (not write code),
@@ -2633,6 +3020,7 @@ export class Agent {
         }
 
         // Resolve actual context limit from Ollama (cached after first call)
+        this._lastModel = model;
         await resolveModelContextLimit(model);
 
         // ── Explicit "read FILE and tell me" pre-inject ───────────────────────
@@ -3131,6 +3519,11 @@ export class Agent {
                 ? buildSmallModelSystemPrompt(this.workspaceRoot)
                 : await buildSystemPromptAsync(cfg.autoSaveMemory, this.workspaceRoot));
 
+        // Snapshot context file mtimes for drift detection (checked every 5 turns)
+        if (this.workspaceRoot) {
+            this._contextFileMtimes = snapshotContextFileMtimes(this.workspaceRoot);
+        }
+
         // ── Security scan addendum ───────────────────────────────────────────────
         if (isSecurityScan) {
             baseSystemContent += `\n\n## SECURITY AUDIT MODE
@@ -3496,6 +3889,25 @@ Do NOT assume you have no memory — check first.`;
             this._focusedGrepInjectedThisTurn = false; // Reset per-turn to prevent double-injection
             this._recentSearchResultIds.clear();        // Reset per-turn search_hit tracking
 
+            // Mtime-based drift detection: check every 5 turns if context files changed on disk
+            if (turn > 0 && turn % 5 === 0 && !this._contextDriftWarned && this.workspaceRoot && this._contextFileMtimes.size > 0) {
+                const changedFiles: string[] = [];
+                for (const [fpath, originalMtime] of this._contextFileMtimes) {
+                    try {
+                        const currentMtime = fs.statSync(fpath).mtimeMs;
+                        if (currentMtime !== originalMtime) {
+                            changedFiles.push(path.relative(this.workspaceRoot, fpath).replace(/\\/g, '/'));
+                        }
+                    } catch { /* file deleted — also a change */ changedFiles.push(path.relative(this.workspaceRoot, fpath).replace(/\\/g, '/')); }
+                }
+                if (changedFiles.length > 0) {
+                    this._contextDriftWarned = true;
+                    logWarn(`[context-drift] Context files changed during session: ${changedFiles.join(', ')}`);
+                    const driftMsg = `[SYSTEM: The following project context files have changed on disk since this session started: ${changedFiles.join(', ')}. The project conventions or architecture may have been updated. Continue using the conventions you were given, but be aware that new rules may apply. The user may need to start a new session to pick up the changes.]`;
+                    this.history.push({ role: 'user', content: driftMsg });
+                }
+            }
+
             // Build system content only when toolMode changes
             const isTextMode = this.toolMode === 'text';
             if (this.toolMode !== lastToolMode) {
@@ -3605,6 +4017,13 @@ Do NOT assume you have no memory — check first.`;
                     const oldMessageCount = this.history.length;
                     const historyBeforeCompact = this.history.slice(); // shallow copy for dropped-message extraction
 
+                    // Step 1: Proportional shrink — trim the largest tool-result messages first
+                    // so compactHistory (oldest-first drop) can retain more recent turns.
+                    const targetTokens = Math.floor((contextStats.modelLimit * 50) / 100)
+                        - contextStats.systemPromptTokens - contextStats.memoryTokens;
+                    this.history = shrinkLargeToolMessages(this.history, targetTokens);
+
+                    // Step 2: Drop oldest messages until we reach the token target
                     this.history = compactHistory(
                         this.history,
                         50, // Target 50% usage after compaction
@@ -3615,6 +4034,22 @@ Do NOT assume you have no memory — check first.`;
 
                     // Calculate removed count AFTER compaction
                     const messagesRemoved = oldMessageCount - this.history.length;
+
+                    // Anti-thrash: track savings ratio; if compaction has happened 3 times
+                    // with < 10% savings each time, the context is too dense to shrink — stop cycling.
+                    const savingsRatio = oldMessageCount > 0 ? messagesRemoved / oldMessageCount : 0;
+                    this._compactionRatios.push(savingsRatio);
+                    const THRASH_MIN_SAVINGS = 0.10;
+                    const THRASH_WINDOW = 3;
+                    if (this._compactionRatios.length >= THRASH_WINDOW) {
+                        const recentRatios = this._compactionRatios.slice(-THRASH_WINDOW);
+                        const allBelowThreshold = recentRatios.every(r => r < THRASH_MIN_SAVINGS);
+                        if (allBelowThreshold) {
+                            logWarn(`[context] Anti-thrash: ${THRASH_WINDOW} compactions all saved < ${(THRASH_MIN_SAVINGS * 100).toFixed(0)}% — context cannot be meaningfully shrunk. Stopping loop to avoid infinite compaction cycle.`);
+                            post({ type: 'error', text: `**Context compaction stuck** — the conversation history cannot be meaningfully reduced (${THRASH_WINDOW} attempts all saved < ${(THRASH_MIN_SAVINGS * 100).toFixed(0)}%). Please start a new conversation or use /compact to manually summarize.` });
+                            break; // Break the outer turn loop
+                        }
+                    }
 
                     // Save structured facts from dropped messages to Tier 2 memory so discoveries
                     // survive even silent auto-compaction. Use the same LLM-based structured
@@ -3804,13 +4239,78 @@ Do NOT assume you have no memory — check first.`;
 
             let result: StreamResult;
             try {
+                // Strip leaked tool-call XML artifacts and model bad-habit headers from
+                // streamed tokens before they reach the webview. Uses a line buffer so
+                // full lines can be evaluated before display — this is the only reliable
+                // way to suppress patterns like "💭 Thought process\n" that arrive
+                // token-by-token and would otherwise appear before a newline is seen.
+                let _streamLineBuf = '';
+
+                // Safety threshold: if a line hasn't ended after 400 chars, flush it as-is
+                const MAX_LINE_BUF = 400;
+
+                const stripXmlArtifacts = (s: string): string => s
+                    // Strip THINK_START/THINK_END sentinels (legacy — thinking now suppressed in ollamaClient)
+                    .replace(/\x01THINK_(?:START|END)\x01/g, '')
+                    .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
+                    .replace(/<\/?tool_call>/g, '')
+                    .replace(/<function_calls>[\s\S]*?<\/function_calls>/g, '')
+                    .replace(/<\/?function_calls>/g, '')
+                    .replace(/<invoke>[\s\S]*?<\/invoke>/g, '')
+                    .replace(/<\/?invoke>/g, '')
+                    .replace(/<parameter[^>]*>[\s\S]*?<\/parameter>/g, '')
+                    .replace(/<\/parameter>/g, '')
+                    .replace(/<\/?function>/g, '');
+
+                // Only suppress specific single-line artifacts — never block-suppress multi-line content
+                // as that risks swallowing real answers. The system prompt handles multi-line thought narration.
+                const SUPPRESS_SINGLE_LINE_RE = /^(?:[💭🤔🧠✨]\s*(?:Thought\s+process|Thinking|Analysis|My\s+analysis|Reasoning)\s*[:\n]?|#{1,3}\s*(?:Thought\s+process|Thinking|Analysis|Summary|My\s+analysis|Reasoning)\s*$|(?:Let me know (?:how it runs|if you need|if there)|Happy to help|Feel free to ask|Hope (?:this|that) helps)[.!]?)\s*$/i;
+
+                const filterCompleteLine = (line: string): string =>
+                    SUPPRESS_SINGLE_LINE_RE.test(line.trim()) ? '' : line;
+
+                // Does the current buffer look like the start of a suppressible single-line header?
+                const SUSPECT_PREFIX_RE = /^(?:[💭🤔🧠✨]|#{1,3}\s*(?:Thought|Think|Analysis|Summary|Reasoning)|Let me know|Happy to help|Feel free to ask|Hope (?:this|that) helps)/i;
+
+                const streamFilter = (token: string): string => {
+                    const t = stripXmlArtifacts(token);
+                    if (!t) { return ''; }
+
+                    _streamLineBuf += t;
+
+                    // Fast path: if not in a suppressed block and buffer doesn't look suspicious, emit immediately.
+                    if (!SUSPECT_PREFIX_RE.test(_streamLineBuf)) {
+                        const out = _streamLineBuf;
+                        _streamLineBuf = '';
+                        return out;
+                    }
+
+                    // Hold until we have a complete line or hit the safety limit
+                    if (!_streamLineBuf.includes('\n') && _streamLineBuf.length < MAX_LINE_BUF) {
+                        return ''; // still accumulating
+                    }
+
+                    // Process complete lines
+                    const parts = _streamLineBuf.split('\n');
+                    _streamLineBuf = parts.pop() ?? '';
+                    const filtered = parts.map(filterCompleteLine);
+                    const out = filtered.join('\n');
+                    return out || (parts.length > 0 ? '\n' : '');
+                };
                 result = await streamChatRequest(
                     effectiveModel,
                     [{ role: 'system', content: systemContent }, ...this.history, ...(memoryNudgeMsg ? [memoryNudgeMsg] : [])],
                     tools,
-                    (token) => post({ type: 'token', text: token }),
+                    (token) => { const t = streamFilter(token); if (t) { post({ type: 'token', text: t }); } },
                     this.stopRef
                 );
+                // Flush any remaining buffered content (e.g. last line with no trailing \n)
+                // Apply the same suppression logic before flushing.
+                if (_streamLineBuf) {
+                    const remaining = filterCompleteLine(_streamLineBuf);
+                    if (remaining) { post({ type: 'token', text: remaining }); }
+                    _streamLineBuf = '';
+                }
             } catch (err) {
                 // ── Auto-switch to text-mode on first 400 ─────────────────────
                 if (err instanceof ToolsNotSupportedError && this.toolMode === 'native') {
@@ -3828,6 +4328,23 @@ Do NOT assume you have no memory — check first.`;
                 }
 
                 const msg = toErrorMessage(err);
+
+                // ── Auto-retry on timeout (model still loading) ───────────────
+                // Ollama times out if the model isn't loaded yet. Wait 5s and retry
+                // once before surfacing the error, so the user doesn't have to resend.
+                if (/timed out/i.test(msg) && turn === 0 && this.autoRetryCount < 1) {
+                    this.autoRetryCount++;
+                    logWarn(`[agent] Request timed out on turn 0 — model may be loading, retrying in 5s (attempt ${this.autoRetryCount})`);
+                    post({ type: 'streamEnd' });
+                    post({ type: 'removeLastAssistant' });
+                    post({ type: 'token', text: `⏱ Model is loading, retrying in 5s…` });
+                    await new Promise(r => setTimeout(r, 5000));
+                    post({ type: 'streamEnd' });
+                    post({ type: 'removeLastAssistant' });
+                    turn--; // retry this turn
+                    continue;
+                }
+
                 logError(`Agent stream error (turn ${turn}): ${msg}`);
                 post({ type: 'error', text: this.friendlyError(msg) });
                 loopExhausted = false;
@@ -3854,8 +4371,17 @@ Do NOT assume you have no memory — check first.`;
                 // Strip native tool-call XML artifacts that qwen3 and similar models leak into
                 // their text content alongside proper native tool calls (e.g. stray </tool_call> tags).
                 displayContent = result.content
-                    .replace(/<\/?tool_call>/g, '')
-                    .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
+                    .replace(/<think>[\s\S]*?<\/think>/g, '')  // strip full think blocks that leaked into content
+                    .replace(/<think>[\s\S]*/g, '')            // strip unclosed think blocks (model cut off mid-think)
+                    .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')  // full tool_call blocks
+                    .replace(/<\/?tool_call>/g, '')             // stray open/close tool_call tags
+                    .replace(/<function_calls>[\s\S]*?<\/function_calls>/g, '')  // full function_calls blocks
+                    .replace(/<\/?function_calls>/g, '')        // stray function_calls tags
+                    .replace(/<invoke>[\s\S]*?<\/invoke>/g, '') // full invoke blocks
+                    .replace(/<\/?invoke>/g, '')                // stray invoke tags
+                    .replace(/<parameter[^>]*>[\s\S]*?<\/parameter>/g, '')  // full parameter blocks
+                    .replace(/<\/parameter>/g, '')              // stray closing parameter tags
+                    .replace(/<\/?function>/g, '')              // stray function open/close tags
                     .replace(/^\s*\n/gm, '\n')  // collapse blank lines left by removal
                     .trim();
 
@@ -3918,10 +4444,39 @@ Do NOT assume you have no memory — check first.`;
                 }
             }
 
-            // Store clean content in history (no raw tool XML)
+            // ── Response hygiene: strip model bad habits before display ──────────
+            // Remove "💭 Thought process" / "## Analysis" / "## Summary" section headers
+            // that some models emit even when instructed not to narrate reasoning.
+            displayContent = displayContent
+                // Strip only the single header line for emoji-headed thought sections (never the body)
+                .replace(/^[💭🤔🧠✨]\s*(?:Thought\s+process|Thinking|Analysis|My\s+analysis|Reasoning)[^\n]*\n/gim, '')
+                // Strip plain markdown ## Thought process / ## Analysis section header lines only
+                .replace(/^#{1,3}\s*(?:Thought\s+process|Thinking|Analysis|Summary|My\s+analysis|Reasoning)\s*\n/gim, '')
+                // Strip filler sign-off lines at end of response
+                .replace(/\n+(?:Let me know (?:how it runs|if you need|if there['']s anything)|Happy to help|Feel free to ask|Hope (?:this|that) helps)[.!]?\s*$/gi, '')
+                // Collapse multiple blank lines left by removal
+                .replace(/\n{3,}/g, '\n\n')
+                .trim();
+
+            // Strip model self-talk: internal monologue that leaks into visible output.
+            // Gemma4 (and similar) write reasoning narration ("The user is asking...",
+            // "I have the answer...") followed by "Final Answer:" and a duplicate of the
+            // real response. Keep only the text after the last "Final Answer:" marker.
+            displayContent = stripModelSelfTalk(displayContent);
+
+            // Strip inline <think>...</think> blocks from history content.
+            // Qwen3 embeds its chain-of-thought in content rather than the structured thinking field.
+            // These blocks can be thousands of tokens each — keeping them in history causes rapid
+            // context bloat and think-spiral loops where the model re-reads its own reasoning.
+            const historyContent = (displayContent || result.content)
+                .replace(/<think>[\s\S]*?<\/think>/gi, '')
+                .replace(/<think>[\s\S]*/gi, '') // remove any unclosed block
+                .trim();
+
+            // Store clean content in history (no raw tool XML, no think blocks)
             this.history.push({
                 role: 'assistant',
-                content: displayContent || result.content,
+                content: historyContent || result.content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim(),
                 ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
             });
 
@@ -3930,121 +4485,52 @@ Do NOT assume you have no memory — check first.`;
                 // qwen3 "thinking" models sometimes complete the <think> block but then emit nothing —
                 // no content, no tool calls. The stream resolves with content='' toolCalls=[].
                 // Detect this and retry with a nudge to continue from where thinking left off.
-                const isThinkStall = !result.content && !displayContent && turn > 0 && this.autoRetryCount < this.MAX_AUTO_RETRIES;
+                // Fire on any turn — turn 0 stalls happen when user sends a short affirmative ("yes", "go ahead")
+                // and the model thinks but emits nothing. Previously only fired at turn > 0 which missed this case.
+                // Also treat whitespace-only or artifact-only content as a stall — the model sometimes
+                // emits a stray </tool_call> tag or a single newline after thinking, leaving displayContent
+                // non-empty but meaningless. Trim both to catch this.
+                // Strip leaked think blocks from result.content for stall detection
+                const strippedContent = result.content
+                    .replace(/<think>[\s\S]*?<\/think>/g, '')
+                    .replace(/<think>[\s\S]*/g, '')
+                    .trim();
+                const isThinkStall = !toolCalls.length
+                    && !strippedContent
+                    && !displayContent.trim()
+                    && this.autoRetryCount < this.MAX_AUTO_RETRIES;
                 if (isThinkStall) {
                     this.autoRetryCount++;
                     logInfo(`[agent] Auto-retry ${this.autoRetryCount}: think-stall — model completed thinking but emitted no content or tool calls (turn ${turn})`);
                     this.history.pop(); // remove the empty assistant message
-                    this.history.push({
-                        role: 'user',
-                        content: `[SYSTEM: Your response was empty. You were in the middle of exploring the codebase. Continue where you left off — call the next tool now. Do NOT explain or summarize. Just call the tool.]`
-                    });
+                    // On repeated think-stalls, inject the last think content AND scan recent
+                    // history for paths/facts the agent already found, to break search loops.
+                    const thinkSnippet = result.thinking ? result.thinking.trim().slice(-300) : '';
+                    // Extract recently seen file paths and remote paths from history
+                    const recentHistory = this.history.slice(-10).map(h => typeof h.content === 'string' ? h.content : '').join('\n');
+                    const knownPaths = [...new Set((recentHistory.match(/\/[\w./~-]{4,}/g) ?? []).filter(p => p.length > 5))].slice(0, 5);
+                    const knownPathsHint = knownPaths.length > 0 ? ` These paths are already known from this conversation: ${knownPaths.join(', ')}. Use them directly — do NOT search again.` : '';
+                    const nudgeContent = this.autoRetryCount <= 1
+                        ? `[SYSTEM: Your response was empty — you thought but did not act. Call the next tool NOW. No explanation needed.${knownPathsHint}]`
+                        : thinkSnippet
+                            ? `[SYSTEM: You have stalled ${this.autoRetryCount} times. Your last thought was: "${thinkSnippet}". Stop thinking and execute that plan — call the tool RIGHT NOW.${knownPathsHint}]`
+                            : `[SYSTEM: You have stalled ${this.autoRetryCount} times without calling any tool. CALL A TOOL NOW. Pick the most logical next step and execute it immediately.${knownPathsHint}]`;
+                    this.history.push({ role: 'user', content: nudgeContent });
                     post({ type: 'removeLastAssistant' });
                     continue;
                 }
 
-                // ── Auto-retry: detect "asking permission" or verbose plan without action ──
+                // ── Universal stall rule ─────────────────────────────────────────────────
+                // If no tool was called and the response is not a legitimate stop, always retry.
+                // Legitimate stops: task completion, explain query already answered, plan task asking for confirm.
                 if (turn < MAX_TURNS - 1 && this.autoRetryCount < this.MAX_AUTO_RETRIES) {
-                    const resp = (displayContent || result.content).toLowerCase();
-                    const lastMsg = (userMessage).toLowerCase();
-                    // Detect a correct EXPLORE→CONFIRM stop: model explored with tools (turn > 0),
-                    // produced a structured plan (has ## headers or numbered list), and asked a
-                    // single closing question. This is intentional — do NOT retry it.
-                    // userWantsAction: message must be imperative (not a question) and use strong action verbs
-                    // Exclude: questions (?), explain/describe/show/tell/what/why/how requests
-                    const isQuestion = /\?/.test(userMessage) || /^\s*(what|why|how|can you|could you|would you|do you|is|are|explain|describe|show me|tell me|what is|what are)\b/i.test(userMessage);
-                    const userWantsAction = !isQuestion && !isExplainQuery && /\b(find|search|look|locate|show|implement|apply|execute|move|rename|reorganize|restructure|create|build|migrate|edit|update|fix|modify|refactor|rewrite|convert|transform|add|remove|delete|deploy|install|split|separate|extract|merge|track|store|record|save|run the|do the|do it|make the|need to|we need|want to)\b/.test(lastMsg);
-                    // isConfirmStop: model explored with tools, built a plan, and asked a single closing question.
-                    // Only valid as a stop if: (a) model has actually done edits (not just reads), OR
-                    // (b) the task is not a pure action task (e.g. it's a review/explain).
-                    // Prevents the pattern: read 3 files → output plan + questions → wait for user.
-                    const hasEditsThisSession = this._lastEditedFilePath !== '';
-                    const isConfirmStop = turn > 0
-                        && /(?:##|\n\d+\.\s|\*\*).{20,}/i.test(resp)   // has plan structure
-                        && /does this match|sound right|shall i proceed|should i proceed|want me to proceed|like me to proceed|would you like me to (start|begin|implement|proceed)|ready to (implement|proceed|start|begin)|should we proceed|want to proceed/i.test(resp)
-                        && (!userWantsAction || hasEditsThisSession || isReviewTask);
-                    const isAskingPermission = !isConfirmStop
-                        && /would you like me to|shall i|do you want me to|want me to proceed|like me to continue|is there anything specific|does this match what you|one question:|should (the endpoint|i include|we include|i proceed|i register|i add|i update)|which fields should|should i proceed|shall i proceed|will you handle|handle that separately|or will you|do you want me|want me to also/i.test(resp);
-                    const hasCodeBlockButNoTool = /```/.test(resp) && !toolCalls.length;
-                    // Detect validation stops: model reviewed the code and decided not to act
-                    const isValidationStop = this._editContextInjected && !toolCalls.length
-                        && /already (exists?|present|there|defined|implemented)|redundant|duplicate|doesn't exist|does not exist|no mention|unresolved|missing model|can't find|cannot find|stop here|won't (proceed|make|add)|will stop|should stop|no need to add|there is no need|provide more details/i.test(resp);
-                    // Don't treat a correct answer to a read/explain task as a "verbose plan dump".
-                    // Only fire on turn 0 — after the model has called tools and is giving a final answer,
-                    // a text-only response is the conclusion, not a plan dump.
-                    const isVerbosePlanDump = !toolCalls.length && userWantsAction && !isExplainQuery && !isValidationStop
-                        && turn === 0
-                        && (resp.length > 400 || hasCodeBlockButNoTool);
-                    // Model asked user to provide file/content instead of reading it itself
-                    // But NOT when it's a validation stop asking for clarification on what to change
-                    const isAskingUserToProvide = !isValidationStop && /please provide|provide the (contents|file|code|text)|share the (contents|file|code)|paste the|send me the|provide me with/i.test(resp);
-
-                    // Sweep task: model gave a no-tool completion summary (hallucinated from history)
-                    // Detect: sweep task + no tools called + response looks like a prior-session summary
-                    const isSweepHallucination = isSweepTask && !toolCalls.length && turn === 0
-                        && /updated\s+\d+\s+routes?|added\s+error\s+handling|routes?:\s*\[/i.test(resp);
-                    if (isSweepHallucination) {
-                        this.autoRetryCount++;
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: sweep task hallucinated completion from history — forcing fresh file read`);
-                        this.history.pop();
-                        this.history.push({
-                            role: 'user',
-                            content: `[SYSTEM: You reported completing the task but you have NOT called any tools in this session. You must actually READ the file and make the edits. Start by calling shell_read to read the current state of the file NOW. Do not rely on prior conversation history — the file may have changed.]`
-                        });
-                        post({ type: 'removeLastAssistant' });
-                        continue;
-                    }
-
-                    // Fire on: (1) action query asking permission, or (2) model already called tools (turn>0) and now stalls with a question
-                    if (isAskingPermission && (userWantsAction || turn > 0)) {
-                        this.autoRetryCount++;
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model asked for permission instead of acting (turn ${turn})`);
-                        // Replace the assistant's response with a nudge
-                        this.history.pop(); // remove the assistant message we just pushed
-                        this.history.push({
-                            role: 'user',
-                            content: turn > 0
-                                ? `[SYSTEM: You already read the file(s). Do NOT ask the user a follow-up question — just answer using the information you already have. If you need to check more files, call shell_read now. Original question: "${userMessage}"]`
-                                : '[SYSTEM: You asked for permission but the user already told you to do it. Do NOT ask — start calling tools NOW. Call the first tool immediately.]'
-                        });
-                        post({ type: 'removeLastAssistant' });
-                        continue; // retry this turn
-                    }
-
-                    if (isVerbosePlanDump) {
-                        this.autoRetryCount++;
-                        const fencedToolInPlan = /```[\s\S]*?\b(edit_file|edit_file_at_line|shell_read|run_command)\b[\s\S]*?```/.test(resp);
-                        const planNudge = fencedToolInPlan
-                            ? '[SYSTEM: You wrote a tool call inside a markdown code block (```). That does NOT execute the tool. You must output a raw <tool>{"name":"...","arguments":{...}}</tool> XML block — no backticks, no code fences, no explanation. Output ONLY the <tool> block now.]'
-                            : (this._isSmallModel && this._editContextInjected)
-                                ? '[SYSTEM: Stop explaining. The file content is in [PRE-LOADED CONTEXT] above. Call edit_file_at_line NOW with the line numbers shown. Output ONLY the <tool> block — no text before or after it.]'
-                                : '[SYSTEM: You output a plan as text instead of calling tools. Do NOT explain what you will do — CALL THE FIRST TOOL NOW. Output only a <tool> block, nothing else.]';
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model ${fencedToolInPlan ? 'used fenced code block for tool call' : 'dumped a verbose plan'} (${resp.length} chars) without calling tools (turn ${turn})`);
-                        this.history.pop();
-                        this.history.push({
-                            role: 'user',
-                            content: planNudge,
-                        });
-                        post({ type: 'removeLastAssistant' });
-                        continue;
-                    }
-
-                    // Third path: model summarized tool results and asked what to do next / offered help
-                    // instead of continuing to answer (applies regardless of userWantsAction — explain/show/how queries too)
-                    const isOfferingHelp = /\b(is there anything (else|more)|anything else i can|feel free to ask|let me know if|how can i (further )?help|do you (have|want|need)|would you like|shall i|next steps?)\b/i.test(resp);
-                    // Model described what it would do instead of doing it (planning dump after reading a file)
-                    // Does NOT require userWantsAction — even for "which X has Y?" queries, planning instead of checking is wrong
-                    // Don't treat a response as "planning instead of doing" if:
-                    // (a) the response contains a <tool> block that failed to parse (parser failure, not model failure)
-                    // (b) the user explicitly asked for a plan/document/summary
-                    const userAskedForPlan = /\b(plan|design|document|write.*doc|create.*file|save.*plan|discuss|proposal|how.*can|is it possible)\b/i.test(this._currentTaskMessage);
+                    const resp = (displayContent.trim() || strippedContent).toLowerCase();
+                    const lastMsg = userMessage.toLowerCase();
                     const responseHasToolBlock = result.content.includes('<tool>');
 
-                    // If the model output a <tool> block but it failed to parse (toolCalls is empty),
-                    // give it targeted feedback with the raw block so it can correct the JSON.
-                    if (responseHasToolBlock && !toolCalls.length && isTextMode && this.autoRetryCount < this.MAX_AUTO_RETRIES) {
+                    // ── <tool> block present but failed to parse — give corrective feedback ──
+                    if (responseHasToolBlock && !toolCalls.length && isTextMode) {
                         this.autoRetryCount++;
-                        // Extract the raw <tool> block for feedback
                         const rawToolMatch = result.content.match(/<tool>([\s\S]*?)(?:<\/tool>|<tool>|$)/);
                         const rawBlock = rawToolMatch ? rawToolMatch[1].slice(0, 400).trim() : '(could not extract)';
                         logWarn(`[agent] Auto-retry ${this.autoRetryCount}: <tool> block present but failed to parse — feeding back raw JSON`);
@@ -4057,223 +4543,134 @@ Do NOT assume you have no memory — check first.`;
                         continue;
                     }
 
-                    // Detect task-completion responses — model correctly concluded nothing more needed
-                    // Also detect completion when edits were already made this run and model produces a summary (even with code blocks or "fix" language)
-                    const editsAlreadyMade = this._editsThisRun > 0 && !toolCalls.length && turn > 0;
-                    const isTaskCompletion = editsAlreadyMade
-                        || /\b(no (further |more |additional |other )?changes? (are |is )?(needed|required|necessary)|no (further |more )?edits? (are |is )?(needed|required)|already (implemented|fully implemented|in place|connected|wired up|present|exists?|correct)|implementation (is |looks )?(complete|correct|already|done)|task (is |appears )?(complete|done|finished)|nothing (else |more |further |additional )?(is |are |was )?(needed|required|to do)|fully (connected|wired|implemented|functional)|no (action|update|change|edit) (is |are )?(needed|required|necessary))\b/i.test(resp)
-                        || /✅|task complete|no errors or warnings found|following (our |the )?project conventions?/i.test(resp);
-                    // "let me..." / "I'll..." announcements with no tool call — model stated intent but stopped.
-                    // Fires on any turn (including turn 0) when the response is short and action-oriented.
-                    const intentPattern = /\b(let me (check|look|read|examine|see|find|verify|inspect|search|scan|list|explore|review|run|execute|start|begin|first|now)|i('ll| will) (check|look|read|examine|see|find|verify|inspect|search|scan|list|start|begin|run|execute|first|now|go ahead)|i'll start by|let me start|let me first|let me now|i'll now|first[,\s]+let me|first[,\s]+i('ll| will)|to (do|accomplish|complete) (this|that)[,\s]|i'll (need to|have to) (start|begin|first))\b/i;
-                    const isShortIntentWithoutTool = !toolCalls.length && resp.length < 500
-                        && !isTaskCompletion && !responseHasToolBlock && userWantsAction
-                        && intentPattern.test(resp);
-                    if (isShortIntentWithoutTool && this.autoRetryCount < this.MAX_AUTO_RETRIES) {
+                    // ── isGenericLongAnswer: model answered from training data on turn 0 ──
+                    // Run a real grep search and inject the results to ground the model.
+                    const hasHypotheticalMarker = /hypothetical|example scenario|your-auth-server|your_server|example\.com|placeholder|simplified example|import nfc\b|import requests\b.*verify|if you were to implement|example implementation|example route|would typically involve|might look something like|example of how.*might be implemented|logic might be implemented|how.*might look|you would need to implement|you would need to create/i.test(resp);
+                    const hasCodebaseRef = !hasHypotheticalMarker && /app\/|routes\/|services\/|\.py"|\.ts"|\.js"/i.test(resp);
+                    const isGenericLongAnswer = turn === 0 && !toolCalls.length && resp.length > 300 && !hasCodebaseRef && !this._editContextInjected;
+
+                    if (isGenericLongAnswer) {
                         this.autoRetryCount++;
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: intent statement without tool call (${resp.length} chars, turn ${turn})`);
+                        const stopWords = new Set(['show','me','how','the','a','an','is','are','does','do','what','where','find','all','please','works','work','working','this','that','it','in','on','of','for','to','and','or','with','by','from','at','into','save','saved','saving','get','set','use','used','make','made','take','taken','run','new','old','add','added','create','created','update','updated','delete','deleted']);
+                        const keywords = lastMsg.split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w.toLowerCase()));
+                        const bestKeyword = keywords.slice(0, 5).sort((a, b) => b.length - a.length)[0] ?? lastMsg.slice(0, 40);
+                        const isWin = process.platform === 'win32';
+                        const wsRoot = this.workspaceRoot ? this.workspaceRoot.replace(/\\/g, '/') : '.';
+                        const grepCmd = isWin
+                            ? `Get-ChildItem -Path '${wsRoot}' -Recurse -Include '*.py','*.ts','*.js' | Select-String -Pattern '${bestKeyword}' | Select-Object Path,LineNumber,Line | Select-Object -First 20`
+                            : `grep -rn --include="*.py" --include="*.ts" --include="*.js" -l "${bestKeyword}" "${wsRoot}" 2>/dev/null | head -10`;
+                        const searchId = `t_autosearch_${Date.now()}`;
+                        post({ type: 'toolCall', id: searchId, name: 'shell_read', args: { command: grepCmd } });
+                        let searchResult = '';
+                        try {
+                            searchResult = await this.executeTool('shell_read', { command: grepCmd }, searchId);
+                        } catch { searchResult = '(search failed)'; }
+                        post({ type: 'toolResult', id: searchId, name: 'shell_read', success: true, preview: searchResult.slice(0, 200) });
+                        const preview = searchResult.slice(0, 2000);
+                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model answered from training data — injecting real grep results (turn ${turn})`);
                         this.history.pop();
-                        this.history.push({ role: 'user', content: `[SYSTEM: You announced intent ("let me...", "I'll...") but did not call any tool. Do not narrate — act. Call the tool NOW.]` });
+                        this.history.push({
+                            role: 'user',
+                            content: `[SYSTEM: You answered from general knowledge instead of searching the codebase. Here are the ACTUAL project files containing "${bestKeyword}":\n\n${preview}\n\nAnswer the user's question using ONLY the real code from these files. Use shell_read with cat/grep to read the relevant file. Do NOT generate hypothetical code.]`,
+                        });
                         post({ type: 'removeLastAssistant' });
                         continue;
                     }
 
-                    const isPlanningInsteadOfDoing = turn > 0 && !toolCalls.length && resp.length > 300
-                        && !userAskedForPlan && !responseHasToolBlock && !isTaskCompletion
-                        && /\b(you would|you could|you can|you need to|would need to|we would need to|this (would|will|change will|change would)|to (split|refactor|separate|reorganize|restructure|move|create|migrate)|to (find|check|inspect|verify|look at) (which|each|every|all))\b/i.test(resp)
-                        || (turn > 0 && !toolCalls.length && userWantsAction && !isTaskCompletion
-                            && /what i('ll| will) (create|do|add|make|build|write)|here'?s? (my plan|what i('ll| will)|the plan)|what i found:/i.test(resp)
-                            && /\?/.test(resp.slice(-300)));
-                    // Detect: model read a file, found a bug, but output a code snippet instead of calling edit_file
-                    // Pattern: turn > 0 (file was already read), no tool calls, uses advisory language about a fix
-                    // Does NOT require a fenced code block — inline code or plain text advisories also count
-                    // Bug reports (NameError, AttributeError, etc.) implicitly want a fix even without action verbs
-                    const isBugReport = /\b(NameError|AttributeError|TypeError|ValueError|ImportError|KeyError|IndexError|SyntaxError|RuntimeError|500 error|traceback|line \d+)\b/i.test(lastMsg);
-                    // Also catches schema dump: response describes a db.Column addition with a code block but doesn't call edit_file
-                    const isSchemaCodeDump = turn > 0 && !toolCalls.length && userWantsAction
-                        && /```[\s\S]*?db\.Column[\s\S]*?```/.test(resp);
-                    // Only trigger isSuggestedFixDump when no edits have been made yet this run.
-                    // If _editsThisRun > 0, the model already applied its fixes — a code-containing summary is a completion, not a stall.
-                    const isSuggestedFixDump = turn > 0 && !toolCalls.length && (userWantsAction || isBugReport)
-                        && this._editsThisRun === 0
-                        && (/\b(suggested fix|immediate fix|for example[,:]|fix:|here'?s? (the|a|my) fix|apply (this|the) fix|example fix|proposed fix|recommended fix|to fix this|the fix is|corrected line|specific line to fix|add (a )?null check|add (a )?guard|wrap.*in.*try|replace.*with|update (the|this) (log|line|code|statement) to use|change .* to )\b/i.test(resp)
-                        || isSchemaCodeDump);
-                    // Don't retry explain/read tasks that already received tool results and produced a substantive answer.
-                    // "read X and tell me Y" tasks are done once the model answers after reading — no further tools needed.
-                    // Exception: if the answer admits it didn't read the key implementation file, it's not truly done.
+                    // ── Legitimate stop conditions (no retry needed) ──
+                    // 1. Explicit task-completion language — this alone gates isTaskCompletion.
+                    //    Edits already made is NOT sufficient alone: the model may have made edits
+                    //    and then discovered a new bug that needs more work. Only stop if the response
+                    //    explicitly says the task is done.
+                    const isTaskCompletion = /\b(no (further |more |additional |other )?changes? (are |is )?(needed|required|necessary)|no (further |more )?edits? (are |is )?(needed|required)|already (implemented|fully implemented|in place|connected|wired up|present|exists?|correct)|implementation (is |looks )?(complete|correct|already|done)|task (is |appears )?(complete|done|finished)|nothing (else |more |further |additional )?(is |are |was )?(needed|required|to do)|fully (connected|wired|implemented|functional)|no (action|update|change|edit) (is |are )?(needed|required|necessary))\b/i.test(resp)
+                        || /✅|task complete|no errors or warnings found|following (our |the )?project conventions?/i.test(resp);
+                    // 3. Explain/read query that's already been answered with substance after tools ran
                     const admitsIncomplete = /\b(not visible in this file|would reside in|is not visible|logic.*not.*visible|not.*shown here|implementation.*not.*available|actual.*logic.*in)\b/i.test(resp);
-                    const modelAlreadyAnswered = isExplainQuery && turn > 0 && toolCalls.length === 0
-                        && resp.length > 400
-                        && !admitsIncomplete;
-                    // Detect hedging answers that reference files without reading them
-                    const isHedgingWithoutReading = !toolCalls.length && !modelAlreadyAnswered
-                        && turn > 0 && turn < 4
-                        && /\b(likely (contains?|defines?|handles?|has|includes?)|probably (defines?|contains?|handles?)|may (contain|exist|include|define)|likely defined in|implied by|details aren't visible|schema details|exact.*not visible|check the code in|would reside in|not visible in this file|is not visible|logic.*not.*visible)\b/i.test(resp)
-                        && /`[^`]+\.(py|ts|js|rb|go|java)`/.test(resp); // mentions a source file in backticks
-                    // Detect "wrong file" responses: model read a file but it didn't contain the requested logic,
-                    // and the response is short/dismissive. Force it to read the correct file from prior search results.
-                    const isWrongFileResponse = !toolCalls.length && !modelAlreadyAnswered
-                        && turn > 0 && turn < 4 && resp.length < 1200
-                        && /\b(does not (show|contain|include|have)|no (specific|direct|explicit)|not (shown|visible|found|included|present)|snippet does not|code (does|did) not (show|include|contain)|no implementation)\b/i.test(resp)
-                        && isExplainQuery;
-                    // A substantive analysis report: long (>2000 chars), has multiple ## headings or code blocks,
-                    // and any closing question appears only in the last 300 chars. Model completed its work — don't retry.
+                    const modelAlreadyAnswered = isExplainQuery && turn > 0 && resp.length > 400 && !admitsIncomplete;
+                    // 4. Validation stop: model reviewed pre-loaded context and correctly decided nothing needs changing
+                    const isValidationStop = this._editContextInjected
+                        && /already (exists?|present|there|defined|implemented)|redundant|duplicate|doesn't exist|does not exist|no mention|unresolved|missing model|can't find|cannot find|stop here|won't (proceed|make|add)|will stop|should stop|no need to add|there is no need/i.test(resp);
+                    // 5. Substantive analysis report (long, structured, no mid-body questions)
                     const headingCount = (resp.match(/^##\s/gm) || []).length;
                     const hasCodeBlocks = /```[\s\S]{20,}```/.test(resp);
                     const isSubstantiveAnalysis = resp.length > 2000
                         && (headingCount >= 2 || (headingCount >= 1 && hasCodeBlocks))
                         && !/\b(would you|shall i|do you want|like me to|which file|what file|next step)\b/i.test(resp.slice(0, resp.length - 300));
-                    const isSummaryWithQuestion = !toolCalls.length
-                        && !modelAlreadyAnswered
-                        && !isHedgingWithoutReading
-                        && !isPlanTask && !isReviewTask && !isCreativeTask
-                        && !isTaskCompletion
-                        && !isConfirmStop
-                        && !isSubstantiveAnalysis
-                        && turn > 0 && resp.length > 100
-                        && (isOfferingHelp || isPlanningInsteadOfDoing || (/\b(here are|the (?:search|results?|output|matches)|found \d+|instances?|occurrences?)\b/i.test(resp)
-                        && /\b(would you|shall i|do you want|like me to|specific file|which file|what file|have another|next step)\b/i.test(resp)));
-                    if (isHedgingWithoutReading) {
-                        this.autoRetryCount++;
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model gave hedged answer without reading referenced files (turn ${turn})`);
-                        this.history.pop();
-                        this.history.push({
-                            role: 'user',
-                            content: `[SYSTEM: Your answer referenced implementation details in files you haven't fully read yet (e.g. "would reside in", "not visible in this file", "likely", "probably"). You MUST read those source files now to give a complete, definitive answer. Use shell_read to read the specific files you mentioned. Call the tool NOW — do not summarize what you haven't read.]`
-                        });
-                        post({ type: 'removeLastAssistant' });
-                        continue;
+                    // 6. Plan/review/creative tasks where a text response after tool use is intentional
+                    const userAskedForPlan = /\b(plan|design|document|write.*doc|create.*file|save.*plan|discuss|proposal|how.*can|is it possible)\b/i.test(this._currentTaskMessage);
+                    // 7. Phase/step completion with a hand-off question: model completed a phase of work
+                    // (ran tools, has multi-line summary with bullet points or ** bold items) and ends by
+                    // asking "want me to continue?" / "shall I proceed to phase 7?" — this is a legitimate
+                    // confirm-stop, not a stall. Requires: turn > 0, response has a result summary, ends with question.
+                    const hasResultSummary = turn > 0 && resp.length > 200
+                        && (/\*\*[^*]+\*\*/.test(resp) || /^\s*[-•]\s/m.test(resp) || /✅/.test(resp));
+                    const endsWithHandoffQuestion = /\b(want me to continue|continue with (phase|step|the next)|shall i (proceed|continue|start)|wrap up|is this enough|what would you like|do you want me to|ready to (start|begin|continue))\b.{0,80}$/i.test(resp);
+                    const isPhaseHandoff = hasResultSummary && endsWithHandoffQuestion;
+
+                    // Model is asking the user a genuine question — either for missing data it couldn't find,
+                    // or a decision/preference that only the user can answer. This is always a legitimate stop
+                    // UNLESS the model is lazily asking the user to provide file contents it could read itself
+                    // (that case is handled by the isDeflecting nudge below).
+                    const isAskingUser = turn > 0
+                        && /\?/.test(resp)    // contains a question mark
+                        && !/please provide|provide the (contents|file|code|text)|share the (contents|file|code)|paste the|send me the|provide me with/i.test(resp) // not lazy file-deflection
+                        && resp.length < 1200; // short enough to be a question, not a full analysis that happens to end with ?
+
+                    const isLegitimateStop = isTaskCompletion || modelAlreadyAnswered || isValidationStop
+                        || isSubstantiveAnalysis || isPhaseHandoff || isAskingUser
+                        || (userAskedForPlan && turn > 0)
+                        || (isPlanTask && turn > 0) || (isReviewTask && turn > 0 && resp.length > 400)
+                        || (isCreativeTask && turn > 0 && resp.length > 200);
+
+                    // If the model used completion language alongside tool calls (e.g. "Done! Let me verify...")
+                    // signal that the next clean tool result should end the loop instead of cycling.
+                    if (toolCalls.length > 0 && isTaskCompletion) {
+                        this._completionSignaled = true;
+                        logInfo(`[agent] Completion signaled at turn ${turn} — will break after next clean tool result`);
                     }
-                    if (isWrongFileResponse) {
+
+                    // ── Reading-spiral guard: model keeps reading without acting ──
+                    // Fire after 3 consecutive read-only turns. If edits have already
+                    // happened this run, the model is in a diagnostic loop — stop it sooner.
+                    const readSpiralThreshold = this._editsThisRun > 0 ? 3 : 5;
+                    if (this._readOnlyTurnsSinceLastEdit >= readSpiralThreshold
+                        && this.autoRetryCount < this.MAX_AUTO_RETRIES) {
                         this.autoRetryCount++;
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model read wrong file and gave dismissive response (turn ${turn}, ${resp.length} chars)`);
+                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: reading spiral — ${this._readOnlyTurnsSinceLastEdit} read-only turns (edits=${this._editsThisRun})`);
+                        this._readOnlyTurnsSinceLastEdit = 0;
                         this.history.pop();
-                        this.history.push({
-                            role: 'user',
-                            content: `[SYSTEM: The file you just read did not contain the requested logic. Your prior search results showed other files that likely contain it. Look at the search results above and read the correct file — e.g. a file whose name matches the topic (like "void_refund_api.py" for void operations). Use shell_read with Get-Content on that file NOW. Do not explain — just call the tool.]`
-                        });
-                        post({ type: 'removeLastAssistant' });
-                        continue;
-                    }
-                    if (isSummaryWithQuestion) {
-                        this.autoRetryCount++;
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model summarized results and asked/offered help instead of answering (turn ${turn})`);
-                        this.history.pop();
-                        // On repeated stalls, give a concrete grep command to unblock the model
-                        const retryNudge = this.autoRetryCount >= 2
-                            ? `[SYSTEM: STOP describing what you would do. You MUST call shell_read RIGHT NOW with a grep command. Example: shell_read with command="Get-ChildItem -Path 'c:/Users/david/Documents/source/scrapyard_new_ai/app/routes' -Recurse -Filter '*.py' | ForEach-Object { $f=$_.FullName; $m=Select-String -Path $f -Pattern 'try:' -Quiet; if (-not $m) { $f } }". This will list files with no try: blocks. Call it NOW — do not explain, do not ask, just call the tool.]`
-                            : `[SYSTEM: You summarized a tool result and asked the user a follow-up question or offered help. Do NOT ask — just answer. The user's original question was: "${userMessage}". Use what you already found to answer it directly. If you need more detail, use shell_read to read the relevant files NOW. Do NOT ask the user anything — call a tool immediately.]`;
-                        this.history.push({
-                            role: 'user',
-                            content: retryNudge
-                        });
+                        this.history.push({ role: 'user', content: `[SYSTEM: You have made ${this._readOnlyTurnsSinceLastEdit + readSpiralThreshold} consecutive read-only tool calls without making a change. Stop gathering information. Either act NOW (call edit_file or run_command to make the change) or give the user a clear summary of what you found and what the next step is — then stop.]` });
                         post({ type: 'removeLastAssistant' });
                         continue;
                     }
 
-                    // Bug-fix pattern: model read the file, described the fix with a code snippet, but didn't call edit_file
-                    if (isSuggestedFixDump) {
+                    // ── Universal nudge: no tool + not a legitimate stop → retry ──
+                    if (!toolCalls.length && !isLegitimateStop && !responseHasToolBlock) {
                         this.autoRetryCount++;
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: model output a "Suggested Fix" code block instead of calling edit_file (turn ${turn})`);
-                        this.history.pop();
-                        const fixNudge = isTextMode
-                            ? `[SYSTEM: You described the fix but did NOT apply it. Output ONLY this tool call — replace the values in angle brackets with the real strings from the file:\n<tool>{"name":"edit_file","arguments":{"path":"<full file path>","old_string":"<exact current line>","new_string":"<corrected line>"}}</tool>\nNo explanation. No code blocks. Just the <tool> XML above with real values filled in.]`
-                            : `[SYSTEM: You described the fix but did NOT apply it. Call edit_file RIGHT NOW. Set path to the file you just read, old_string to the exact buggy line (copy it character-for-character from the file content above), and new_string to the corrected version. Do NOT output a code block — invoke the tool directly.]`;
-                        this.history.push({
-                            role: 'user',
-                            content: fixNudge
-                        });
-                        post({ type: 'removeLastAssistant' });
-                        continue;
-                    }
+                        // Count no-tool turns toward the reading spiral (they're wasted turns too)
+                        this._readOnlyTurnsSinceLastEdit++;
 
-                    // Sweep task: model declared completion mid-sweep without having edited all items.
-                    // Detect: sweep task + turn > 0 + no tools + "all routes ... done / no further" language
-                    // Only treat as premature-done if model hasn't made any edits yet this run.
-                    // If edits were made and model says done, trust it — don't force re-reads.
-                    const isSweepPrematureDone = isSweepTask && !toolCalls.length && turn > 0
-                        && this._editsThisRun === 0
-                        && /\b(all routes?|no further|already (have|has)|complete[d]?|nothing (else|more)|no (more|additional)|updated all)\b/i.test(resp);
-                    if (isSweepPrematureDone) {
-                        this.autoRetryCount++;
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: sweep task declared completion with 0 edits (turn ${turn}) — forcing re-read to verify`);
-                        this.history.pop();
-                        this.history.push({
-                            role: 'user',
-                            content: `[SYSTEM: You said all routes are done, but you have not made any edits yet this session. Please verify by re-reading the file with shell_read and check EVERY function. If any are missing try/except, edit them now.]`
-                        });
-                        post({ type: 'removeLastAssistant' });
-                        continue;
-                    }
+                        // Specific nudge for fenced tool calls (model used ``` instead of <tool>)
+                        const hasFencedToolCall = /```[\s\S]*?\b(edit_file|edit_file_at_line|shell_read|run_command)\b[\s\S]*?```/.test(resp);
+                        // Specific nudge for model asking user to provide files
+                        const isDeflecting = /please provide|provide the (contents|file|code|text)|share the (contents|file|code)|paste the|send me the|provide me with/i.test(resp);
+                        // Specific nudge for decision-paralysis: agent is circling without committing
+                        const isParalysis = this._readOnlyTurnsSinceLastEdit >= 3;
 
-                    // Fourth path: model gave a text-only response on the first turn when user wants action,
-                    // OR gave a long generic answer (e.g., Windows steps) when the user asked a codebase question.
-                    // Sub-cases:
-                    //   a) Model asked user to provide file contents — always retry
-                    //   b) Model emitted a fenced code block tool call — always retry
-                    //   c) Model gave verbose response (>200 chars) with no tool calls on turn 0 — retry
-                    //      (applies even for "where is X" style questions — model should search the codebase)
-                    const respIsQuestion = /\?/.test(displayContent || result.content);
-                    const isDeflecting = isAskingUserToProvide;
-                    // Detect model emitting tool call in a fenced code block instead of <tool> XML
-                    const hasFencedToolCall = hasCodeBlockButNoTool && /```[\s\S]*?\b(edit_file|shell_read|run_command)\b[\s\S]*?```/.test(resp);
-                    // Detect model answering about OS/system instead of searching the codebase
-                    const isOsAnswer = /device manager|control panel|program files|appdata|windows update|epson.*software|driver.*download|official website|troubleshoot.*printer/i.test(resp);
-                    // Detect model asking user for clarification instead of searching the codebase
-                    const isAskingForContext = turn === 0 && respIsQuestion
-                        && /could you (please )?(specify|clarify|provide|tell me|let me know|give me)|which (aspect|part|type|kind|version)|more (context|information|detail)|what (type|kind|aspect|part|version|specific)|please (specify|clarify|provide more|let me know)/i.test(resp)
-                        && !toolCalls.length;
-                    // Verbose turn-0 no-tool: fire even for question-phrased messages (e.g., "where is X", "show me how")
-                    // If the model gives a long generic answer with no file references, it answered from training
-                    // data instead of searching the codebase — always retry in that case.
-                    // hasCodebaseRef: true only if response references actual project paths/files,
-                    // not just generic code snippets with def/class/import that the model hallucinated.
-                    // Hypothetical code blocks ("Example:", "hypothetical example", fake URLs) don't count.
-                    const hasHypotheticalMarker = /hypothetical|example scenario|your-auth-server|your_server|example\.com|placeholder|simplified example|import nfc\b|import requests\b.*verify|if you were to implement|example implementation|example route|would typically involve|might look something like|example of how.*might be implemented|logic might be implemented|how.*might look|you would need to implement|you would need to create/i.test(resp);
-                    const hasCodebaseRef = !hasHypotheticalMarker && /app\/|routes\/|services\/|\.py"|\.ts"|\.js"/i.test(resp);
-                    const isGenericLongAnswer = turn === 0 && !toolCalls.length && resp.length > 300 && !hasCodebaseRef && !this._editContextInjected;
-                    const isVerboseTurn0 = turn === 0 && !toolCalls.length && resp.length > 200 && !respIsQuestion;
-                    if (!toolCalls.length && turn === 0 && (isDeflecting || hasFencedToolCall || isOsAnswer || isAskingForContext || isGenericLongAnswer || (isVerboseTurn0 && userWantsAction))) {
-                        this.autoRetryCount++;
-                        const toolCallHint = isTextMode ? ' Output only a <tool> block, nothing else.' : ' Call the tool now — do not explain, just call it.';
-                        const nudgeContent = isDeflecting
+                        const toolCallHint = isTextMode ? ' Output only a <tool> block, nothing else.' : ' Call the tool now.';
+                        const nudgeContent = hasFencedToolCall
+                            ? '[SYSTEM: You wrote a tool call inside a code block (```). That does NOT execute the tool. Output a raw <tool>{"name":"...","arguments":{...}}</tool> XML block — no backticks, no code fences. Output ONLY the <tool> block now.]'
+                            : isDeflecting
                             ? `[SYSTEM: You asked the user to provide file contents, but you have tools to read files yourself. Use shell_read with cat/Get-Content on the file path. Do NOT ask the user — call the tool NOW.${toolCallHint}]`
-                            : hasFencedToolCall
-                            ? '[SYSTEM: You wrote a tool call inside a code block. That is NOT how tools work here. You must output a raw <tool>{"name":"...","parameters":{...}}</tool> block — no markdown, no code fences, no explanation. Output ONLY the <tool> block now.]'
-                            : isOsAnswer
-                            ? `[SYSTEM: You gave a generic OS/Windows answer. You are a coding assistant with access to the user's codebase. Search the project files instead. Use shell_read with grep/Get-ChildItem to find the relevant code NOW.${toolCallHint}]`
-                            : isAskingForContext
-                            ? `[SYSTEM: You asked the user for clarification, but you have tools to search the codebase yourself. Use shell_read with grep to search for the relevant code NOW instead of asking.${toolCallHint}]`
-                            : isGenericLongAnswer
-                            ? await (async () => {
-                                // Model answered from training data — run a grep search programmatically
-                                const stopWords = new Set(['show','me','how','the','a','an','is','are','does','do','what','where','find','all','please','works','work','working','this','that','it','in','on','of','for','to','and','or','with','by','from','at','into','save','saved','saving','get','set','use','used','make','made','take','taken','run','new','old','add','added','create','created','update','updated','delete','deleted']);
-                                const keywords = lastMsg.split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w.toLowerCase()));
-                                // Prefer longer, more specific keywords — pick the longest one from first 5
-                                const bestKeyword = keywords.slice(0, 5).sort((a, b) => b.length - a.length)[0] ?? lastMsg.slice(0, 40);
-                                const isWin = process.platform === 'win32';
-                                const wsRoot = this.workspaceRoot ? this.workspaceRoot.replace(/\\/g, '/') : '.';
-                                const grepCmd = isWin
-                                    ? `Get-ChildItem -Path '${wsRoot}' -Recurse -Include '*.py','*.ts','*.js' | Select-String -Pattern '${bestKeyword}' | Select-Object Path,LineNumber,Line | Select-Object -First 20`
-                                    : `grep -rn --include="*.py" --include="*.ts" --include="*.js" -l "${bestKeyword}" "${wsRoot}" 2>/dev/null | head -10`;
-                                const query = bestKeyword;
-                                const searchId = `t_autosearch_${Date.now()}`;
-                                post({ type: 'toolCall', id: searchId, name: 'shell_read', args: { command: grepCmd } });
-                                let searchResult = '';
-                                try {
-                                    searchResult = await this.executeTool('shell_read', { command: grepCmd }, searchId);
-                                } catch { searchResult = '(search failed)'; }
-                                post({ type: 'toolResult', id: searchId, name: 'shell_read', success: true, preview: searchResult.slice(0, 200) });
-                                const preview = searchResult.slice(0, 2000);
-                                return `[SYSTEM: You answered from general knowledge instead of searching the codebase. Here are the ACTUAL project files containing "${keywords[0] ?? query}":\n\n${preview}\n\nAnswer the user's question using ONLY the real code from these files. Use shell_read with cat/grep to read the relevant file. Do NOT generate hypothetical code.]`;
-                            })()
-                            : '[SYSTEM: You responded with text instead of calling a tool. The user wants you to take ACTION on their codebase. Use shell_read to read or search files, or edit_file to make changes. Output only a <tool> block, nothing else.]';
-                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: ${isDeflecting ? 'model asked user to provide file' : hasFencedToolCall ? 'model used fenced code block for tool call' : isAskingForContext ? 'model asked user for clarification' : isOsAnswer ? 'model gave OS answer' : isGenericLongAnswer ? 'model answered from training data' : 'model gave verbose text-only response'} on first turn (${resp.length} chars, turn ${turn})`);
+                            : isParalysis
+                            ? `[SYSTEM: You have now spent ${this._readOnlyTurnsSinceLastEdit} turns reading and explaining without taking action. Stop. You have enough information. Call run_command NOW to execute the change, or give the user a final answer explaining what the blocker is. Do NOT read anything else.]`
+                            : (this._isSmallModel && this._editContextInjected)
+                            ? '[SYSTEM: Stop explaining. The file content is in [PRE-LOADED CONTEXT] above. Call edit_file_at_line NOW with the line numbers shown. Output ONLY the <tool> block — no text before or after it.]'
+                            : `[SYSTEM: You did not call any tool. Every response must either call a tool or be a final answer. This task is not done — call the next tool NOW. No explanation needed.${toolCallHint}]`;
+
+                        logInfo(`[agent] Auto-retry ${this.autoRetryCount}: no tool called (${resp.length} chars, turn ${turn}, readOnly=${this._readOnlyTurnsSinceLastEdit}) — universal stall rule fired`);
                         this.history.pop();
-                        this.history.push({
-                            role: 'user',
-                            content: nudgeContent,
-                        });
+                        this.history.push({ role: 'user', content: nudgeContent });
                         post({ type: 'removeLastAssistant' });
                         continue;
                     }
@@ -4289,7 +4686,8 @@ Do NOT assume you have no memory — check first.`;
                 post({
                     type: 'contextStats',
                     percentage: finalStats.usagePercentage,
-                    totalTokens: finalStats.totalTokens,
+                    usedTokens: finalStats.totalTokens,
+                    totalTokens: finalStats.modelLimit,
                     modelLimit: finalStats.modelLimit
                 });
 
@@ -4427,6 +4825,7 @@ Do NOT assume you have no memory — check first.`;
             if (deferredCalls.length > 0) {
                 logInfo(`[agent] Text-mode: model emitted ${toolCalls.length} tool calls, executing first (${toolCalls[0].function.name}), deferring ${deferredCalls.length} remaining`);
             }
+            let breakAfterBatch = false;
             for (const tc of callsToExecute) {
                 if (this.stopRef.stop) { break; }
 
@@ -4437,6 +4836,27 @@ Do NOT assume you have no memory — check first.`;
                         ? JSON.parse(tc.function.arguments as unknown as string)
                         : tc.function.arguments;
                 } catch { args = {}; }
+
+                // Apply pre-hook middleware chain (in registration order)
+                let middlewareAborted = false;
+                for (const mw of Agent._middlewares) {
+                    if (!mw.preHook) { continue; }
+                    try {
+                        const result = mw.preHook(name, args);
+                        if (result === null) {
+                            logInfo(`[middleware] ${mw.id}.preHook aborted tool "${name}"`);
+                            middlewareAborted = true;
+                            break;
+                        }
+                        if (result !== undefined) { args = result; }
+                    } catch (mwErr) {
+                        logWarn(`[middleware] ${mw.id}.preHook threw: ${toErrorMessage(mwErr)}`);
+                    }
+                }
+                if (middlewareAborted) {
+                    post({ type: 'toolResult', id: `t_${Date.now()}`, name, success: false, preview: '(aborted by middleware)' });
+                    continue;
+                }
 
                 const toolId = `t_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
                 logInfo(`Tool [${this.toolMode}]: ${name}  args=${JSON.stringify(args)}`);
@@ -4453,6 +4873,32 @@ Do NOT assume you have no memory — check first.`;
                 } else {
                     this.lastToolSignature = toolSig;
                     this.consecutiveRepeats = 0;
+                }
+
+                // Sliding-window loop detection (Thoth pattern):
+                // Track last N tool signatures and break if any single signature
+                // appears MAX_REPEATS times — catches non-consecutive loops like
+                // search → read → search → read → search → read → search → read
+                this._recentToolSigs.push(toolSig);
+                if (this._recentToolSigs.length > this.RECENT_TOOL_SIG_WINDOW) {
+                    this._recentToolSigs.shift();
+                }
+                const sigCounts = new Map<string, number>();
+                for (const s of this._recentToolSigs) { sigCounts.set(s, (sigCounts.get(s) ?? 0) + 1); }
+                const maxSigCount = Math.max(...sigCounts.values());
+                if (maxSigCount >= this.RECENT_TOOL_SIG_MAX_REPEATS) {
+                    const loopySig = [...sigCounts.entries()].find(([, c]) => c >= this.RECENT_TOOL_SIG_MAX_REPEATS)?.[0] ?? '';
+                    const loopyName = loopySig.split('_')[0] ?? name;
+                    logWarn(`[agent] Sliding-window loop detected: "${loopyName}" called ${maxSigCount}x in last ${this._recentToolSigs.length} tool calls`);
+                    this._recentToolSigs = []; // reset so it doesn't fire every turn
+                    const loopMsg = `[SYSTEM: Loop detected — you have called "${loopyName}" with the same arguments ${maxSigCount} times in the last ${this.RECENT_TOOL_SIG_WINDOW} tool calls. You are going in circles. Stop. Either (1) act on what you already found, or (2) tell the user what the blocker is and ask for guidance. Do NOT call this tool again.]`;
+                    if (isTextMode) {
+                        this.history.push({ role: 'user', content: loopMsg });
+                    } else {
+                        this.history.push({ role: 'tool', content: loopMsg });
+                    }
+                    post({ type: 'toolResult', id: toolId, name, success: false, preview: `(loop detected — ${loopyName} called ${maxSigCount}x)` });
+                    break;
                 }
 
                 // Track consecutive calls to the same tool name (even with different args)
@@ -4847,6 +5293,18 @@ Do NOT assume you have no memory — check first.`;
                 try {
                     toolResult = await this.executeTool(name, args, toolId);
                     logInfo(`Tool ${name} OK — ${toolResult.length} chars`);
+
+                    // Apply post-hook middleware chain (in reverse registration order)
+                    for (const mw of [...Agent._middlewares].reverse()) {
+                        if (!mw.postHook) { continue; }
+                        try {
+                            const transformed = mw.postHook(name, args, toolResult);
+                            if (transformed !== undefined) { toolResult = transformed; }
+                        } catch (mwErr) {
+                            logWarn(`[middleware] ${mw.id}.postHook threw: ${toErrorMessage(mwErr)}`);
+                        }
+                    }
+
                     // Auto-fix: if model used `cat` on Windows and got "not recognized" error,
                     // silently retry with Get-Content so the model gets real file content.
                     if (name === 'shell_read'
@@ -5015,20 +5473,50 @@ Do NOT assume you have no memory — check first.`;
                     if (isSoftFailure) {
                         post({ type: 'toolResult', id: toolId, name, success: false, preview: toolResult.slice(0, 400), fullResult: toolResult.slice(0, 8000) });
                         this.consecutiveFailures++;
+                        this.autoRetryCount = 0; // Any tool invocation (even failed) means model is acting, not stalling
                         // Revoke auto-approval on soft failure too
                         if (this._autoApprovedTools.has(name)) {
                             this._autoApprovedTools.delete(name);
                             logInfo(`[agent] Revoked auto-approval for "${name}" after soft failure (non-zero exit)`);
                         }
+                        // Circuit breaker for structured-tool mode (non-text): escalate repeated identical failures
+                        if (!isTextMode && name === 'run_command') {
+                            const cmdSigCB = String(args.command ?? '').toLowerCase().trim().slice(0, 200);
+                            const cbCount = (this._failedCommandSignatures.get(cmdSigCB) ?? 0) + 1;
+                            this._failedCommandSignatures.set(cmdSigCB, cbCount);
+                            if (cbCount >= this.MAX_SAME_COMMAND_FAILURES) {
+                                const errPrev = toolResult.slice(0, 300);
+                                post({ type: 'error', text: `**Agent stuck** — the same command has failed ${cbCount} times:\n\`\`\`\n${String(args.command ?? '').slice(0, 200)}\n\`\`\`\nError: ${errPrev}\n\nPlease advise on how to proceed.` });
+                                this._failedCommandSignatures.delete(cmdSigCB);
+                                loopExhausted = false;
+                                breakAfterBatch = true;
+                                break;
+                            }
+                        }
                     } else {
                         post({ type: 'toolResult', id: toolId, name, success: true, preview: toolResult.slice(0, 400), fullResult: toolResult.slice(0, 8000) });
-                        this.consecutiveFailures = 0; // Reset on success
+                        this.consecutiveFailures = 0;
+                        this.autoRetryCount = 0; // Reset stall-retry budget after each tool call
+
+                        // Sleep sentinel: if the model already gave completion language and this
+                        // tool result is clean, signal an outer-loop break so we don't cycle back
+                        // for another LLM call. Only applies to read-only verification tools.
+                        if (this._completionSignaled
+                            && (name === 'shell_read' || name === 'run_command')
+                            && !/error|fail|exit [1-9]|not found|no such|traceback|exception/i.test(toolResult)) {
+                            logInfo(`[agent] Sleep sentinel: clean ${name} result after completion language — stopping loop`);
+                            this._completionSignaled = false;
+                            loopExhausted = false;
+                            breakAfterBatch = true;
+                            break;
+                        }
                     }
                 } catch (err) {
                     toolResult = `Error: ${toErrorMessage(err)}`;
                     logError(`Tool ${name} failed: ${toolResult}`);
                     post({ type: 'toolResult', id: toolId, name, success: false, preview: toolResult });
                     this.consecutiveFailures++;
+                    this.autoRetryCount = 0; // Tool was invoked (even if it threw) — not a stall
 
                     // If this tool was auto-approved and it failed, revoke auto-approval
                     // so the user sees the next attempt and can intervene
@@ -5209,11 +5697,30 @@ Do NOT assume you have no memory — check first.`;
                             const failCount = (this._failedCommandSignatures.get(cmdSig) ?? 0) + 1;
                             this._failedCommandSignatures.set(cmdSig, failCount);
                             if (failCount >= this.MAX_SAME_COMMAND_FAILURES) {
-                                nudge = `STOP — you have tried this exact move command ${failCount} times and it keeps failing. The filenames do NOT match. Use shell_read with ls/dir to see the EXACT filenames on disk, then build a new command using those names.`;
+                                // Circuit breaker: same move command failed twice — stop and ask user
+                                const errPreview = toolResult.slice(0, 300);
+                                post({ type: 'error', text: `**Agent stuck** — the same command has failed ${failCount} times:\n\`\`\`\n${cmdStr.slice(0, 200)}\n\`\`\`\nError: ${errPreview}\n\nPlease advise: should I try a different approach, or tell me what the correct paths/commands are.` });
+                                this._failedCommandSignatures.delete(cmdSig);
+                                loopExhausted = false;
+                                breakAfterBatch = true;
+                                break;
                             } else {
                                 nudge = `The move command FAILED. Use shell_read with ls/dir to see the REAL filenames on disk, then retry with the exact names.`;
                             }
                         } else if (hasFailed) {
+                            // Track general command failures for circuit breaker
+                            const cmdSig = cmdStr.toLowerCase().trim().slice(0, 200);
+                            const failCount = (this._failedCommandSignatures.get(cmdSig) ?? 0) + 1;
+                            this._failedCommandSignatures.set(cmdSig, failCount);
+                            if (failCount >= this.MAX_SAME_COMMAND_FAILURES) {
+                                // Circuit breaker: same failing command tried twice — escalate to user
+                                const errPreview = toolResult.slice(0, 300);
+                                post({ type: 'error', text: `**Agent stuck** — the same command has failed ${failCount} times:\n\`\`\`\n${cmdStr.slice(0, 200)}\n\`\`\`\nError: ${errPreview}\n\nPlease advise on how to proceed.` });
+                                this._failedCommandSignatures.delete(cmdSig);
+                                loopExhausted = false;
+                                breakAfterBatch = true;
+                                break;
+                            }
                             if (this._mergeMode && /\bAdd-Content\b/i.test(cmdStr)) {
                                 this._mergeConsecutiveEditFailures = (this._mergeConsecutiveEditFailures ?? 0) + 1;
                                 nudge = `Add-Content failed (exit 1). The here-string likely has quoting issues. Try wrapping the content differently, or use a temp file approach. Do NOT delete the source file yet — the content was NOT appended.`;
@@ -5612,17 +6119,64 @@ Do NOT assume you have no memory — check first.`;
                             toolResultForHistory = kept + `\n\n[TRUNCATED — file has ${lines.length} lines, showing first ${MAX_LINES}.]`;
                         }
                     }
+                    // Cap individual tool result entries to prevent single large reads from consuming the whole context
+                    if (toolResultForHistory.length > 6000) {
+                        toolResultForHistory = toolResultForHistory.slice(0, 6000) + `\n[...result truncated at 6000 chars — re-run the command if you need more]`;
+                    }
                     this.history.push({ role: 'tool', content: toolResultForHistory });
                 }
             }
+            // Sleep sentinel propagation: inner batch signaled a clean completion — exit outer loop
+            if (breakAfterBatch) { break; }
+
             // Update routing hint for next turn: was this turn purely read-only?
             prevTurnWasReadOnly = allReadOnly && READ_ONLY_TOOLS.has(callsToExecute[0]?.function?.name ?? '');
+            // Track consecutive read-only turns for reading-spiral detection
+            if (toolCalls.length > 0) {
+                const hadEditTool = toolCalls.some(tc => ['edit_file', 'edit_file_at_line', 'run_command', 'create_file', 'delete_file'].includes(tc.function?.name ?? ''));
+                if (hadEditTool) {
+                    this._readOnlyTurnsSinceLastEdit = 0;
+                } else {
+                    this._readOnlyTurnsSinceLastEdit++;
+                }
+            }
         }
 
         // If we exhausted all turns without the model producing a final answer, tell the user
         if (loopExhausted && !this.stopRef.stop) {
             logWarn(`[agent] Loop exhausted after ${MAX_TURNS} turns without a final response`);
-            post({ type: 'error', text: `Agent stopped after ${MAX_TURNS} tool rounds without a final answer. Try rephrasing your request or start a new chat.` });
+            // Build a rich session summary so the user knows what was accomplished and what's open
+            const lastToolEntry = [...this.history].reverse().find(m => m.role === 'tool');
+            const lastToolContent = lastToolEntry?.content ?? '';
+            const lastError = lastToolContent.match(/(?:Error|Traceback|exit \d+)[^\n]*/i)?.[0] ?? '';
+
+            const summaryLines: string[] = ['**Session stopped** — reached the tool-call limit.\n'];
+
+            // What was accomplished
+            if (this._filesChangedThisRun.length > 0) {
+                summaryLines.push(`**Done:**`);
+                for (const f of this._filesChangedThisRun) {
+                    summaryLines.push(`  ✓ ${f}`);
+                }
+            } else if (this._editsThisRun === 0) {
+                summaryLines.push(`**Done:** Explored/analyzed the codebase (no files modified).`);
+            }
+
+            // What may still be open — infer from last assistant message
+            const lastAssistant = [...this.history].reverse().find(m => m.role === 'assistant');
+            const lastAssistantText = typeof lastAssistant?.content === 'string' ? lastAssistant.content : '';
+            const openItemMatch = lastAssistantText.match(/(?:still need|next step|todo|remaining|not yet done)[^\n.]{0,120}/i);
+            if (openItemMatch) {
+                summaryLines.push(`\n**Still open:** ${openItemMatch[0].trim()}`);
+            }
+
+            // Last error if any
+            if (lastError) {
+                summaryLines.push(`\n**Last error:** ${lastError.slice(0, 200)}`);
+            }
+
+            summaryLines.push(`\nTo continue, describe what to do next or say "keep going".`);
+            post({ type: 'error', text: summaryLines.join('\n') });
         }
 
         // ── Sequential multi-file plan: auto-advance to next step ────────────────
@@ -6095,6 +6649,7 @@ If the code looks correct, respond with exactly: OK`;
 
                 fs.writeFileSync(full, newContent, 'utf8');
                 this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
+                this._readOnlyTurnsSinceLastEdit = 0;
                 this._editsThisRun++;
                 this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
                 if (!this._filesChangedThisRun.includes(rel)) { this._filesChangedThisRun.push(rel); }
@@ -6299,6 +6854,18 @@ If the code looks correct, respond with exactly: OK`;
                     this._guardEvents.push({ type: 'scope-guard', reason: `critic: ${criticResult.slice(0, 80)}`, file: rel });
                     return `${editResult}\n\n🔍 Critic review:\n${criticResult}`;
                 }
+
+                // Post-edit verification: re-read the written file and confirm the new content is present.
+                // Catches silent write failures or encoding mangling before the model moves on.
+                try {
+                    const verifyContent = fs.readFileSync(full, 'utf8');
+                    const newFirstLine = newString.split('\n')[0].trim();
+                    if (newFirstLine && !verifyContent.includes(newString.slice(0, Math.min(newString.length, 120)))) {
+                        logWarn(`[edit-verify] Written content not found in ${rel} — possible write failure`);
+                        this._guardEvents.push({ type: 'syntax-error', reason: 'post-edit verification failed', file: rel });
+                        return `${editResult}\n\n⚠ Post-edit verification FAILED: the new content was not found in "${rel}" after writing. The file may not have been saved correctly. Re-read the file and try again.`;
+                    }
+                } catch { /* if read fails, skip verification silently */ }
 
                 return editResult;
             }
@@ -6527,7 +7094,9 @@ If the code looks correct, respond with exactly: OK`;
                 // Auto-fix: Unix grep on Windows — convert to PowerShell Select-String.
                 // Also handles multi-word patterns like grep -rn "foo bar baz" which would never match
                 // any real file — extract the best single keyword instead.
-                if (process.platform === 'win32' && /\bgrep\b/i.test(cmd)) {
+                // Skip if command is an SSH/SCP invocation — grep inside the quoted remote command
+                // is running on the remote Linux host and must not be rewritten.
+                if (process.platform === 'win32' && /\bgrep\b/i.test(cmd) && !/^\s*(ssh|scp|sftp)\b/i.test(cmd)) {
                     const grepPatternMatch = cmd.match(/grep\s+(?:-[\w]+\s+)*["']([^"']+)["']/i);
                     if (grepPatternMatch) {
                         const rawPattern = grepPatternMatch[1];
@@ -6639,7 +7208,8 @@ If the code looks correct, respond with exactly: OK`;
                 }
 
                 // Auto-fix forward slashes in path arguments on Windows (not flags like /S /N)
-                if (process.platform === 'win32') {
+                // SKIP for ssh/scp/sftp — remote paths must use forward slashes regardless of local OS
+                if (process.platform === 'win32' && !/^\s*(ssh|scp|sftp)\b/i.test(cmd)) {
                     if (/\b(mkdir|move|copy|del|rmdir|ren|rename|type|tree|dir)\b/i.test(cmd) && cmd.includes('/') && !cmd.includes('://')) {
                         const fixed = cmd.replace(/\//g, (match, offset) => {
                             const before = cmd[offset - 1];
@@ -6750,11 +7320,79 @@ If the code looks correct, respond with exactly: OK`;
                     }
                 }
 
+                // Doubled-path guard: detect remote paths in ssh/scp commands that contain a
+                // repeated directory segment — a sign the model appended a local relative path
+                // onto a remote absolute path (e.g. /srv/app/myproject/.../myproject).
+                // Only applies to ssh/scp/sftp commands where remote paths matter.
+                if (/^\s*(ssh|scp|sftp)\b/i.test(cmd)) {
+                    // Extract path-looking arguments (sequences of /word/word/...)
+                    const remotePaths = cmd.match(/\/[a-zA-Z0-9_.~-]+(?:\/[a-zA-Z0-9_.~-]+){2,}/g) ?? [];
+                    for (const rp of remotePaths) {
+                        const segments = rp.split('/').filter(Boolean);
+                        // Check if any segment appears twice in succession further down the path
+                        for (let i = 0; i < segments.length; i++) {
+                            for (let j = i + 1; j < segments.length; j++) {
+                                if (segments[i] === segments[j] && segments[i].length > 3) {
+                                    // Found a repeated non-trivial segment — likely a doubled path
+                                    return `[BLOCKED: doubled path detected in remote command]\n\nThe path "${rp}" contains a repeated directory segment ("${segments[i]}" appears at positions ${i} and ${j}).\n\nThis usually means a local workspace path was appended to a remote absolute path. Remote paths must come directly from a previous find/ls result on the remote machine — do not construct them from local paths.\n\nRun: ssh <host> "find /root/payloads -name <filename> -type f" to get the correct absolute path, then retry.`;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Dry-run guard: if a Python script is being executed directly (not with --dry-run or DRY_RUN)
+                // AND it contains move/delete/rename operations, block and require a dry-run pass first.
+                const pyExecMatch = cmd.match(/(?:python3?|py)\s+['"]?([^\s'"]+\.py)/i);
+                const isDryRunArg = /--dry.?run|DRY_RUN\s*=\s*True/i.test(cmd);
+                if (pyExecMatch && !isDryRunArg) {
+                    const scriptPath2 = pyExecMatch[1];
+                    const absScript2 = path.isAbsolute(scriptPath2)
+                        ? scriptPath2
+                        : path.join(this.workspaceRoot, scriptPath2.replace(/\//g, path.sep));
+                    try {
+                        const scriptSrc = fs.readFileSync(absScript2, 'utf8');
+                        const isDestructive = /\bos\.(remove|rename|replace|rmdir)\b|\bshutil\.(move|rmtree|copy2?)\b|\bpathlib.*\.unlink\b|\bpathlib.*\.rename\b/i.test(scriptSrc);
+                        const hasDryRunSupport = /dry.?run|DRY_RUN/i.test(scriptSrc);
+                        if (isDestructive && !hasDryRunSupport) {
+                            logWarn(`[dry-run-guard] Destructive script "${scriptPath2}" has no dry-run mode`);
+                            this._guardEvents.push({ type: 'scope-guard', reason: `no dry-run in destructive script: ${scriptPath2}`, file: scriptPath2 });
+                            return `[DRY-RUN REQUIRED] The script "${scriptPath2}" performs file moves/deletes but has no --dry-run mode.\n\nBefore running it for real:\n1. Add a DRY_RUN flag to the script that prints "Would move/delete: X" instead of acting\n2. Run with DRY_RUN=True to preview what it will do\n3. Show the output to the user\n4. Only run for real once the preview looks correct\n\nEdit the script to add the dry-run guard, then retry.`;
+                        }
+                    } catch { /* script not readable locally — skip guard (may be remote) */ }
+                }
+
+                // ── Steelman check for irreversible bulk operations ───────────────
+                // Triggers when the command deletes/overwrites multiple files or overwrites a remote file via scp.
+                // Skipped in merge mode (already confirmed), when auto-approved, and for single-file ops.
+                const isAutoApprovedCmd = this._autoApprovedTools.has('run_command');
+                if (!this._mergeMode && !isAutoApprovedCmd) {
+                    const isBulkDelete = /\b(Remove-Item|rm|rmdir|del)\b.*(-Recurse|-rf|-r\b)/i.test(cmd)
+                        || (/\b(Remove-Item|rm|del)\b/i.test(cmd) && (cmd.match(/\s+['"\/][^\s'"]+/g) ?? []).length > 1);
+                    const isRemoteOverwrite = /\bscp\b/i.test(cmd) && !/\/tmp\//i.test(cmd);
+                    if (isBulkDelete || isRemoteOverwrite) {
+                        const actionDesc = isBulkDelete ? 'bulk delete' : 'remote file overwrite';
+                        logInfo(`[steelman] Triggering steelman check for ${actionDesc}: ${cmd.slice(0, 120)}`);
+                        this._guardEvents.push({ type: 'scope-guard', reason: `steelman: ${actionDesc}`, file: '' });
+                        // Return a steelman prompt as the tool result — the model must reason through
+                        // the strongest objection before this action is allowed to proceed.
+                        // If the model's next response calls the same command again, it will go through
+                        // normally (the steelman only fires once per unique command signature).
+                        const steelmanKey = cmd.toLowerCase().trim().slice(0, 200);
+                        if (!this._failedCommandSignatures.has(steelmanKey)) {
+                            this._failedCommandSignatures.set(steelmanKey, -1); // sentinel: steelmanned once
+                            return `[STEELMAN CHECK]\nYou are about to perform a ${actionDesc}:\n  ${cmd.slice(0, 200)}\n\nBefore proceeding, answer internally:\n1. What is the strongest reason NOT to do this? (wrong files? needed later? safer alternative?)\n2. Can you refute that reason in one sentence?\n\nIf yes — call this exact run_command again to proceed.\nIf no — stop and ask the user to confirm with the specific concern.`;
+                        }
+                        // Already steelmanned this command — clear the sentinel and allow through
+                        this._failedCommandSignatures.delete(steelmanKey);
+                    }
+                }
+
                 // In merge mode, Add-Content and Remove-Item are auto-approved (no user prompt needed)
                 const isMergeAutoApprove = this._mergeMode && (
                     /\bAdd-Content\b/i.test(cmd) || /\bRemove-Item\b/i.test(cmd)
                 );
-                const accepted = isMergeAutoApprove || await this.requestConfirmation('run', cmd, 'run_command');
+                const accepted = isMergeAutoApprove || isAutoApprovedCmd || await this.requestConfirmation('run', cmd, 'run_command');
                 if (!accepted) { return 'Command cancelled by user.'; }
 
                 return this.runCommandStreaming(cmd, root, _toolId);
@@ -7115,9 +7753,274 @@ If the code looks correct, respond with exactly: OK`;
                 return `Refactoring complete: ${result.success} file(s) modified successfully.`;
             }
 
+            // ── task_checkpoint ────────────────────────────────────────────────
+            case 'task_checkpoint': {
+                const cpTaskId = String(args.task_id ?? '').replace(/[^a-z0-9_-]/gi, '_').slice(0, 64);
+                if (!cpTaskId) { throw new Error('task_id is required'); }
+                const cpStage = String(args.stage ?? 'unknown');
+                const cpOffset = Number(args.offset ?? 0);
+                const cpState = args.state ?? {};
+
+                const cpTaskDir = path.join(root, '.ollamapilot', 'tasks', cpTaskId);
+                if (!fs.existsSync(cpTaskDir)) { fs.mkdirSync(cpTaskDir, { recursive: true }); }
+
+                const cpData = { task_id: cpTaskId, stage: cpStage, offset: cpOffset, state: cpState, ts: new Date().toISOString() };
+                fs.writeFileSync(path.join(cpTaskDir, 'checkpoint.json'), JSON.stringify(cpData, null, 2), 'utf8');
+
+                // Also append to task log
+                const cpLogPath = path.join(cpTaskDir, 'log.md');
+                const cpTs = new Date().toISOString().replace('T', ' ').slice(0, 19);
+                if (!fs.existsSync(cpLogPath)) { fs.writeFileSync(cpLogPath, `# Task: ${cpTaskId}\n\nCreated: ${cpTs}\n`, 'utf8'); }
+                fs.appendFileSync(cpLogPath, `\n### [${cpTs}] ⏸ CHECKPOINT\nStage: ${cpStage} | Offset: ${cpOffset}\n`, 'utf8');
+
+                return `Checkpoint saved: stage=${cpStage}, offset=${cpOffset} → .ollamapilot/tasks/${cpTaskId}/checkpoint.json`;
+            }
+
+            // ── task_report ────────────────────────────────────────────────────
+            case 'task_report': {
+                const rptTaskId = String(args.task_id ?? '').replace(/[^a-z0-9_-]/gi, '_').slice(0, 64);
+                if (!rptTaskId) { throw new Error('task_id is required'); }
+                const rptTitle = String(args.title ?? `Task Report: ${rptTaskId}`);
+                const rptSummary = String(args.summary ?? '');
+                const rptStats: Array<{ label: string; value: string }> = Array.isArray(args.stats) ? args.stats : [];
+                const rptSample: string[][] = Array.isArray(args.sample) ? args.sample : [];
+
+                const rptDate = new Date().toISOString().replace('T', ' ').slice(0, 19);
+                const statsRows = rptStats.map(s => `<tr><td>${s.label}</td><td><strong>${s.value}</strong></td></tr>`).join('\n');
+                const sampleHtml = rptSample.length > 1
+                    ? `<h2>Sample</h2><table><thead><tr>${rptSample[0].map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${rptSample.slice(1).map(row => `<tr>${row.map(c => `<td>${c}</td>`).join('')}</tr>`).join('\n')}</tbody></table>`
+                    : '';
+
+                const html = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>${rptTitle}</title>
+<style>body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#e0e0e0;background:#1e1e1e}
+h1{color:#4ec9b0;border-bottom:1px solid #444;padding-bottom:.5rem}h2{color:#9cdcfe;margin-top:2rem}
+table{width:100%;border-collapse:collapse;margin-top:1rem}th,td{padding:.5rem .75rem;border:1px solid #444;text-align:left}
+th{background:#2d2d2d;color:#9cdcfe}tr:nth-child(even){background:#252525}
+.summary{background:#2d2d2d;border-left:4px solid #4ec9b0;padding:1rem;border-radius:4px;margin:1rem 0}
+.meta{color:#888;font-size:.85rem}</style></head>
+<body><h1>${rptTitle}</h1>
+<p class="meta">Generated: ${rptDate} | Task: <code>${rptTaskId}</code></p>
+<div class="summary">${rptSummary}</div>
+<h2>Statistics</h2><table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>${statsRows}</tbody></table>
+${sampleHtml}
+</body></html>`;
+
+                const rptDir = path.join(root, '.ollamapilot', 'tasks', rptTaskId);
+                if (!fs.existsSync(rptDir)) { fs.mkdirSync(rptDir, { recursive: true }); }
+                const rptPath = path.join(rptDir, 'report.html');
+                fs.writeFileSync(rptPath, html, 'utf8');
+
+                // Open in VS Code Simple Browser
+                const rptUri = vscode.Uri.file(rptPath);
+                vscode.commands.executeCommand('simpleBrowser.show', rptUri).then(undefined, () => {
+                    vscode.env.openExternal(rptUri);
+                });
+
+                this.postFn({ type: 'fileChanged', path: `.ollamapilot/tasks/${rptTaskId}/report.html`, action: 'created' });
+                return `Report written to .ollamapilot/tasks/${rptTaskId}/report.html and opened in browser.`;
+            }
+
+            // ── workspace_index ────────────────────────────────────────────────
+            case 'workspace_index': {
+                const idxPaths: string[] = Array.isArray(args.paths) ? args.paths.map(String) : [];
+                if (idxPaths.length === 0) { throw new Error('paths array is required'); }
+                const idxForce = Boolean(args.force ?? false);
+                const STALE_MS = 7 * 24 * 60 * 60 * 1000;
+                const idxDir = path.join(root, '.ollamapilot', 'index');
+                if (!fs.existsSync(idxDir)) { fs.mkdirSync(idxDir, { recursive: true }); }
+
+                const indexed: string[] = [];
+                const skipped: string[] = [];
+
+                for (const pattern of idxPaths) {
+                    // Resolve glob to actual files using simple recursive scan
+                    const absPattern = path.isAbsolute(pattern) ? pattern : path.join(root, pattern);
+                    let candidates: string[] = [];
+                    try {
+                        // Use shell_read-style find to list files matching the pattern
+                        const { execSync: execS } = require('child_process') as typeof import('child_process');
+                        const isWin = process.platform === 'win32';
+                        const findCmd = isWin
+                            ? `powershell -NoProfile -Command "Get-ChildItem -Path '${root}' -Recurse -File | Where-Object { $_.FullName -like '*${pattern.replace(/\*\*/g, '*')}*' } | Select-Object -ExpandProperty FullName"`
+                            : `find "${root}" -type f -name "${path.basename(pattern)}" 2>/dev/null`;
+                        const out = execS(findCmd, { timeout: 10000, encoding: 'utf8' });
+                        candidates = out.split('\n').map(l => l.trim()).filter(Boolean);
+                    } catch {
+                        // Fall back to treating as literal file path
+                        if (fs.existsSync(absPattern)) { candidates = [absPattern]; }
+                    }
+
+                    for (const filePath of candidates) {
+                        let lineCount = 0;
+                        try { lineCount = fs.readFileSync(filePath, 'utf8').split('\n').length; } catch { continue; }
+                        if (lineCount < 200) { skipped.push(`${filePath} (${lineCount} lines — too small)`); continue; }
+
+                        const relPath = path.relative(root, filePath).replace(/\\/g, '/');
+                        const summaryPath = path.join(idxDir, relPath + '.summary.md');
+                        const summaryDir = path.dirname(summaryPath);
+
+                        // Check freshness
+                        if (!idxForce && fs.existsSync(summaryPath)) {
+                            const age = Date.now() - fs.statSync(summaryPath).mtimeMs;
+                            if (age < STALE_MS) { skipped.push(`${relPath} (fresh summary exists)`); continue; }
+                        }
+
+                        if (!fs.existsSync(summaryDir)) { fs.mkdirSync(summaryDir, { recursive: true }); }
+
+                        // Build summary based on file type
+                        const ext = path.extname(filePath).toLowerCase();
+                        const now = new Date().toISOString().slice(0, 10);
+                        let summaryContent = `# Index: ${relPath}\n\nIndexed: ${now} | Lines: ${lineCount}\n\n`;
+
+                        try {
+                            const raw = fs.readFileSync(filePath, 'utf8');
+                            const lines = raw.split('\n');
+
+                            if (['.ts', '.js', '.py', '.go', '.java', '.cs', '.rs'].includes(ext)) {
+                                // Extract function/class/method signatures
+                                const sigPatterns = [
+                                    /^(export\s+)?(async\s+)?function\s+\w+/,
+                                    /^(export\s+)?(abstract\s+)?class\s+\w+/,
+                                    /^\s*(public|private|protected|async|static)?\s*(async\s+)?\w+\s*\([^)]*\)\s*[:{]/,
+                                    /^def\s+\w+/,
+                                    /^(pub\s+)?fn\s+\w+/,
+                                    /^func\s+\w+/,
+                                ];
+                                const sigs = lines.filter((l, i) => sigPatterns.some(p => p.test(l)) && i > 0)
+                                    .slice(0, 80)
+                                    .map(l => l.trim());
+                                summaryContent += `## Signatures\n\`\`\`\n${sigs.join('\n')}\n\`\`\`\n\n`;
+                                summaryContent += `## First 20 lines\n\`\`\`\n${lines.slice(0, 20).join('\n')}\n\`\`\`\n`;
+                            } else if (['.csv', '.tsv'].includes(ext)) {
+                                const header = lines[0] ?? '';
+                                const sampleLines = lines.slice(1, 6);
+                                summaryContent += `## Columns\n${header}\n\n## Sample rows (first 5)\n\`\`\`\n${sampleLines.join('\n')}\n\`\`\`\n\n`;
+                                summaryContent += `## Stats\n- Total rows: ${lineCount - 1}\n- Columns: ${header.split(',').length}\n`;
+                            } else if (['.json'].includes(ext)) {
+                                const preview = raw.slice(0, 800);
+                                summaryContent += `## Structure preview\n\`\`\`json\n${preview}\n\`\`\`\n`;
+                            } else {
+                                // Generic: first + last 15 lines
+                                summaryContent += `## First 15 lines\n\`\`\`\n${lines.slice(0, 15).join('\n')}\n\`\`\`\n\n`;
+                                summaryContent += `## Last 15 lines\n\`\`\`\n${lines.slice(-15).join('\n')}\n\`\`\`\n`;
+                            }
+                        } catch { summaryContent += '(could not read file for summary)\n'; }
+
+                        fs.writeFileSync(summaryPath, summaryContent, 'utf8');
+                        indexed.push(`${relPath} (${lineCount} lines)`);
+                    }
+                }
+
+                const result = [`Indexed ${indexed.length} file(s):`, ...indexed.map(f => `  ✓ ${f}`), skipped.length > 0 ? `Skipped ${skipped.length}: ${skipped.slice(0, 3).join(', ')}` : ''].filter(Boolean).join('\n');
+                return result || 'No files matched the provided paths.';
+            }
+
+            // ── schedule_task ──────────────────────────────────────────────────
+            case 'schedule_task': {
+                const schName = String(args.name ?? '').replace(/[^a-z0-9_-]/gi, '_').slice(0, 64);
+                if (!schName) { throw new Error('name is required'); }
+                const schScript = String(args.script_path ?? '');
+                if (!schScript) { throw new Error('script_path is required'); }
+                const schInterval = Math.max(0.5, Number(args.interval_hours ?? 24));
+                const schDesc = String(args.description ?? '');
+
+                const schDir = path.join(root, '.ollamapilot', 'schedules');
+                if (!fs.existsSync(schDir)) { fs.mkdirSync(schDir, { recursive: true }); }
+
+                const schData = {
+                    name: schName,
+                    script_path: schScript,
+                    interval_hours: schInterval,
+                    description: schDesc,
+                    created: new Date().toISOString(),
+                };
+                fs.writeFileSync(path.join(schDir, `${schName}.json`), JSON.stringify(schData, null, 2), 'utf8');
+
+                return `Schedule saved: "${schName}" will run "${schScript}" every ${schInterval}h → .ollamapilot/schedules/${schName}.json`;
+            }
+
+            // ── task_log ───────────────────────────────────────────────────────
+            case 'task_log': {
+                const taskId = String(args.task_id ?? '').replace(/[^a-z0-9_-]/gi, '_').slice(0, 64);
+                if (!taskId) { throw new Error('task_id is required'); }
+                const status = String(args.status ?? 'step');
+                const message = String(args.message ?? '').slice(0, 500);
+                const scriptPath = args.script_path ? String(args.script_path) : undefined;
+
+                const taskDir = path.join(root, '.ollamapilot', 'tasks', taskId);
+                if (!fs.existsSync(taskDir)) { fs.mkdirSync(taskDir, { recursive: true }); }
+
+                const logPath = path.join(taskDir, 'log.md');
+                const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+                const statusEmoji = { started: '🚀', step: '→', validated: '✓', failed: '✗', done: '✅' }[status] ?? '·';
+                const scriptLine = scriptPath ? `\n  Script: \`${scriptPath}\`` : '';
+                const entry = `\n### [${ts}] ${statusEmoji} ${status.toUpperCase()}\n${message}${scriptLine}\n`;
+
+                // Create log with header if new
+                if (!fs.existsSync(logPath)) {
+                    fs.writeFileSync(logPath, `# Task: ${taskId}\n\nCreated: ${ts}\n`, 'utf8');
+                }
+                fs.appendFileSync(logPath, entry, 'utf8');
+
+                // Change journal side-effect: when done, append to CHANGES.md at workspace root
+                if (status === 'done') {
+                    const changesPath = path.join(root, 'CHANGES.md');
+                    const date = ts.slice(0, 10);
+                    const journalEntry = `- [${date}] **${taskId}**: ${message}\n`;
+                    if (!fs.existsSync(changesPath)) {
+                        fs.writeFileSync(changesPath, `# Change Journal\n\nAuto-maintained by OllamaPilot. Each completed task is recorded here.\n\n`, 'utf8');
+                    }
+                    fs.appendFileSync(changesPath, journalEntry, 'utf8');
+                }
+
+                return `Logged to .ollamapilot/tasks/${taskId}/log.md [${status}]`;
+            }
+
             default:
                 throw new Error(`Unknown tool: "${name}". Available tools: ${TOOL_DEFINITIONS.map((t) => (t as { function: { name: string } }).function.name).join(', ')}`);
         }
+    }
+
+    // ── SSH argument parser ──────────────────────────────────────────────────
+    // Parse a shell command string into [executable, ...args] without invoking a
+    // shell. This lets us spawn ssh/scp/sftp directly on Windows, bypassing
+    // cmd.exe which doesn't understand single quotes and mangles forward slashes.
+
+    private static parseSshArgs(raw: string): string[] {
+        // Tokenize a shell command string respecting single and double quotes,
+        // without invoking a shell. Whitespace outside quotes splits tokens;
+        // whitespace inside quotes is preserved as part of the token.
+        const tokens: string[] = [];
+        const s = raw.trim();
+        let i = 0;
+        while (i < s.length) {
+            // Skip leading whitespace between tokens
+            while (i < s.length && /[ \t]/.test(s[i])) { i++; }
+            if (i >= s.length) { break; }
+            let tok = '';
+            // Consume one token (may be built from multiple adjacent quoted/unquoted segments)
+            while (i < s.length && !/[ \t]/.test(s[i])) {
+                if (s[i] === '"') {
+                    // Double-quoted segment: consume until closing ", handling backslash escapes
+                    i++;
+                    while (i < s.length && s[i] !== '"') {
+                        if (s[i] === '\\' && i + 1 < s.length) { tok += s[++i]; }
+                        else { tok += s[i]; }
+                        i++;
+                    }
+                    if (i < s.length) { i++; } // skip closing "
+                } else if (s[i] === "'") {
+                    // Single-quoted segment: no escaping, consume until closing '
+                    i++;
+                    while (i < s.length && s[i] !== "'") { tok += s[i++]; }
+                    if (i < s.length) { i++; } // skip closing '
+                } else {
+                    tok += s[i++];
+                }
+            }
+            tokens.push(tok);
+        }
+        return tokens;
     }
 
     // ── Streaming command execution ───────────────────────────────────────────
@@ -7140,7 +8043,11 @@ If the code looks correct, respond with exactly: OK`;
             //   3. PowerShell cmdlets / local mkdir/mv/cp/rm on Windows → powershell.exe array args
             //   4. Everything else → collapse newlines (injection guard) then shell:true
 
+            // A command starting with ssh/scp/sftp that also contains && or ; is a chained shell
+            // command — it must go through shell:true so the shell interprets the separator.
+            // parseSshArgs only handles single ssh/scp invocations; chaining breaks its tokenizer.
             const isSshCmd = /^\s*(ssh|scp|sftp)\s/.test(cmd);
+            const isSshChained = isSshCmd && /(?:^|[^&])&&|;/.test(cmd); // && or ; present
             const pyMatch  = !isSshCmd && cmd.trimStart().match(/^(python3?|py)\s+-c\s+"([\s\S]*)"\s*$/);
             let safeCmd = cmd;
             if (!isSshCmd && !pyMatch) {
@@ -7154,8 +8061,28 @@ If the code looks correct, respond with exactly: OK`;
                 && (/^(Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Measure-Object|Sort-Object|mkdir|md|rmdir)$/.test(firstToken)
                     || /\$_|\$PSItem/.test(safeCmd));
 
-            const child = isSshCmd
-                ? spawn(cmd.trim(), { cwd, env: { ...process.env }, shell: true, windowsHide: true })
+            // PowerShell 5 doesn't support && — rewrite to ; for PS-routed commands.
+            // We only rewrite && that appear OUTSIDE quoted strings to avoid mangling remote payloads.
+            // Simple heuristic: replace ' && ' with ' ; ' when running through PS (not SSH/python).
+            if (isPSCmd && safeCmd.includes('&&')) {
+                safeCmd = safeCmd.replace(/\s*&&\s*/g, '; ');
+                logInfo(`[run_command] Rewrote && → ; for PowerShell compatibility`);
+            }
+
+            const child = (isSshCmd && !isSshChained)
+                ? (() => {
+                    const args = Agent.parseSshArgs(cmd.trim());
+                    const exe = args.shift()!;
+                    // Inject non-interactive SSH options immediately after the binary so
+                    // the command never blocks waiting for a password or host-key prompt.
+                    // StrictHostKeyChecking=accept-new auto-accepts new host keys (safe for
+                    // first-time connections) but refuses changed keys (MITM protection).
+                    if (/^(ssh|scp|sftp)$/.test(exe.split(/[\\/]/).pop() ?? exe)) {
+                        args.unshift('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=accept-new');
+                    }
+                    logInfo(`[ssh] Spawning without shell: ${exe} ${args.map(a => JSON.stringify(a)).join(' ')}`);
+                    return spawn(exe, args, { cwd, env: { ...process.env }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+                })()
                 : pyMatch
                     ? spawn(pyMatch[1], ['-c', pyMatch[2]], { cwd, env: { ...process.env } })
                     : isPSCmd
@@ -7200,14 +8127,15 @@ If the code looks correct, respond with exactly: OK`;
                 finish(-1);
             });
 
-            // Hard timeout: 60 s
+            // Hard timeout: 120s for SSH (remote scripts can be slow), 60s otherwise
+            const timeoutMs = isSshCmd ? 120_000 : 60_000;
             const timer = setTimeout(() => {
                 if (!finished) {
                     child.kill();
-                    post({ type: 'commandChunk', id: cmdId, text: '\n(timed out after 60s)', stream: 'stderr' });
+                    post({ type: 'commandChunk', id: cmdId, text: `\n(timed out after ${timeoutMs / 1000}s)`, stream: 'stderr' });
                     finish(-1);
                 }
-            }, 60_000);
+            }, timeoutMs);
         });
     }
 
@@ -7229,6 +8157,7 @@ If the code looks correct, respond with exactly: OK`;
             //   4. Everything else → collapse newlines then shell:true
 
             const isSshCmdR = /^\s*(ssh|scp|sftp)\s/.test(cmd);
+            const isSshChainedR = isSshCmdR && /(?:^|[^&])&&|;/.test(cmd);
             const pyMatchR  = !isSshCmdR && cmd.trimStart().match(/^(python3?|py)\s+-c\s+"([\s\S]*)"\s*$/);
             let cmdR = cmd;
             if (!isSshCmdR && !pyMatchR) {
@@ -7240,14 +8169,28 @@ If the code looks correct, respond with exactly: OK`;
                 && (/^(Get-ChildItem|Get-Content|Set-Content|Out-File|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Out-Host|Measure-Object|Sort-Object|mkdir|md|rmdir)$/.test(firstTokenR)
                     || /\$_|\$PSItem/.test(cmdR));
 
-            const spawnArgs: [string, string[], object] = isSshCmdR
-                ? [cmd.trim(), [], { cwd, env: { ...process.env }, shell: true }]
-                : pyMatchR
-                    ? [pyMatchR[1], ['-c', pyMatchR[2]], { cwd, env: { ...process.env } }]
-                    : isPowerShellCmd
-                        ? ['powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmdR], { cwd, env: { ...process.env } }]
-                        : [cmdR, [], { cwd, env: { ...process.env }, shell: true }];
-            const child = spawn(...spawnArgs);
+            // PowerShell 5 doesn't support && — rewrite to ; for PS-routed commands.
+            if (isPowerShellCmd && cmdR.includes('&&')) {
+                cmdR = cmdR.replace(/\s*&&\s*/g, '; ');
+                logInfo(`[shell_read] Rewrote && → ; for PowerShell compatibility`);
+            }
+
+            let child;
+            if (isSshCmdR && !isSshChainedR) {
+                const args = Agent.parseSshArgs(cmd.trim());
+                const exe = args.shift()!;
+                if (/^s[sc]p?h?$/.test(exe.split(/[\\/]/).pop() ?? exe)) {
+                    args.unshift('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=accept-new');
+                }
+                logInfo(`[ssh/shell_read] Spawning without shell: ${exe} ${args.map(a => JSON.stringify(a)).join(' ')}`);
+                child = spawn(exe, args, { cwd, env: { ...process.env }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+            } else if (pyMatchR) {
+                child = spawn(pyMatchR[1], ['-c', pyMatchR[2]], { cwd, env: { ...process.env } });
+            } else if (isPowerShellCmd) {
+                child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmdR], { cwd, env: { ...process.env } });
+            } else {
+                child = spawn(cmdR, [], { cwd, env: { ...process.env }, shell: true });
+            }
             this.trackChild(child);
 
             let output = '';
@@ -7292,13 +8235,15 @@ If the code looks correct, respond with exactly: OK`;
                 finish(-1);
             });
 
+            // SSH commands get a longer timeout — remote scripts over large directories can be slow
+            const timeoutMs = isSshCmdR ? 120_000 : 30_000;
             const timer = setTimeout(() => {
                 if (!finished) {
                     child.kill();
-                    post({ type: 'commandChunk', id: cmdId, text: '\n(timed out after 30s)', stream: 'stderr' });
+                    post({ type: 'commandChunk', id: cmdId, text: `\n(timed out after ${timeoutMs / 1000}s)`, stream: 'stderr' });
                     finish(-1);
                 }
-            }, 30_000);
+            }, timeoutMs);
         });
     }
 
@@ -8095,6 +9040,36 @@ If the code looks correct, respond with exactly: OK`;
             const surrounding = text.slice(start, match.index + match[0].length + 10);
             if (hasNegative(surrounding)) { continue; }
             saves.push({ tier: 0, content: `Port: ${port}`, tags: ['port', 'infrastructure'] });
+        }
+
+        // ── Extract SSH user@host credentials ────────────────────────────
+        // Matches: ssh user@ip, scp user@ip, ssh -i key user@ip, user@ip:/path
+        const sshPattern = /\b(?:ssh|scp|sftp)\b[^@\n]{0,40}?\b([a-z][a-z0-9_-]{0,30})@((?:\d{1,3}\.){3}\d{1,3})\b/gi;
+        let sshMatch: RegExpExecArray | null;
+        while ((sshMatch = sshPattern.exec(text)) !== null) {
+            const user = sshMatch[1];
+            const ip = sshMatch[2];
+            // Skip generic/placeholder names
+            if (/^(root|admin|user|test|localhost|example)$/.test(user)) { continue; }
+            const sshFact = `SSH: ${user}@${ip}`;
+            if (existingContext.includes(`${user}@${ip}`)) { continue; }
+            saves.push({ tier: 0, content: sshFact, tags: ['ssh', 'infrastructure', 'credentials'] });
+            // Also write to context.md if it doesn't already have this host
+            try {
+                const contextPath = path.join(this.workspaceRoot, '.ollamapilot', 'context.md');
+                const existing = fs.existsSync(contextPath) ? fs.readFileSync(contextPath, 'utf8') : '';
+                if (!existing.includes(`${user}@${ip}`)) {
+                    const hostLine = `\n- \`${ip}\` — SSH: \`ssh ${user}@${ip}\` (auto-detected from conversation)`;
+                    // Append under Known remote hosts if section exists, else append at end
+                    const updated = existing.includes('## Known remote hosts')
+                        ? existing.replace(/## Known remote hosts\n/, `## Known remote hosts\n${hostLine}`)
+                        : existing.trimEnd() + `\n\n## Known remote hosts\n${hostLine}\n`;
+                    fs.writeFileSync(contextPath, updated, 'utf8');
+                    logInfo(`[auto-memory] Wrote SSH host to context.md: ${user}@${ip}`);
+                }
+            } catch (e) {
+                logWarn(`[auto-memory] Failed to update context.md with SSH host: ${toErrorMessage(e)}`);
+            }
         }
 
         // ── Extract technologies ONLY if user states intent ───────────────

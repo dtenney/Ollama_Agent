@@ -48,7 +48,7 @@ function makeStreamStub(
             const text = typeof resp === 'function' ? resp(callCount) : resp;
             callCount++;
             onToken(text);
-            return Promise.resolve({ content: text, toolCalls: [], avgLogprob: null });
+            return Promise.resolve({ content: text, toolCalls: [], avgLogprob: null, thinking: "" });
         }
     );
 }
@@ -188,13 +188,13 @@ describe('Agent Harness — headless integration', () => {
                 if (callNum === 1) {
                     const txt = '<tool>{"name":"list_files","arguments":{"path":"."}}</tool>';
                     onToken(txt);
-                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null });
+                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null, thinking: "" });
                 } else {
                     // Capture the tool result message
                     const last = messages.at(-1);
                     injectedContent = last?.content ?? '';
                     onToken('Here are the files.');
-                    return Promise.resolve({ content: 'Here are the files.', toolCalls: [], avgLogprob: null });
+                    return Promise.resolve({ content: 'Here are the files.', toolCalls: [], avgLogprob: null, thinking: "" });
                 }
             }
         );
@@ -249,7 +249,7 @@ describe('Agent Harness — headless integration', () => {
             (_model: string, _msgs: OllamaMessage[], _tools: unknown[], onToken: (t: string) => void, _stop: object): Promise<StreamResult> => {
                 callCount++;
                 onToken('Already exists: list_users. No change needed.');
-                return Promise.resolve({ content: 'Already exists: list_users. No change needed.', toolCalls: [], avgLogprob: null });
+                return Promise.resolve({ content: 'Already exists: list_users. No change needed.', toolCalls: [], avgLogprob: null, thinking: "" });
             }
         );
 
@@ -306,13 +306,13 @@ describe('Agent Harness — headless integration', () => {
                 if (callCount === 1) {
                     const txt = '<tool>{"name":"workspace_summary","arguments":{}}</tool>';
                     onToken(txt);
-                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null });
+                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null, thinking: "" });
                 } else {
                     // The tool result was injected as a user/tool message in history
                     const lastMsg = messages.at(-1);
                     toolResultContent = lastMsg?.content ?? '';
                     onToken('Here is a summary.');
-                    return Promise.resolve({ content: 'Here is a summary.', toolCalls: [], avgLogprob: null });
+                    return Promise.resolve({ content: 'Here is a summary.', toolCalls: [], avgLogprob: null, thinking: "" });
                 }
             }
         );
@@ -374,10 +374,10 @@ describe('Agent Behaviour Benchmarks', () => {
                     const txt = `<tool>{"name":"shell_read","arguments":{"command":"Get-Content 'app/routes/customers.py'"}}</tool>`;
                     turn0WasToolCall = true;
                     onToken(txt);
-                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null });
+                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null, thinking: "" });
                 }
                 onToken('Done. Added the route.');
-                return Promise.resolve({ content: 'Done. Added the route.', toolCalls: [], avgLogprob: null });
+                return Promise.resolve({ content: 'Done. Added the route.', toolCalls: [], avgLogprob: null, thinking: "" });
             }
         );
 
@@ -407,17 +407,17 @@ describe('Agent Behaviour Benchmarks', () => {
                     const txt = `<tool>{"name":"edit_file","arguments":{"path":"${relPath}","old_string":"return []","new_string":"return ['customer1']"}}</tool>`;
                     onToken(txt);
                     editSeen = true;
-                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null });
+                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null, thinking: "" });
                 }
                 if (editSeen && callCount === 2) {
                     // Turn 1: should just respond done — NOT call shell_read
                     onToken('Done. Updated the route.');
-                    return Promise.resolve({ content: 'Done.', toolCalls: [], avgLogprob: null });
+                    return Promise.resolve({ content: 'Done.', toolCalls: [], avgLogprob: null, thinking: "" });
                 }
                 // If we get to turn 3+, the model called shell_read again (bad)
                 readsAfterEdit++;
                 onToken('Done.');
-                return Promise.resolve({ content: 'Done.', toolCalls: [], avgLogprob: null });
+                return Promise.resolve({ content: 'Done.', toolCalls: [], avgLogprob: null, thinking: "" });
             }
         );
 
@@ -463,10 +463,10 @@ describe('Agent Behaviour Benchmarks', () => {
                         `<tool>{"name":"shell_read","arguments":{"command":"Get-Content 'app/routes/customers.py'"}}</tool>`
                     ).join('');
                     onToken(reads);
-                    return Promise.resolve({ content: reads, toolCalls: [], avgLogprob: null });
+                    return Promise.resolve({ content: reads, toolCalls: [], avgLogprob: null, thinking: "" });
                 }
                 onToken('Here is the plan.');
-                return Promise.resolve({ content: 'Here is the plan.', toolCalls: [], avgLogprob: null });
+                return Promise.resolve({ content: 'Here is the plan.', toolCalls: [], avgLogprob: null, thinking: "" });
             }
         );
 
@@ -504,7 +504,7 @@ describe('Agent Behaviour Benchmarks', () => {
                     modelSawPriorWork = true;
                 }
                 onToken('The quick-add customer endpoint already exists at /customers/quick-add. No changes needed.');
-                return Promise.resolve({ content: 'Already exists.', toolCalls: [], avgLogprob: null });
+                return Promise.resolve({ content: 'Already exists.', toolCalls: [], avgLogprob: null, thinking: "" });
             }
         );
 
@@ -546,7 +546,7 @@ describe('Agent Behaviour Benchmarks', () => {
                 const sys = messages.find(m => m.role === 'system');
                 if (sys) { systemPromptSeen = sys.content ?? ''; }
                 onToken('Route already exists at /customers/<int:customer_id>. No changes needed.');
-                return Promise.resolve({ content: 'Already exists.', toolCalls: [], avgLogprob: null });
+                return Promise.resolve({ content: 'Already exists.', toolCalls: [], avgLogprob: null, thinking: "" });
             }
         );
 
@@ -585,12 +585,12 @@ describe('Agent Behaviour Benchmarks', () => {
                     // Embed the pre-encoded command directly into valid JSON
                     const txt = `<tool>{"name":"run_command","arguments":{"command":${jsonCmd}}}</tool>`;
                     onToken(txt);
-                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null });
+                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null, thinking: "" });
                 }
                 const lastMsg = messages.at(-1);
                 toolResultText = lastMsg?.content ?? '';
                 onToken('OK, writing in sections instead.');
-                return Promise.resolve({ content: 'OK', toolCalls: [], avgLogprob: null });
+                return Promise.resolve({ content: 'OK', toolCalls: [], avgLogprob: null, thinking: "" });
             }
         );
 
@@ -685,10 +685,10 @@ describe('Agent Behaviour Benchmarks', () => {
                         `<tool>{"name":"list_files","arguments":{"path":"."}}</tool>`
                     ).join('');
                     onToken(txt);
-                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null });
+                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null, thinking: "" });
                 }
                 onToken('Done.');
-                return Promise.resolve({ content: 'Done.', toolCalls: [], avgLogprob: null });
+                return Promise.resolve({ content: 'Done.', toolCalls: [], avgLogprob: null, thinking: "" });
             }
         );
 
@@ -732,10 +732,10 @@ describe('Agent Behaviour Benchmarks', () => {
                         `<tool>{"name":"shell_read","arguments":{"command":"Get-Content 'app/routes/customers.py'"}}</tool>`
                     ).join('');
                     onToken(reads);
-                    return Promise.resolve({ content: reads, toolCalls: [], avgLogprob: null });
+                    return Promise.resolve({ content: reads, toolCalls: [], avgLogprob: null, thinking: "" });
                 }
                 onToken('Here is the plan based on my research.');
-                return Promise.resolve({ content: 'Here is the plan.', toolCalls: [], avgLogprob: null });
+                return Promise.resolve({ content: 'Here is the plan.', toolCalls: [], avgLogprob: null, thinking: "" });
             }
         );
 
@@ -768,12 +768,12 @@ describe('Agent Behaviour Benchmarks', () => {
                 const callsSoFar = (sandbox.stub as sinon.SinonStub).callCount ?? 0;
                 if (toolResultSeen || callsSoFar >= 2) {
                     onToken('Done, verified the identifiers.');
-                    return Promise.resolve({ content: 'Done.', toolCalls: [], avgLogprob: null });
+                    return Promise.resolve({ content: 'Done.', toolCalls: [], avgLogprob: null, thinking: "" });
                 }
                 // Emit an edit_file call — returned with a very low avgLogprob to simulate uncertainty
                 const txt = `<tool>{"name":"edit_file","arguments":{"path":"${relPath}","old_string":"return []","new_string":"return ['customer1']"}}</tool>`;
                 onToken(txt);
-                return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: -2.5 }); // below -1.5 threshold
+                return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: -2.5, thinking: "" }); // below -1.5 threshold
             }
         );
 
@@ -814,11 +814,11 @@ describe('Agent Behaviour Benchmarks', () => {
                 if (callCount === 1) {
                     const txt = `<tool>{"name":"edit_file","arguments":{"path":"${relPath}","old_string":"return []","new_string":"return ['customer1']"}}</tool>`;
                     onToken(txt);
-                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null }); // null — no logprobs
+                    return Promise.resolve({ content: txt, toolCalls: [], avgLogprob: null, thinking: "" }); // null — no logprobs
                 }
                 secondCallHistory = messages.at(-1)?.content ?? '';
                 onToken('Done.');
-                return Promise.resolve({ content: 'Done.', toolCalls: [], avgLogprob: null });
+                return Promise.resolve({ content: 'Done.', toolCalls: [], avgLogprob: null, thinking: "" });
             }
         );
 

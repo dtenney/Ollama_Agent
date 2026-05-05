@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { OllamaAgentProvider, runDiagnostics } from './provider';
 import { fetchModels, streamChatRequest, keepAliveModel } from './ollamaClient';
 import { getConfig } from './config';
-import { channel, logInfo, logError, toErrorMessage } from './logger';
+import { channel, logInfo, logError, toErrorMessage, initFileLogger, exportLog } from './logger';
 import { startMCPServer, stopAllMCPServers } from './mcpClient';
 import { loadMCPConfig, createExampleMCPConfig } from './mcpConfig';
 import { TieredMemoryManager } from './memoryCore';
@@ -18,6 +18,7 @@ import { MultiWorkspaceManager } from './multiWorkspace';
 import { buildReviewRequest, buildCommitReviewRequest } from './codeReview';
 import { showManageTemplatesUI } from './promptTemplates';
 import { scanProjectDocs } from './docScanner';
+import { ingestMarkdownFiles } from './markdownIngest';
 import { CodeIndexer } from './codeIndex';
 import { ensureEnvironmentContext } from './environmentProbe';
 import * as fs from 'fs';
@@ -180,6 +181,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // so it never blocks activation.
     let codeIndexer: CodeIndexer | null = null;
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (workspaceRoot) { initFileLogger(workspaceRoot); }
     logInfo(`[code-index] Setup: memory.enabled=${memoryConfig.enabled}, workspaceRoot=${workspaceRoot ?? '(none)'}`);
 
     if (memoryConfig.enabled && workspaceRoot) {
@@ -823,6 +825,91 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 return;
             }
             await scanProjectDocs(memoryManager);
+            memoryViewProvider?.refresh();
+        }),
+
+        vscode.commands.registerCommand('ollamaAgent.exportLog', async () => {
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!root) { vscode.window.showWarningMessage('No workspace folder open.'); return; }
+            const exportPath = exportLog(root);
+            if (!exportPath) {
+                vscode.window.showWarningMessage('No log file found. Make sure the extension has been active for at least one session.');
+                return;
+            }
+            const doc = await vscode.workspace.openTextDocument(exportPath);
+            await vscode.window.showTextDocument(doc);
+            vscode.window.showInformationMessage(`Log exported to ${path.basename(exportPath)} — select all and copy to share with another agent.`);
+        }),
+
+        vscode.commands.registerCommand('ollamaAgent.acceptProposedRules', async () => {
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!root) { vscode.window.showWarningMessage('No workspace folder open.'); return; }
+
+            const proposedPath = path.join(root, '.ollamapilot', 'proposed_rules.md');
+            const contextPath  = path.join(root, '.ollamapilot', 'context.md');
+
+            if (!fs.existsSync(proposedPath)) {
+                vscode.window.showWarningMessage('No proposed_rules.md found. The dream cycle hasn\'t run yet or no rules were generated.');
+                return;
+            }
+
+            const proposed = fs.readFileSync(proposedPath, 'utf8').trim();
+            const firstRule = proposed.indexOf('## Rule:');
+            if (firstRule === -1) {
+                vscode.window.showWarningMessage('proposed_rules.md contains no ## Rule: blocks — nothing to accept.');
+                return;
+            }
+            const rulesContent = proposed.slice(firstRule).trim();
+
+            // Merge into .ollamapilot/context.md under ## Learned Rules
+            let existing = '';
+            if (fs.existsSync(contextPath)) {
+                existing = fs.readFileSync(contextPath, 'utf8');
+            }
+
+            const SECTION_HEADER = '## Learned Rules';
+            if (existing.includes(SECTION_HEADER)) {
+                existing = existing.trimEnd() + '\n\n' + rulesContent + '\n';
+            } else {
+                existing = (existing.trimEnd() ? existing.trimEnd() + '\n\n' : '') + SECTION_HEADER + '\n\n' + rulesContent + '\n';
+            }
+
+            const ollamaDir = path.join(root, '.ollamapilot');
+            if (!fs.existsSync(ollamaDir)) { fs.mkdirSync(ollamaDir, { recursive: true }); }
+            fs.writeFileSync(contextPath, existing, 'utf8');
+
+            // Clear proposed_rules.md so stale rules can't be double-accepted
+            fs.writeFileSync(proposedPath, `<!-- accepted ${new Date().toISOString()} — cleared -->\n`, 'utf8');
+
+            const ruleCount = (rulesContent.match(/^## Rule:/gm) || []).length;
+            logInfo(`[dream] Accepted ${ruleCount} rule(s) into context.md`);
+            vscode.window.showInformationMessage(
+                `Accepted ${ruleCount} rule${ruleCount === 1 ? '' : 's'} — merged into .ollamapilot/context.md.`
+            );
+
+            // Show context.md so user can see what was added
+            const doc = await vscode.workspace.openTextDocument(contextPath);
+            await vscode.window.showTextDocument(doc);
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('ollamaAgent.acceptDiff', async () => {
+            // Close the active diff editor — the apply dialog handles the actual accept
+            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        }),
+
+        vscode.commands.registerCommand('ollamaAgent.rejectDiff', async () => {
+            // Close the active diff editor — the apply dialog handles the actual reject
+            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        }),
+
+        vscode.commands.registerCommand('ollamaAgent.ingestMarkdown', async () => {
+            if (!memoryManager) {
+                vscode.window.showWarningMessage('Memory system not initialized.');
+                return;
+            }
+            await ingestMarkdownFiles(memoryManager);
             memoryViewProvider?.refresh();
         })
     );

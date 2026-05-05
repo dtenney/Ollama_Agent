@@ -364,9 +364,9 @@ Compile to `dist/cli.js`, expose as `npx ollamapilot` or a global `ollamapilot` 
 `.ollamapilot.json` at workspace root:
 ```json
 {
-  "ollamaBaseUrl": "http://192.168.0.29:11434",
+  "ollamaBaseUrl": "http://192.168.1.100:11434",
   "model": "qwen2.5-coder:7b-256k",
-  "qdrantUrl": "http://192.168.0.29:6333",
+  "qdrantUrl": "http://192.168.1.100:6333",
   "autoRunTests": false,
   "maxTurns": 20
 }

@@ -199,11 +199,11 @@ function formatContextSection(data: {
 
     const sshHostLines = data.sshHosts.length > 0
         ? data.sshHosts.map(h => {
-            const parts = [`- ${h.alias}`];
-            if (h.hostname && h.hostname !== h.alias) { parts.push(`→ ${h.hostname}`); }
-            if (h.user) { parts.push(`user: ${h.user}`); }
-            if (h.identityFile) { parts.push(`key: ${h.identityFile}`); }
-            return parts.join(', ');
+            // Format as explicit ssh command so the model can't confuse users across hosts
+            const target = h.user ? `${h.user}@${h.hostname ?? h.alias}` : (h.hostname ?? h.alias);
+            const cmd = `ssh ${target}`;
+            const keyNote = h.identityFile ? ` (key: ${h.identityFile})` : '';
+            return `- ${h.alias}: \`${cmd}\`${keyNote}`;
         }).join('\n')
         : '- (no SSH config found)';
 
@@ -237,6 +237,7 @@ ${sshHostLines}
 ${keyLines}
 
 **Usage:** ssh <alias or IP>, scp for file transfer. Default key: id_ed25519 if present, else id_rsa.
+**Important:** each User shown above applies ONLY to that specific host — do not use one host's user for another host.
 <!-- end:ollamapilot:env-probe -->`;
 }
 

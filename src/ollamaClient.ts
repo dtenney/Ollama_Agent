@@ -20,6 +20,8 @@ export interface StreamResult {
     toolCalls: OllamaToolCall[];
     /** Average log-probability of generated tokens, or null if the model didn't return logprobs. */
     avgLogprob: number | null;
+    /** Full thinking/reasoning content from <think> block, if any. */
+    thinking: string;
 }
 
 // ── Endpoint helpers ──────────────────────────────────────────────────────────
@@ -88,19 +90,31 @@ export function streamChatRequest(
         };
         // Only include tools if non-empty (some models reject the field when empty)
         if (tools.length) { payload.tools = tools; }
-        // Build options — temperature (if non-default) and thinking mode
+        // Build options — temperature and thinking mode
         const opts: Record<string, unknown> = {};
-        if (cfg.temperature !== 0.7) { opts.temperature = cfg.temperature; }
-        if (cfg.enableThinking) { opts.think = true; }
+        // Auto-enable thinking for models with native chain-of-thought support,
+        // even if the user hasn't explicitly toggled it.
+        const modelLower = model.toLowerCase();
+        const modelSupportsThinking = /qwen3|deepseek-r1|deepseek-r2|gemma4|phi4-reasoning/.test(modelLower);
+        const thinkingEnabled = cfg.enableThinking || modelSupportsThinking;
+        if (thinkingEnabled) {
+            opts.think = true;
+            // Accuracy over speed: use lower temperature when thinking is on.
+            // High temp + chain-of-thought = hallucination. Default 0.7 → 0.3 for thinking models.
+            const effectiveTemp = cfg.temperature !== 0.7 ? cfg.temperature : 0.3;
+            opts.temperature = effectiveTemp;
+        } else if (cfg.temperature !== 0.7) {
+            opts.temperature = cfg.temperature;
+        }
         if (Object.keys(opts).length > 0) { payload.options = opts; }
 
         const body = JSON.stringify(payload);
-        logInfo(`POST /api/chat  model=${model}  msgs=${messages.length}  think=${cfg.enableThinking}`);
+        logInfo(`POST /api/chat  model=${model}  msgs=${messages.length}  think=${thinkingEnabled}  temp=${opts.temperature ?? 0.7}`);
 
         const req = makeRequest(
             {
                 hostname, port, path: '/api/chat', method: 'POST',
-                timeout: 120_000,
+                timeout: 180_000,
                 headers: {
                     'Content-Type': 'application/json',
                     'Content-Length': Buffer.byteLength(body),
@@ -142,18 +156,19 @@ export function streamChatRequest(
                         try {
                             const p = JSON.parse(line);
                             if (p.message?.thinking) {
+                                // Send thinking via sentinel tokens so the webview can render
+                                // it as a collapsible <details> block. Accumulate for return value too.
                                 if (!thinkingStarted) {
-                                    thinkingStarted = true;
                                     onToken('\x01THINK_START\x01');
+                                    thinkingStarted = true;
                                 }
                                 fullThinking += p.message.thinking;
                                 onToken(p.message.thinking);
                             }
                             if (p.message?.content) {
                                 if (thinkingStarted && !fullContent) {
-                                    // thinking finished, content starting
-                                    onToken('\x01THINK_END\x01');
                                     thinkingStarted = false;
+                                    onToken('\x01THINK_END\x01');
                                 }
                                 fullContent += p.message.content;
                                 onToken(p.message.content);
@@ -171,13 +186,12 @@ export function streamChatRequest(
                                 }
                             }
                             if (p.done && !resolved) {
-                                if (thinkingStarted) { onToken('\x01THINK_END\x01'); }
                                 resolved = true;
                                 const avgLogprob = logprobCount > 0 ? logprobSum / logprobCount : null;
                                 if (fullThinking) { logInfo(`[think] ${fullThinking.length} thinking chars`); }
                                 if (avgLogprob !== null) { logInfo(`[logprobs] avg=${avgLogprob.toFixed(3)} over ${logprobCount} tokens`); }
                                 logInfo(`Stream done — ${fullContent.length} chars, ${toolCalls.length} tool calls`);
-                                resolve({ content: fullContent, toolCalls, avgLogprob });
+                                resolve({ content: fullContent, toolCalls, avgLogprob, thinking: fullThinking });
                             }
                         } catch { /* skip malformed line */ }
                     }
@@ -187,7 +201,7 @@ export function streamChatRequest(
                     if (!resolved) {
                         resolved = true;
                         const avgLogprob = logprobCount > 0 ? logprobSum / logprobCount : null;
-                        resolve({ content: fullContent, toolCalls, avgLogprob });
+                        resolve({ content: fullContent, toolCalls, avgLogprob, thinking: fullThinking });
                     }
                 });
                 res.on('error', reject);
@@ -195,7 +209,7 @@ export function streamChatRequest(
         );
         // Expose immediate destroy so callers can abort without waiting for next chunk
         stopRef.destroy = () => req.destroy();
-        req.on('timeout', () => { req.destroy(); reject(new Error('Chat request timed out (120s)')); });
+        req.on('timeout', () => { req.destroy(); reject(new Error('Chat request timed out (180s)')); });
         req.on('error', (err) => {
             // Ignore ECONNRESET caused by our own destroy() on stop
             if ((err as NodeJS.ErrnoException).code === 'ECONNRESET' && stopRef.stop) { return; }

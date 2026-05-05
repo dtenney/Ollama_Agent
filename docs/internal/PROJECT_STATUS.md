@@ -49,8 +49,8 @@ All 308 tests pass. TypeScript compiles clean with zero errors.
 ### Environment
 
 - **Development:** Windows, VS Code
-- **Ollama server:** `http://192.168.0.29:11434` (remote, 32GB NVIDIA GPU)
-- **Qdrant:** `http://192.168.0.29:6333` (optional, for semantic memory search)
+- **Ollama server:** `http://192.168.1.x:11434` (remote, high-VRAM GPU)
+- **Qdrant:** `http://192.168.1.x:6333` (optional, for semantic memory search)
 - **Primary test model:** `qwen3:14b-256k` (text-mode tool calling, thinking mode)
 - **Also tested with:**
   - `qwen3:8b-256k` — lighter, faster, supports thinking mode

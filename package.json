@@ -206,6 +206,14 @@
       {
         "command": "ollamaAgent.scanProjectDocs",
         "title": "Ollama: Scan Project Docs into Memory"
+      },
+      {
+        "command": "ollamaAgent.exportLog",
+        "title": "Ollama: Export Agent Log for Review"
+      },
+      {
+        "command": "ollamaAgent.acceptProposedRules",
+        "title": "OllamaPilot: Accept Proposed Rules"
       }
     ],
     "menus": {
@@ -455,7 +463,7 @@
         },
         "ollamaAgent.enableThinking": {
           "type": "boolean",
-          "default": false,
+          "default": true,
           "markdownDescription": "Enable chain-of-thought reasoning for models that support it (e.g. qwen3, deepseek-r1). The model will reason internally before responding — slower but more accurate for complex tasks like code verification, debugging, and doc cross-checking. Requires a compatible Ollama model."
         },
         "ollamaAgent.search.url": {

@@ -63,7 +63,28 @@ TypeScript / Node.js
 - `src/main.ts`: activate, deactivate
 - `src/markdownIngest.ts`: ingestMarkdownFiles
 - `src/mcpClient.ts`: MCPTool, MCPServer, startMCPServer, callMCPTool, getAllMCPTools, mcpToolsToOllamaFormat
+- `src/dreamAgent.ts`: DreamState, runDreamCycle — background consolidation of feedback logs into proposed behavioral rules
+- `src/sessionLog.ts`: SessionLogEntry — structured per-task interaction log written by the agent and read by the dream agent
 
 ## Config
 
 - `src/config.ts`
+
+## Dream Agent pipeline
+
+The self-healing feedback loop runs as a background Agent instance:
+
+1. User clicks 👎 on an assistant message → entry appended to `.ollamapilot/feedback.md`
+2. After 3+ new feedback entries or 6 hours idle, `runDreamCycle()` in `src/dreamAgent.ts` fires
+3. The background agent reads `feedback.md`, per-task logs in `.ollamapilot/tasks/`, and recent session lines
+4. Output is written to `.ollamapilot/proposed_rules.md` and a VS Code notification is shown
+5. User runs `OllamaPilot: Accept Proposed Rules` → rules merged into `.ollamapilot/context.md` under `## Learned Rules`
+6. `context.md` is injected into every agent system prompt at run time
+
+## Self-talk filtering (webview)
+
+`extractModelSelfTalk(text)` in `webview/webview.js` detects and strips model-internal monologue from the visible chat:
+
+- Splits on `"Final Answer:"` (Gemma4 / some Qwen3 variants) — everything before the marker is treated as self-talk
+- Falls back to stripping leading paragraphs that match known self-talk prefixes (e.g. "Let me think", "Okay, so")
+- Self-talk is routed into the collapsible thinking panel alongside `<think>` blocks

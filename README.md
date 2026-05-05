@@ -170,6 +170,7 @@ That's it. The agent will start responding immediately.
 
 ### 🗨️ Chat Interface
 - Cursor-style **sidebar chat panel** in the VS Code Activity Bar
+- **Multi-tab chat** — open multiple independent conversations as sidebar tabs, switch between them instantly
 - **Streaming responses** — see the AI's output token by token
 - **Markdown rendering** — formatted text, headers, lists, and more
 - **Syntax-highlighted code blocks** — offline highlight.js, 30+ languages, VS Code-themed colours
@@ -181,6 +182,7 @@ That's it. The agent will start responding immediately.
 - **New chat button** — start a fresh conversation
 - **Welcome screen** with quick-start hints
 - **Smart scrolling** — auto-scrolls during generation, pauses when you scroll up with a ↓ button to return
+- **Feedback button** — thumbs-down (👎) on any assistant message to log negative feedback for the dream agent
 
 ### 🤖 AI Agent
 - Multi-turn **agentic tool loop** — the AI can call tools, read results, then continue reasoning
@@ -192,6 +194,12 @@ That's it. The agent will start responding immediately.
 - **Project memory tools** — the AI can save and recall notes about your project
 - **Diagnostics-aware** — checks VS Code errors/warnings after edits and self-corrects
 - **Terminal reading** — reads output from VS Code integrated terminals
+
+### 🌙 Dream Agent (Self-Healing Loop)
+- **Background consolidation** — after 3+ thumbs-down interactions or 6 hours of idle time, a background agent reads `feedback.md` and session logs and distills candidate behavioral rules
+- **Proposed rules** — output written to `.ollamapilot/proposed_rules.md` with a VS Code notification prompting review
+- **Accept rules** — run `OllamaPilot: Accept Proposed Rules` (command palette) to merge the reviewed rules into `.ollamapilot/context.md` under `## Learned Rules`; stale entries in `proposed_rules.md` are cleared automatically
+- **Context pipeline** — `feedback.md` → `proposed_rules.md` → (user accepts) → `context.md` → injected into every agent system prompt
 
 ### 📎 @File Mentions
 - Type `@` in the input to trigger fuzzy file search
@@ -294,7 +302,7 @@ That's it. The agent will start responding immediately.
 - **Auto-compact** — automatically compacts conversation when context window fills up
 - **Summary preservation** — dropped messages are summarized before removal
 - **Manual compact** — click "Compact Now" when context warning appears
-- **Usage indicator** — running context percentage shown in footer
+- **Context bar** — running context percentage shown in the footer; turns amber at 75%, red at 95%
 
 ---
 
@@ -560,6 +568,8 @@ The agent uses these automatically when asked about libraries, documentation, cu
 | `Escape` | Dismiss the @mention dropdown |
 | `/` | Trigger slash command autocomplete (at start of input) |
 | `Alt+C` | Trigger inline code completion |
+| `Alt+A` | Accept diff (when diff editor is visible) |
+| `Alt+R` | Reject diff (when diff editor is visible) |
 
 ---
 
@@ -657,6 +667,7 @@ Any model available in Ollama works with this extension. Models known to work we
 | `qwen2.5-coder:7b` | ~4 GB | ⭐ Recommended starting point — excellent at coding, native tools, large context |
 | `qwen3:14b` | ~9 GB | ⭐⭐ Best results for most setups — thinking mode, strong agentic reasoning |
 | `qwen2.5-coder:1.5b` | ~1 GB | Fastest, good for quick tasks and low-VRAM machines |
+| `gemma3:27b` | ~17 GB | Google model; self-talk hidden automatically, "Final Answer:" prefix stripped |
 | `llama3.1:8b` | ~5 GB | General purpose, high quality |
 | `phi3:mini` | ~2 GB | Very fast, good for simple tasks |
 | `codellama:7b` | ~4 GB | Specialized for code generation |
@@ -665,7 +676,9 @@ Any model available in Ollama works with this extension. Models known to work we
 | `deepseek-r1:8b` | ~5 GB | Reasoning model, excellent for complex refactors |
 | `llama2` | ~4 GB | Classic, text-mode fallback activated automatically |
 
-> **Thinking models:** `qwen3.5`, `deepseek-r1`, and similar reasoning models work best with `ollamaAgent.enableThinking: true`. The agent will show a collapsible "Thought process" block before each response.
+> **Thinking models:** `qwen3`, `deepseek-r1`, and similar reasoning models emit `<think>` blocks that the extension renders as a collapsible "Thought process" panel. Enable with `ollamaAgent.enableThinking: true`.
+
+> **Self-talk filtering:** Gemma4 and some Qwen3 variants output an internal monologue before "Final Answer:". The extension detects and routes this into the thinking panel automatically so the chat shows only the final answer.
 
 > **Token limits:** The token counter in the footer automatically adapts to the known context window of your selected model. If your model is not in the built-in list, a safe default of 8 192 tokens is assumed.
 

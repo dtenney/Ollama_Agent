@@ -107,6 +107,8 @@ let mentionSelectedIdx = 0;
 /** @type {Array<{rel: string, display: string, ext: string}>} */
 let mentionResults = [];
 
+/** Debounce timer for searchFiles — avoids a message per keystroke */
+let mentionSearchTimer = null;
 /** When true, next mention selection pins the file instead of @mentioning it */
 let pinModeActive = false;
 
@@ -723,14 +725,126 @@ function appendToken(token) {
         // During streaming: strip complete <tool>...</tool> blocks, then hide any
         // in-progress (unclosed) tool block at the tail so partial JSON doesn't show.
         let display = stripToolBlocksClient(currentRaw);
+
+        // Strip inline <think>...</think> blocks (Qwen3 embeds these in content stream).
+        // Completed blocks: extract content into a collapsible <details> block above the message.
+        // In-progress (unclosed) block: hide everything from <think> to end of string.
+        const thinkRe = /<think>([\s\S]*?)<\/think>/gi;
+        let thinkMatch;
+        let hasCompletedThink = false;
+        let collectedThinking = '';
+        while ((thinkMatch = thinkRe.exec(display)) !== null) {
+            collectedThinking += thinkMatch[1];
+            hasCompletedThink = true;
+        }
+        display = display.replace(/<think>[\s\S]*?<\/think>/gi, '');
+
+        // Render completed thinking into the collapsed details block (once)
+        if (hasCompletedThink && collectedThinking.trim()) {
+            let thinkEl = currentMsgEl.querySelector('.thinking-block');
+            if (!thinkEl) {
+                thinkEl = document.createElement('details');
+                thinkEl.className = 'thinking-block';
+                const summary = document.createElement('summary');
+                summary.textContent = '💭 Thought process';
+                const pre = document.createElement('pre');
+                pre.className = 'thinking-content';
+                pre.style.cssText = 'font-size:0.78em;opacity:0.6;white-space:pre-wrap;margin:4px 0 0;';
+                thinkEl.appendChild(summary);
+                thinkEl.appendChild(pre);
+                content.before(thinkEl);
+            }
+            const pre = thinkEl.querySelector('.thinking-content');
+            if (pre) { pre.textContent = collectedThinking.trim(); }
+        }
+
+        // Hide any in-progress (unclosed) <think> block at the tail
+        const openThinkIdx = display.toLowerCase().lastIndexOf('<think>');
+        if (openThinkIdx !== -1 && display.toLowerCase().indexOf('</think>', openThinkIdx) === -1) {
+            display = display.slice(0, openThinkIdx);
+        }
+
         // If an unclosed <tool> is still open at the end, hide everything from it onward
         const openIdx = display.toLowerCase().lastIndexOf('<tool>');
         if (openIdx !== -1) {
             display = display.slice(0, openIdx);
         }
-        content.textContent = display.trim();
+        // Extract model self-talk and route into thinking block during streaming
+        const { visible: streamVisible, selfTalk: streamSelfTalk } = extractModelSelfTalk(display);
+        if (streamSelfTalk) {
+            let thinkEl = currentMsgEl.querySelector('.thinking-block');
+            if (!thinkEl) {
+                thinkEl = document.createElement('details');
+                thinkEl.className = 'thinking-block';
+                const summary = document.createElement('summary');
+                summary.textContent = '💭 Thought process';
+                const pre = document.createElement('pre');
+                pre.className = 'thinking-content';
+                pre.style.cssText = 'font-size:0.78em;opacity:0.6;white-space:pre-wrap;margin:4px 0 0;';
+                thinkEl.appendChild(summary);
+                thinkEl.appendChild(pre);
+                content.before(thinkEl);
+            }
+            const pre = thinkEl.querySelector('.thinking-content');
+            const existing = pre ? pre.textContent : '';
+            // Only update if self-talk content changed (avoid thrashing on every token)
+            const newSelfTalk = (collectedThinking ? collectedThinking.trim() + '\n\n---\n\n' : '') + streamSelfTalk.trim();
+            if (pre && existing !== newSelfTalk) { pre.textContent = newSelfTalk; }
+        }
+        content.textContent = streamVisible.trim();
         scrollBottom();
     }
+}
+
+/**
+ * Extract model self-talk from visible output, returning both the clean answer
+ * and the extracted monologue (to be placed in the collapsed thinking block).
+ *
+ * Gemma4 and similar models emit reasoning narration then duplicate the answer
+ * after "Final Answer:". This function captures that preamble rather than discarding it.
+ *
+ * @param {string} text
+ * @returns {{ visible: string, selfTalk: string }}
+ */
+function extractModelSelfTalk(text) {
+    if (!text) { return { visible: text, selfTalk: '' }; }
+
+    // 1. "Final Answer:" splitter — keep only what follows the last marker.
+    const finalAnswerRe = /(?:^|\n)\s*(?:\*{0,2}#{0,3}\s*)?final\s+answer[:\s*]*/gi;
+    let lastMatch = null, m;
+    while ((m = finalAnswerRe.exec(text)) !== null) { lastMatch = m; }
+    if (lastMatch) {
+        const afterMarker = text.slice(lastMatch.index + lastMatch[0].length).trim();
+        const before = text.slice(0, lastMatch.index).trim();
+        if (afterMarker.length > 0) {
+            return { visible: afterMarker, selfTalk: before };
+        }
+    }
+
+    // 2. Strip leading self-talk paragraphs only (stop at first non-self-talk paragraph).
+    const selfTalkPrefixes = [
+        /^the user (?:is asking|asked|wants|needs)\b/i,
+        /^(?:from|based on) the (?:previous|earlier|above|context)\b/i,
+        /^i (?:have|already have|now have|can see|know|found)\b/i,
+        /^i (?:don['']t|do not) need to (?:call|use|run|check)\b/i,
+        /^(?:looking at|checking|reviewing) the (?:previous|earlier|above)\b/i,
+        /^(?:since|as) (?:the|i|we) (?:previous|already|can see)\b/i,
+        /^note[:\s]/i,
+    ];
+    const paragraphs = text.split(/\n\n+/);
+    let startIdx = 0;
+    for (let i = 0; i < paragraphs.length; i++) {
+        const para = paragraphs[i].trim();
+        if (selfTalkPrefixes.some(re => re.test(para))) { startIdx = i + 1; }
+        else { break; }
+    }
+    if (startIdx > 0) {
+        return {
+            visible: paragraphs.slice(startIdx).join('\n\n').trim(),
+            selfTalk: paragraphs.slice(0, startIdx).join('\n\n').trim(),
+        };
+    }
+    return { visible: text, selfTalk: '' };
 }
 
 /** Strip <tool>...</tool> blocks and raw JSON tool calls from text (client-side).
@@ -780,11 +894,31 @@ function appendSystemNote(text) {
     div.className = 'msg system-note';
     div.style.cssText = 'opacity:0.7;font-size:0.85em;padding:4px 12px;color:var(--vscode-descriptionForeground);transition:opacity 3s ease 1s;';
     div.textContent = text;
-    chatEl.appendChild(div);
-    chatEl.scrollTop = chatEl.scrollHeight;
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
     // Fade out and remove
     requestAnimationFrame(() => { div.style.opacity = '0'; });
     setTimeout(() => div.remove(), 4500);
+}
+
+/**
+ * Show a persistent resume banner at the top of the restored chat.
+ * Unlike appendSystemNote, this doesn't fade — it stays until cleared.
+ */
+function showResumeBanner(summary) {
+    // Remove any existing banner
+    document.getElementById('resume-banner')?.remove();
+    const div = document.createElement('div');
+    div.id = 'resume-banner';
+    div.style.cssText = 'font-size:0.82em;padding:5px 12px;color:var(--vscode-descriptionForeground);background:var(--vscode-editor-inactiveSelectionBackground);border-left:3px solid var(--vscode-activityBarBadge-background);margin-bottom:8px;border-radius:0 4px 4px 0;';
+    div.textContent = `↩ Resumed: ${summary}`;
+    // Insert before the first message
+    const firstMsg = messagesEl.querySelector('.message');
+    if (firstMsg) {
+        messagesEl.insertBefore(div, firstMsg);
+    } else {
+        messagesEl.appendChild(div);
+    }
 }
 
 function finalizeMessage() {
@@ -795,13 +929,47 @@ function finalizeMessage() {
     if (roleEl) { roleEl.innerHTML = 'Agent'; }
 
     // Strip tool blocks before rendering (text-mode tool calls leak into streamed content)
-    const cleanRaw = stripToolBlocksClient(currentRaw);
+    let cleanRaw = stripToolBlocksClient(currentRaw);
+
+    // Strip inline <think>...</think> blocks and move them into the collapsed details element.
+    const thinkReFinal = /<think>([\s\S]*?)<\/think>/gi;
+    let thinkMatchFinal;
+    let finalThinking = '';
+    while ((thinkMatchFinal = thinkReFinal.exec(cleanRaw)) !== null) {
+        finalThinking += thinkMatchFinal[1];
+    }
+    cleanRaw = cleanRaw.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+    // Extract model self-talk (Gemma4-style monologue / "Final Answer:" prefix).
+    // Merge it into finalThinking so it ends up in the collapsed thinking block.
+    const { visible: cleanVisible, selfTalk } = extractModelSelfTalk(cleanRaw);
+    cleanRaw = cleanVisible;
+    if (selfTalk) { finalThinking = selfTalk + (finalThinking ? '\n\n---\n\n' + finalThinking : ''); }
+
+    if (finalThinking.trim()) {
+        let thinkEl = currentMsgEl.querySelector('.thinking-block');
+        if (!thinkEl) {
+            const content2 = currentMsgEl.querySelector('.msg-content');
+            thinkEl = document.createElement('details');
+            thinkEl.className = 'thinking-block';
+            const summary = document.createElement('summary');
+            summary.textContent = '💭 Thought process';
+            const pre = document.createElement('pre');
+            pre.className = 'thinking-content';
+            pre.style.cssText = 'font-size:0.78em;opacity:0.6;white-space:pre-wrap;margin:4px 0 0;';
+            thinkEl.appendChild(summary);
+            thinkEl.appendChild(pre);
+            if (content2) { content2.before(thinkEl); }
+        }
+        const pre = thinkEl.querySelector('.thinking-content');
+        if (pre) { pre.textContent = finalThinking.trim(); }
+    }
 
     // Render full markdown
     const content = currentMsgEl.querySelector('.msg-content');
     if (content) { content.innerHTML = renderMarkdown(cleanRaw); }
 
-    // Add retry button to completed assistant messages
+    // Add retry + feedback buttons to completed assistant messages
     const header = currentMsgEl.querySelector('.msg-header');
     if (header && currentRaw) {
         const actions = document.createElement('div');
@@ -811,6 +979,12 @@ function finalizeMessage() {
         retryBtn.title = 'Retry this response';
         retryBtn.textContent = '↺ Retry';
         actions.appendChild(retryBtn);
+        const feedbackBtn = document.createElement('button');
+        feedbackBtn.className = 'msg-action-btn feedback-btn';
+        feedbackBtn.title = 'Report issue with this response';
+        feedbackBtn.textContent = '👎';
+        feedbackBtn.dataset.msgText = cleanRaw.slice(0, 800);
+        actions.appendChild(feedbackBtn);
         header.appendChild(actions);
     }
 
@@ -1160,6 +1334,86 @@ messagesEl.addEventListener('click', (e) => {
     if (msgDiv) { msgDiv.remove(); }
     setStreaming(true);
     vscode.postMessage({ command: 'retryLast', model: modelSelect.value });
+});
+
+// ── Feedback button via event delegation ──────────────────────────────────────
+
+const FEEDBACK_LABELS = [
+    { id: 'second-guessed',  label: '🔄 Second-guessed itself' },
+    { id: 'extra-loop',      label: '➿ Extra verification loop' },
+    { id: 'verbose',         label: '📝 Too verbose / over-explained' },
+    { id: 'wrong-tool',      label: '🔧 Wrong tool chosen' },
+    { id: 'ignored-result',  label: '🙈 Ignored tool result' },
+    { id: 'other',           label: '❓ Other issue' },
+];
+
+messagesEl.addEventListener('click', (e) => {
+    const btn = /** @type {HTMLElement} */ (e.target);
+    if (!btn.classList.contains('feedback-btn')) { return; }
+
+    // Remove any existing picker
+    document.querySelector('.feedback-picker')?.remove();
+
+    const picker = document.createElement('div');
+    picker.className = 'feedback-picker';
+    picker.style.cssText = [
+        'position:absolute',
+        'background:var(--vscode-menu-background,#1e1e1e)',
+        'border:1px solid var(--vscode-panel-border,#444)',
+        'border-radius:6px',
+        'padding:4px',
+        'z-index:999',
+        'display:flex',
+        'flex-direction:column',
+        'gap:2px',
+        'min-width:210px',
+        'box-shadow:0 4px 12px rgba(0,0,0,0.4)',
+    ].join(';');
+
+    const msgText = btn.dataset.msgText || '';
+
+    FEEDBACK_LABELS.forEach(({ id, label }) => {
+        const item = document.createElement('button');
+        item.style.cssText = [
+            'background:none',
+            'border:none',
+            'color:var(--vscode-menu-foreground,#ccc)',
+            'text-align:left',
+            'padding:5px 10px',
+            'cursor:pointer',
+            'font-size:12px',
+            'border-radius:4px',
+        ].join(';');
+        item.textContent = label;
+        item.onmouseenter = () => { item.style.background = 'var(--vscode-menu-selectionBackground,#04395e)'; };
+        item.onmouseleave = () => { item.style.background = 'none'; };
+        item.addEventListener('click', () => {
+            picker.remove();
+            btn.textContent = '👍';
+            btn.title = `Feedback recorded: ${label}`;
+            btn.style.opacity = '1';
+            btn.classList.remove('feedback-btn'); // prevent double-click
+            vscode.postMessage({ command: 'submitFeedback', label: id, msgText });
+        });
+        picker.appendChild(item);
+    });
+
+    // Position below the button
+    const rect = btn.getBoundingClientRect();
+    const panelRect = messagesEl.getBoundingClientRect();
+    picker.style.top = (rect.bottom - panelRect.top + messagesEl.scrollTop + 4) + 'px';
+    picker.style.left = Math.max(0, rect.left - panelRect.left - 60) + 'px';
+    messagesEl.style.position = 'relative';
+    messagesEl.appendChild(picker);
+
+    // Close on outside click
+    const close = (/** @type {MouseEvent} */ ev) => {
+        if (!picker.contains(/** @type {Node} */ (ev.target))) {
+            picker.remove();
+            document.removeEventListener('click', close, true);
+        }
+    };
+    setTimeout(() => document.addEventListener('click', close, true), 0);
 });
 
 // ── Context bar ───────────────────────────────────────────────────────────────
@@ -2015,7 +2269,10 @@ promptEl.addEventListener('input', () => {
         if (!fragment.includes(' ') && !fragment.includes('\n')) {
             mentionAtStart = atIdx;
             mentionQuery = fragment;
-            vscode.postMessage({ command: 'searchFiles', query: fragment });
+            clearTimeout(mentionSearchTimer);
+            mentionSearchTimer = setTimeout(() => {
+                vscode.postMessage({ command: 'searchFiles', query: fragment });
+            }, 150);
             return;
         }
     }
@@ -2446,6 +2703,7 @@ window.addEventListener('message', (event) => {
 
         case 'sessionLoaded':
             renderStoredSession(msg.session, msg.messages, msg.pinnedMsgIds);
+            if (msg.resumeSummary) { showResumeBanner(msg.resumeSummary); }
             break;
 
         case 'sessionSaved':
@@ -2605,7 +2863,7 @@ window.addEventListener('message', (event) => {
             break;
 
         case 'contextStats':
-            updateContextUsage(msg.percentage);
+            updateContextUsage(msg.percentage, msg.usedTokens, msg.totalTokens);
             break;
 
         case 'undoResult':

@@ -103,7 +103,7 @@ export function getConfig(): OllamaConfig {
         injectGitDiff:        c.get<boolean>('injectGitDiff',        false),
         autoSaveMemory:       c.get<boolean>('memory.autoSave',      false),
         autoCompactContext:   c.get<boolean>('autoCompactContext',   true),
-        enableThinking:       c.get<boolean>('enableThinking',       false),
+        enableThinking:       c.get<boolean>('enableThinking',       true),
         maxTurnsPerSession:   c.get<number> ('maxTurnsPerSession',   0),
         fastModel:                 c.get<string> ('routing.fastModel',             ''),
         criticModel:               c.get<string> ('routing.criticModel',            ''),

@@ -72,6 +72,12 @@ const MODEL_CONTEXT_LIMITS: Record<string, number> = {
     'gemma:7b': 8192,
     'gemma2': 8192,
     'gemma2:9b': 8192,
+
+    // Gemma4 models
+    'gemma4': 65536,
+    'gemma4:12b': 65536,
+    'gemma4:26b': 65536,
+    'gemma4:26b-65k': 65536,
 };
 
 /** Default context limit for unknown models */
@@ -274,9 +280,73 @@ export function calculateContextStats(
 }
 
 /**
+ * Proportionally shrink large tool-result messages across the history so that more
+ * conversation turns can be retained during compaction.
+ *
+ * Rather than dropping entire messages (oldest-first), this truncates the content
+ * of the largest tool/user messages to a proportional share of the available budget.
+ * Messages shorter than MIN_SHRINK_CHARS are left untouched.
+ *
+ * Call this before compactHistory when the history is over budget — it gives the
+ * oldest-first drop a lighter load and preserves more turns of recent context.
+ *
+ * @param history Mutable copy of conversation history (not modified in place — returns new array)
+ * @param budgetTokens Target token budget for the history after shrinking
+ * @returns New history array with large messages trimmed
+ */
+export function shrinkLargeToolMessages(
+    history: OllamaMessage[],
+    budgetTokens: number
+): OllamaMessage[] {
+    const MIN_SHRINK_CHARS = 800; // Don't shrink messages shorter than this
+
+    // Shallow copy so we don't mutate the original
+    const result = history.map(m => ({ ...m }));
+
+    // Calculate current total
+    let totalTokens = result.reduce((sum, m) => sum + estimateTokens(m.content) + MESSAGE_OVERHEAD_TOKENS, 0);
+
+    if (totalTokens <= budgetTokens) {
+        return result; // Already within budget
+    }
+
+    // Identify shrinkable messages (tool/user with large content), sorted largest-first
+    const shrinkable = result
+        .map((m, idx) => ({ idx, len: m.content.length }))
+        .filter(({ len }) => len > MIN_SHRINK_CHARS)
+        .sort((a, b) => b.len - a.len);
+
+    const overage = totalTokens - budgetTokens;
+
+    // Distribute the reduction proportionally across the largest messages
+    const totalShrinkableChars = shrinkable.reduce((s, { len }) => s + len, 0);
+    if (totalShrinkableChars === 0) { return result; }
+
+    for (const { idx, len } of shrinkable) {
+        if (totalTokens <= budgetTokens) { break; }
+        // How much of the overage is this message responsible for?
+        const share = len / totalShrinkableChars;
+        const charsToRemove = Math.floor(share * overage * 4); // token → char conversion (×4)
+        const newLen = Math.max(MIN_SHRINK_CHARS, len - charsToRemove);
+        if (newLen < len) {
+            const original = result[idx].content;
+            result[idx] = {
+                ...result[idx],
+                content: original.slice(0, newLen) + '\n[...truncated by context shrink]',
+            };
+            const saved = estimateTokens(original) - estimateTokens(result[idx].content);
+            totalTokens -= saved;
+            logInfo(`[context] Proportional shrink: msg[${idx}] ${len}→${newLen} chars, saved ~${saved} tokens`);
+        }
+    }
+
+    return result;
+}
+
+/**
  * Compact conversation history by removing older messages while preserving recent context.
  * Keeps the most recent N messages and removes older ones.
- * 
+ *
  * @param history Current conversation history
  * @param targetPercentage Target usage percentage after compaction (default: 50%)
  * @param modelLimit Model's context window limit

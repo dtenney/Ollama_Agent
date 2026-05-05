@@ -5,7 +5,28 @@ All notable changes to OllamaPilot will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased] — 2026-05-04
+
+### Added
+- **Multi-tab chat support** — sidebar panel supports multiple independent chat tabs; tabs persist across VS Code restarts with their own session history
+- **Dream agent / self-healing loop** (`src/dreamAgent.ts`) — background Agent instance reads `feedback.md` and per-task session logs, distills candidate behavioral rules, and writes them to `.ollamapilot/proposed_rules.md`; a VS Code notification prompts the user to review
+- **Thumbs-down feedback button** — 👎 button on every assistant message logs negative feedback to `.ollamapilot/feedback.md` for the dream agent to consume
+- **`OllamaPilot: Accept Proposed Rules` command** — merges `## Rule:` blocks from `proposed_rules.md` into `context.md` under `## Learned Rules`, then clears the proposals file
+- **`extractModelSelfTalk` in webview.js** — detects Gemma4 / Qwen3 internal monologue (splits on "Final Answer:", then strips leading self-talk paragraphs) and routes it into the collapsible thinking panel
+- **Gemma4 / Qwen3 think-block support** — `<think>` blocks collapsed by default; self-talk hidden from the main chat view
+- **SSH non-interactive mode** — `run_command` SSH calls use `BatchMode=yes` and `ConnectTimeout=10` to prevent agent hangs on interactive prompts
+- **Per-task plan files** — `plans/<task-slug>.md` auto-created at agent run start for each task
+- **`OllamaPilot: Ingest Markdown` command** — wired up `ingestMarkdownFiles` to a registered command so users can import workspace `.md` files into memory from the command palette
+- **`ollamaAgent.acceptDiff` / `ollamaAgent.rejectDiff` commands** — registered handlers for the `Alt+A` / `Alt+R` keybindings (close the active diff editor; the confirmation dialog drives the actual accept/reject)
+- **Context bar** — running context percentage in the chat footer, with amber/red thresholds at 75% / 95%
+
+### Fixed
+- Removed dead `_proposedRulesReminded` field from `src/agent.ts` (was never read or set after refactor)
+- Path traversal bypass in file tool validation
+- Logger over-redaction stripping legitimate content
+- Tab race conditions and UI state bugs in multi-tab chat
+
+## [Unreleased] — prior
 
 ### Added
 - **SQLAlchemy model integrity check** — after any `models/*.py` edit, scans for multiple FK columns referencing the same table without `foreign_keys=` on relationships; blocks with a specific `AmbiguousForeignKeysError` warning before the model continues

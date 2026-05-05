@@ -18,6 +18,7 @@ import { SmartContextManager } from './smartContext';
 import { SymbolProvider } from './symbolProvider';
 import { DiffViewManager } from './diffView';
 import { MultiWorkspaceManager } from './multiWorkspace';
+import { runDreamCycle } from './dreamAgent';
 
 /** Strip <tool>{...}</tool> blocks using brace-counting for nested JSON. */
 function stripToolBlocksFromText(text: string): string {
@@ -75,7 +76,8 @@ type WebviewMsg =
     | { command: 'webviewError'; text: string }
     | { command: 'openTab' }
     | { command: 'closeTab'; tabId: string }
-    | { command: 'switchTab'; tabId: string };
+    | { command: 'switchTab'; tabId: string }
+    | { command: 'submitFeedback'; label: string; msgText: string };
 
 // ── Serialised session summary sent to the webview ───────────────────────────
 
@@ -97,6 +99,40 @@ function toSummary(s: ChatSession): SessionSummary {
         updatedAt:    s.updatedAt,
         relativeTime: relativeTime(s.updatedAt),
     };
+}
+
+/**
+ * Build a one-line resume summary from the last few messages of a session.
+ * Shown as a persistent banner when the session is restored on reload.
+ */
+function buildResumeSummary(session: ChatSession): string {
+    const msgs = session.messages;
+    if (!msgs.length) { return ''; }
+
+    // Find the last user message
+    const lastUser = [...msgs].reverse().find(m => m.role === 'user');
+    const lastAsst = [...msgs].reverse().find(m => m.role === 'assistant');
+
+    const topic = lastUser?.content
+        ?.replace(/<active-file[\s\S]*?<\/active-file>/g, '')
+        ?.replace(/<selection[\s\S]*?<\/selection>/g, '')
+        ?.replace(/<mention[\s\S]*?<\/mention>/g, '')
+        ?.replace(/<git-diff[\s\S]*?<\/git-diff>/g, '')
+        ?.trim()
+        ?.slice(0, 120) ?? '';
+
+    // Grab first sentence of last assistant reply for more context
+    const asstSnippet = lastAsst?.content
+        ?.replace(/```[\s\S]*?```/g, '')
+        ?.replace(/\|.*\|/g, '')   // strip tables
+        ?.trim()
+        ?.match(/^.{10,120}[.!?]/)?.[0] ?? '';
+
+    const timeAgo = relativeTime(session.updatedAt);
+    const parts: string[] = [`"${session.title}" · ${timeAgo}`];
+    if (topic) { parts.push(`Last: ${topic}`); }
+    if (asstSnippet) { parts.push(asstSnippet); }
+    return parts.join(' — ');
 }
 
 // ── Tab state ─────────────────────────────────────────────────────────────────
@@ -149,6 +185,8 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
     private _smartContextEnabled: boolean = false;
     /** Pinned files (always-in-context, persisted in workspace state). */
     private _pinnedFiles: string[] = [];
+    /** Tool names permanently approved by the user — persisted across sessions. */
+    private _persistentApprovals: Set<string> = new Set();
     /** Listener for file saves to invalidate smart context import cache. */
     private _saveListener?: vscode.Disposable;
     /** Listener for webview messages — disposed on re-resolve to prevent accumulation. */
@@ -174,6 +212,9 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         this._smartContextEnabled = context.workspaceState.get('ollamaAgent.smartContextEnabled', false);
         // Restore pinned files
         this._pinnedFiles = context.workspaceState.get('ollamaAgent.pinnedFiles', []);
+        // Restore persistent tool approvals
+        const savedApprovals = context.workspaceState.get<string[]>('ollamaAgent.persistentApprovals', []);
+        this._persistentApprovals = new Set(savedApprovals);
         // Bootstrap first tab — agent is created in resolveWebviewView once we have workspaceRoot
         const sessions = this.storage.list();
         const firstSession = sessions[0] ?? this.storage.createNew(getConfig().model);
@@ -198,7 +239,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         // On subsequent re-resolves (sidebar hide/show) all tabs already have live agents —
         // do NOT replace them or we leak the old agent and destroy restored history.
         if (!this._tab.agent) {
-            this._tab.agent = new Agent(workspaceRoot, this.memory, this.codeIndexer);
+            this._tab.agent = this.makeAgent(workspaceRoot);
         }
 
         // Listen for workspace folder changes
@@ -224,7 +265,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         tab.agent?.stop();
                         tab.agent?.dispose();
                         tab.running = false;
-                        tab.agent = new Agent(newRoot, this.memory, this.codeIndexer);
+                        tab.agent = this.makeAgent(newRoot);
                         tab.session = this.storage.createNew(model);
                     }
 
@@ -254,6 +295,14 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
             // Auto-refresh AGENTS.md if stale (non-blocking background run)
             this.maybeRefreshContextFile(workspaceRoot);
+
+            // Run any overdue scheduled tasks (non-blocking)
+            this.runOverdueSchedules(workspaceRoot);
+
+            // Dream cycle: consolidate feedback into proposed behavioral rules (rate-limited)
+            runDreamCycle(workspaceRoot, this.memory, this.codeIndexer).catch(err =>
+                logInfo(`[dream] Cycle error: ${toErrorMessage(err)}`)
+            );
         }
 
         // Restore agent conversation history and task state from the loaded session
@@ -270,7 +319,8 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
 
         this._messageListener?.dispose();
         this._messageListener = webviewView.webview.onDidReceiveMessage(async (raw: WebviewMsg) => {
-            logInfo(`[webview→ext] ${raw.command}`);
+            // searchFiles fires on every keystroke — skip logging to avoid spam
+            if (raw.command !== 'searchFiles') { logInfo(`[webview→ext] ${raw.command}`); }
 
             switch (raw.command) {
 
@@ -643,7 +693,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     // Dispose old agent and rebuild with the saved history
                     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
                     this._tab.agent?.dispose();
-                    this._tab.agent = new Agent(root, this.memory, this.codeIndexer);
+                    this._tab.agent = this.makeAgent(root);
                     if (session.agentHistory.length) {
                         this._tab.agent.restoreHistory(session.agentHistory);
                     }
@@ -692,7 +742,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                     const root = this._currentWorkspaceRoot ?? '';
                     this._tabs.set(newTabId, {
                         id: newTabId,
-                        agent: new Agent(root, this.memory, this.codeIndexer),
+                        agent: this.makeAgent(root),
                         session: newSession,
                         running: false,
                     });
@@ -722,7 +772,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                             const root = this._currentWorkspaceRoot ?? '';
                             this._tabs.set(fallbackId, {
                                 id: fallbackId,
-                                agent: new Agent(root, this.memory, this.codeIndexer),
+                                agent: this.makeAgent(root),
                                 session: fallbackSession,
                                 running: false,
                             });
@@ -764,6 +814,13 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                         pinnedMsgIds: incoming.session.pinnedMsgIds || [],
                     });
                     post({ type: 'tabList', tabs: this.getTabSummaries(), activeTabId: this._activeTabId });
+                    // Restore context usage bar for the incoming tab
+                    const ctxStats = incoming.agent?.getContextStats();
+                    if (ctxStats) {
+                        post({ type: 'contextStats', percentage: ctxStats.percentage, usedTokens: ctxStats.usedTokens, totalTokens: ctxStats.totalTokens });
+                    } else {
+                        post({ type: 'contextStats', percentage: 0, usedTokens: 0, totalTokens: 0 });
+                    }
                     logInfo(`[provider] Switched to tab: ${switchMsg.tabId}`);
                     break;
                 }
@@ -893,6 +950,29 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
                 case 'confirmResponseAll': {
                     const caMsg = raw as unknown as { command: 'confirmResponseAll'; id: string; toolName: string };
                     this._agent?.resolveConfirmationAll(caMsg.toolName);
+                    // Persist so future sessions don't ask again
+                    this._persistentApprovals.add(caMsg.toolName);
+                    this.context.workspaceState.update(
+                        'ollamaAgent.persistentApprovals',
+                        [...this._persistentApprovals]
+                    );
+                    logInfo(`[provider] Persisted approval for "${caMsg.toolName}"`);
+                    break;
+                }
+
+                // ── Feedback: user flags a bad response ──────────────────────
+                case 'submitFeedback': {
+                    if (this._currentWorkspaceRoot) {
+                        const dir = path.join(this._currentWorkspaceRoot, '.ollamapilot');
+                        if (!fs.existsSync(dir)) { fs.mkdirSync(dir, { recursive: true }); }
+                        const feedbackPath = path.join(dir, 'feedback.md');
+                        const date = new Date().toISOString().slice(0, 10);
+                        const snippet = (raw.msgText || '').replace(/\n/g, ' ').slice(0, 300);
+                        const entry = `\n## [${date}] ${raw.label}\n> ${snippet}\n`;
+                        fs.appendFileSync(feedbackPath, entry, 'utf8');
+                        logInfo(`[feedback] Recorded: ${raw.label}`);
+                        post({ type: 'info', text: '📝 Feedback recorded — the agent will learn from this.' });
+                    }
                     break;
                 }
 
@@ -933,12 +1013,19 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
             setTimeout(() => {
                 post({ type: 'tabList', tabs: this.getTabSummaries(), activeTabId: this._activeTabId });
                 if (this.currentSession.messages.length) {
+                    const resumeSummary = buildResumeSummary(this.currentSession);
                     post({
                         type: 'sessionLoaded',
                         session: toSummary(this.currentSession),
                         messages: this.currentSession.messages,
                         pinnedMsgIds: this.currentSession.pinnedMsgIds || [],
+                        resumeSummary,
                     });
+                }
+                // Restore context bar
+                const ctxStats = this._tab.agent?.getContextStats();
+                if (ctxStats) {
+                    post({ type: 'contextStats', percentage: ctxStats.percentage, usedTokens: ctxStats.usedTokens, totalTokens: ctxStats.totalTokens });
                 }
             }, 300); // small delay so the webview JS has time to initialise
 
@@ -1051,6 +1138,18 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         }
     }
 
+    // ── Agent factory ─────────────────────────────────────────────────────────
+
+    /** Create a new Agent and immediately seed persistent approvals into it. */
+    private makeAgent(root: string): Agent {
+        const agent = new Agent(root, this.memory, this.codeIndexer);
+        if (this._persistentApprovals.size) {
+            agent.seedPersistentApprovals(this._persistentApprovals);
+            logInfo(`[provider] Seeded ${this._persistentApprovals.size} persistent approval(s): ${[...this._persistentApprovals].join(', ')}`);
+        }
+        return agent;
+    }
+
     // ── Session helpers ───────────────────────────────────────────────────────
 
     private startNewSession(opts: { model?: string }): void {
@@ -1058,7 +1157,7 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
         const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
         this._tab.session = this.storage.createNew(model);
         this._tab.agent?.dispose();
-        this._tab.agent = new Agent(root, this.memory, this.codeIndexer);
+        this._tab.agent = this.makeAgent(root);
         if (root && !this._fileIndex.length) {
             indexWorkspaceFiles(root).then(idx => { this._fileIndex = idx; }).catch(() => {});
         }
@@ -1090,6 +1189,58 @@ export class OllamaAgentProvider implements vscode.WebviewViewProvider {
             this.currentSession.messages[this.currentSession.messages.length - 1].role !== 'user'
         ) {
             this.currentSession.messages.pop();
+        }
+    }
+
+    /**
+     * Check .ollamapilot/schedules/ for any overdue task scripts and run them silently in the background.
+     */
+    private runOverdueSchedules(workspaceRoot: string): void {
+        const schedulesDir = path.join(workspaceRoot, '.ollamapilot', 'schedules');
+        if (!fs.existsSync(schedulesDir)) { return; }
+
+        let files: string[];
+        try {
+            files = fs.readdirSync(schedulesDir).filter(f => f.endsWith('.json') && !f.endsWith('.last_run.json'));
+        } catch { return; }
+
+        for (const file of files) {
+            try {
+                const schPath = path.join(schedulesDir, file);
+                const schedule = JSON.parse(fs.readFileSync(schPath, 'utf8')) as {
+                    name: string; script_path: string; interval_hours: number; description: string;
+                };
+                if (!schedule.script_path || !schedule.interval_hours) { continue; }
+
+                const lastRunPath = path.join(schedulesDir, file.replace('.json', '.last_run.json'));
+                let lastRunTs = 0;
+                try { lastRunTs = JSON.parse(fs.readFileSync(lastRunPath, 'utf8')).ts ?? 0; } catch { /* never run */ }
+
+                const hoursSince = (Date.now() - lastRunTs) / 3_600_000;
+                if (hoursSince < schedule.interval_hours) { continue; }
+
+                logInfo(`[schedules] Running overdue task: ${schedule.name} (${Math.floor(hoursSince)}h since last run)`);
+
+                const scriptAbs = path.isAbsolute(schedule.script_path)
+                    ? schedule.script_path
+                    : path.join(workspaceRoot, schedule.script_path);
+
+                const { exec } = require('child_process') as typeof import('child_process');
+                const ext = path.extname(scriptAbs).toLowerCase();
+                const cmd = ext === '.py' ? `python "${scriptAbs}"` : ext === '.js' ? `node "${scriptAbs}"` : `bash "${scriptAbs}"`;
+
+                exec(cmd, { cwd: workspaceRoot, timeout: 300_000 }, (err, stdout, stderr) => {
+                    const result = { ts: Date.now(), name: schedule.name, success: !err, stdout: stdout.slice(0, 2000), stderr: stderr.slice(0, 500) };
+                    try { fs.writeFileSync(lastRunPath, JSON.stringify(result, null, 2), 'utf8'); } catch { /* ignore */ }
+                    if (err) {
+                        logError(`[schedules] ${schedule.name} failed: ${err.message}`);
+                    } else {
+                        logInfo(`[schedules] ${schedule.name} completed. Output: ${stdout.slice(0, 200)}`);
+                    }
+                });
+            } catch (e) {
+                logError(`[schedules] Error processing ${file}: ${toErrorMessage(e)}`);
+            }
         }
     }
 
