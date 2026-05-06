@@ -1049,6 +1049,7 @@ When a CLI flag is rejected as unrecognized: NEVER guess a variant. Run "<tool> 
 ## Rules
 - Proposed rules reminder: if the context files include a "Pending: proposed behavioral rules" section, mention it naturally at the end of your FIRST response this session only (e.g. "By the way, you have N proposed rules ready — run 'OllamaPilot: Accept Proposed Rules' from the command palette to apply them."). Do NOT repeat it in subsequent responses.
 - Use what you already know: before searching for a file path, command, or piece of information, check whether it appeared earlier in this conversation. If you already read the script path, the OPTS line, or the remote host details — use that. Do NOT re-search for things you already have.
+- Never fabricate file paths: if a path does not exist, do NOT invent a variant. Instead: (1) use the exact path the user gave, (2) list the directory to find the real name, or (3) run find to locate it. Only create new files when explicitly asked to create something new.
 - Pre-action check (required before every edit_file or destructive run_command): verify internally — (1) have you read the current file/state this session? (2) does your old_string appear verbatim in that read? (3) is the change correct and complete, with no unintended side effects? Do not narrate this check — just do it silently before acting.
 - Steelman check (required before irreversible actions only): before deleting more than one file, overwriting a remote file via scp, or executing a plan touching more than 4 files — silently ask yourself: "What is the strongest reason NOT to do this?" If you cannot refute that reason in one sentence, stop and ask the user to confirm before proceeding. This check is silent and internal — do not narrate it. Only surface it if you cannot refute the objection.
 ## File editing strategy — choose the right tool
@@ -5674,33 +5675,51 @@ Do NOT assume you have no memory — check first.`;
                             logWarn(`[agent] PowerShell cmdlet "${badCmd}" used in Git Bash — injected bash correction`);
                         }
 
-                        // File-not-found cross-reference: if the agent tried a path that doesn't exist but the user
-                        // already gave a valid path in their message, point the model back to the correct one.
+                        // File-not-found handler: when a path doesn't exist, help the agent find the real one
+                        // rather than letting it hallucinate a filename or spiral into a planning loop.
                         if (/No such file or directory/i.test(toolResult)) {
-                            // Extract the path the agent tried from the tool args
-                            const attemptedPath = String(args.command ?? args.path ?? '').match(/['"]?([^\s'"]+)['"']?\s*$/)?.[1] ?? '';
+                            // Extract the path the agent tried
+                            const cmdStr = String(args.command ?? args.path ?? '');
+                            const attemptedPath = cmdStr.match(/['"](.*?)['"]|(\S+\.\w+)\s*$/)
+                                ?.[1] ?? cmdStr.match(/\S+\.\w+/)?.[0] ?? '';
+
                             if (attemptedPath) {
-                                // Scan recent user messages for file paths that look like real paths
+                                // 1. Collect any paths the user already provided in recent messages
                                 const userPaths: string[] = [];
                                 for (let hi = this.history.length - 1; hi >= Math.max(0, this.history.length - 10); hi--) {
                                     const msg = this.history[hi];
                                     if (msg.role !== 'user') { continue; }
                                     const content = typeof msg.content === 'string' ? msg.content : '';
-                                    // Match Windows absolute paths, Unix paths, and relative paths with extensions
-                                    const found = content.match(/[A-Za-z]:\\[^\s'"]+|\/[^\s'"]{4,}|[\w./-]+\/[\w.-]+\.(?:md|py|ts|js|yaml|yml|json|sh|txt)/g) ?? [];
+                                    const found = content.match(/[A-Za-z]:\\[^\s'">\n]+|\/[^\s'">\n]{4,}|[\w./-]+\/[\w.-]+\.(?:md|py|ts|js|yaml|yml|json|sh|txt)/g) ?? [];
                                     userPaths.push(...found);
                                 }
-                                // Find user-provided paths that differ from what the agent tried
                                 const suggestions = userPaths.filter(p => p !== attemptedPath && p.length > 4);
-                                if (suggestions.length > 0) {
-                                    const hint = `[SYSTEM] The path you tried ("${attemptedPath}") does not exist. The user already provided these paths — use the exact path from the user's message:\n${suggestions.map(p => `  ${p}`).join('\n')}\n\nDo NOT guess or derive a new filename. Use the exact path above.`;
-                                    if (isTextMode) {
-                                        this.history.push({ role: 'user', content: hint });
-                                    } else {
-                                        this.history.push({ role: 'tool', content: hint });
+
+                                // 2. Find the directory the agent was looking in and list its contents
+                                let dirListing = '';
+                                try {
+                                    const attemptedAbs = path.isAbsolute(attemptedPath)
+                                        ? attemptedPath
+                                        : path.join(this.workspaceRoot, attemptedPath);
+                                    const searchDir = path.dirname(attemptedAbs);
+                                    if (fs.existsSync(searchDir)) {
+                                        const entries = fs.readdirSync(searchDir).slice(0, 30);
+                                        dirListing = `\nActual contents of ${path.relative(this.workspaceRoot, searchDir).replace(/\\/g, '/') || '.'}:\n${entries.map(e => `  ${e}`).join('\n')}`;
                                     }
-                                    logInfo(`[agent] File-not-found correction: tried "${attemptedPath}", suggested: ${suggestions.join(', ')}`);
+                                } catch { /* ignore */ }
+
+                                const userPathBlock = suggestions.length > 0
+                                    ? `\nThe user already provided these paths — prefer these over guessing:\n${suggestions.map(p => `  ${p}`).join('\n')}`
+                                    : '';
+
+                                const hint = `[SYSTEM] "${attemptedPath}" does not exist. Do NOT invent a filename.${userPathBlock}${dirListing}\n\nNext steps (in order):\n1. If the user gave a path above, use that exact path.\n2. If the directory listing shows a similar file, use that exact name.\n3. If still uncertain, run: find . -name "*.md" | head -20  to locate the file.\nNever fabricate a path — only use paths you have confirmed exist.`;
+
+                                if (isTextMode) {
+                                    this.history.push({ role: 'user', content: hint });
+                                } else {
+                                    this.history.push({ role: 'tool', content: hint });
                                 }
+                                logInfo(`[agent] File-not-found: tried "${attemptedPath}"${suggestions.length ? `, user paths: ${suggestions.join(', ')}` : ''}${dirListing ? ', injected dir listing' : ''}`);
                             }
                         }
 
