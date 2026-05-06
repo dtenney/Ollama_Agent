@@ -316,11 +316,11 @@ EXAMPLE - Create a directory and move a file:
 <tool>{"name": "run_command", "arguments": {"command": "${py} -c \\"import shutil,pathlib; pathlib.Path('${ws}/app/routes/admin').mkdir(parents=True,exist_ok=True); shutil.move('${ws}/app/routes/admin.py','${ws}/app/routes/admin/')\\""}}</tool>
 
 EXAMPLE - Create a new source file:
-Use edit_file with old_string="" — NEVER use echo or shell redirection (collapses newlines):
-<tool>{"name": "edit_file", "arguments": {"path": "${ws}/app/services/new_service.py", "old_string": "", "new_string": "# full file content here"}}</tool>
+Use write_file — NEVER use echo or shell redirection (collapses newlines):
+<tool>{"name": "write_file", "arguments": {"path": "${ws}/app/services/new_service.py", "content": "# full file content here"}}</tool>
 
 CRITICAL: When a search returns a path, use that EXACT full path in the next call — do NOT guess.
-CRITICAL: NEVER use echo, Add-Content, Set-Content, or shell redirection to write source files — use edit_file.`;
+CRITICAL: NEVER use echo, Add-Content, Set-Content, or shell redirection to write source files — use write_file or edit_file.`;
 
     if (hasPython) { return pythonExamples; }
 
@@ -365,6 +365,22 @@ export const TOOL_DEFINITIONS = [
                     force_overwrite: { type: 'boolean', description: 'If true, overwrite the entire file with new_string, ignoring old_string. Use for: (1) corrupted files containing literal \\n characters, or (2) complete rewrites of template/HTML/CSS files where you intend to replace the entire contents.' },
                 },
                 required: ['path', 'old_string', 'new_string'],
+            },
+        },
+    },
+    {
+        type: 'function',
+        function: {
+            name: 'write_file',
+            description: 'Write complete file content to disk. Use this instead of edit_file when: (1) creating a new file, (2) the file has broken syntax that prevents old_string matching, (3) doing a full rewrite of a small file (<150 lines). Does not require old_string. Requires user confirmation.',
+            parameters: {
+                type: 'object',
+                properties: {
+                    path:    { type: 'string',  description: 'Relative path to the file to write' },
+                    content: { type: 'string',  description: 'Complete file content to write' },
+                    backup:  { type: 'boolean', description: 'If true, copy existing file to <path>.bak before overwriting (default: true for existing files)' },
+                },
+                required: ['path', 'content'],
             },
         },
     },
@@ -1029,9 +1045,24 @@ When a CLI flag is rejected as unrecognized: NEVER guess a variant. Run "<tool> 
 - Use what you already know: before searching for a file path, command, or piece of information, check whether it appeared earlier in this conversation. If you already read the script path, the OPTS line, or the remote host details — use that. Do NOT re-search for things you already have.
 - Pre-action check (required before every edit_file or destructive run_command): verify internally — (1) have you read the current file/state this session? (2) does your old_string appear verbatim in that read? (3) is the change correct and complete, with no unintended side effects? Do not narrate this check — just do it silently before acting.
 - Steelman check (required before irreversible actions only): before deleting more than one file, overwriting a remote file via scp, or executing a plan touching more than 4 files — silently ask yourself: "What is the strongest reason NOT to do this?" If you cannot refute that reason in one sentence, stop and ask the user to confirm before proceeding. This check is silent and internal — do not narrate it. Only surface it if you cannot refute the objection.
+## File editing strategy — choose the right tool
+- write_file: use this to CREATE new files, REPLACE broken files (syntax errors, can't match old_string), or do a FULL REWRITE of a file under ~150 lines. Simpler and safer than edit_file for these cases.
+- edit_file: use this for TARGETED changes to working files where you know the exact lines to change. Always read the file first.
+- Before editing any file: run "python3 -m py_compile <file>" (Python) or "node --check <file>" (JS/TS) to verify it is syntactically valid. If it has syntax errors, use write_file to replace it — do not attempt edit_file on broken files.
+- Before overwriting an important file: run "cp <file> <file>.bak" via run_command, or set backup=true on write_file.
+
+## Use your shell and language tools first
+You have Git Bash, Python 3, and git available. Use them:
+- Broken file? Run "git diff <file>" to see what changed, or "git checkout <file>" to restore the last committed version, then reapply only your changes.
+- Need to write a file? Use write_file tool, or for small content: run_command with "cat > file.py << 'PYEOF'\n<content>\nPYEOF"
+- Validate before and after every file write: run "python3 -m py_compile <file>" for Python, check exit code.
+- Syntax check a script before running it: python3 -m py_compile is instant and catches errors before wasting a run_command turn.
+- Decompose large scripts: if a script is >80 lines, split it into focused modules (one per concern). Small files are easier to write correctly, easier to validate, and easier to fix if something goes wrong.
+- Use git to your advantage: "git status" to see what's changed, "git stash" to temporarily set aside broken work, "git log --oneline -5" to understand recent history.
+
 - edit_file: old_string must be copied verbatim from the file (use shell_read first). On failure: re-read, fix, retry once. Stop after second failure.
-- When edit_file fails twice on a file with broken syntax (f-strings with embedded quotes, corrupted content, etc.): use edit_file with old_string="" and force_overwrite=true to write the complete corrected file. This is the correct escape hatch — do not keep guessing old_string.
-- Never create source files with New-Item/touch — use edit_file with old_string="" (new files) or old_string="" + force_overwrite=true (full rewrites)
+- When edit_file fails twice on a file with broken syntax (f-strings with embedded quotes, corrupted content, etc.): use write_file to write the complete corrected file. This is the correct escape hatch — do not keep guessing old_string.
+- Never create source files with New-Item/touch — use write_file (new files) or write_file (full rewrites)
 - Local directory creation on Windows: use New-Item -ItemType Directory -Force -Path "folder/name" (NOT mkdir -p, which is Linux syntax). For remote dirs via SSH, use: ssh host "mkdir -p /remote/path" — that is fine.
 - SSH remote commands: prefer unquoted multi-word commands when possible (e.g. ssh host find /root/payloads -type d -name foo). When quoting is required, use double quotes around the remote command (e.g. ssh host "python3 -c 'script'" — double on outside, single inside). Never use a single-quoted outer wrapper on SSH commands (e.g. ssh host 'cmd') as this is not reliably handled cross-platform. For complex scripts with embedded quotes, scp the script file then execute it: scp /local/script.py host:/tmp/script.py then ssh host python3 /tmp/script.py.
 - Remote path rule — CRITICAL: remote paths in ssh/scp commands must be absolute paths that came directly from a previous shell_read/find result on the remote machine. NEVER construct a remote path by appending a local relative path or workspace-relative path to a remote base. Example of the bug to avoid: if the remote base is /srv/app/myproject and the local workspace folder is also named myproject, do NOT produce /srv/app/myproject/srv/app/myproject. The correct path is simply /srv/app/myproject. When in doubt about the remote path, run ssh host "find /srv -name <filename> -type f" to get the exact path before using it.
@@ -6470,7 +6501,6 @@ If the code looks correct, respond with exactly: OK`;
             case 'list_files':
             case 'find_files':
             case 'create_file':
-            case 'write_file':
             case 'append_to_file':
             case 'rename_file':
             case 'delete_file': {
@@ -7011,6 +7041,37 @@ If the code looks correct, respond with exactly: OK`;
                 } catch { /* if read fails, skip verification silently */ }
 
                 return editResult;
+            }
+
+            // ── write_file ─────────────────────────────────────────────────
+            case 'write_file': {
+                const rel     = String(args.path ?? '');
+                const content = String(args.content ?? '');
+                const doBackup = args.backup !== false;
+
+                if (!rel)     { throw new Error('path is required'); }
+                if (!content.trim()) { throw new Error('content is required and must not be empty'); }
+
+                const full = this.safePath(root, rel);
+                try {
+                    const originalContent = fs.existsSync(full) ? fs.readFileSync(full, 'utf8') : '';
+
+                    const accepted = await this.requestConfirmation('edit', `Write "${rel}" entirely (${content.split('\n').length} lines)`, 'write_file');
+                    if (!accepted) { return 'Write cancelled by user.'; }
+
+                    if (doBackup && originalContent) {
+                        fs.copyFileSync(full, full + '.bak');
+                    }
+                    fs.mkdirSync(path.dirname(full), { recursive: true });
+                    fs.writeFileSync(full, content, 'utf8');
+                    this._lastFileOp = { path: rel, originalContent, action: 'edited' };
+                    this._editsThisRun++;
+                    this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
+                    if (!this._filesChangedThisRun.includes(rel)) { this._filesChangedThisRun.push(rel); }
+                    return `File written: ${rel} (${content.split('\n').length} lines)`;
+                } catch (e) {
+                    return toErrorMessage(e);
+                }
             }
 
             // ── edit_file_at_line ──────────────────────────────────────────
