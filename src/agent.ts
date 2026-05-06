@@ -6221,6 +6221,15 @@ Do NOT assume you have no memory — check first.`;
                     this.history.push({ role: 'tool', content: toolResultForHistory });
                 }
             }
+            // Mid-run history trim: tool pushes bypass the run-start trim, so enforce the cap here too.
+            // Keep the most recent MAX_HISTORY_MESSAGES entries. Oldest context can be recovered via
+            // compaction/summary if needed.
+            if (this.history.length > this.MAX_HISTORY_MESSAGES) {
+                const excess = this.history.length - this.MAX_HISTORY_MESSAGES;
+                this.history = this.history.slice(excess);
+                logInfo(`[agent] Mid-run history trim: removed ${excess} oldest messages`);
+            }
+
             // Sleep sentinel propagation: inner batch signaled a clean completion — exit outer loop
             if (breakAfterBatch) { break; }
 
@@ -7716,7 +7725,7 @@ If the code looks correct, respond with exactly: OK`;
                     };
                     const req = httpMod.request(reqOpts, (res: any) => {
                         let raw = '';
-                        res.on('data', (chunk: any) => { raw += chunk; });
+                        res.on('data', (chunk: any) => { if (raw.length < 500_000) { raw += chunk; } });
                         res.on('end', () => {
                             try {
                                 const data = JSON.parse(raw);
