@@ -185,6 +185,14 @@ export function streamChatRequest(
                                 }
                                 fullThinking += p.message.thinking;
                                 onToken(p.message.thinking);
+                                // Repetition guard in thinking block
+                                if (!resolved && isRepeating(fullThinking)) {
+                                    logWarn(`[stream] Repetition loop detected in thinking block after ${fullThinking.length} chars — aborting stream`);
+                                    resolved = true;
+                                    req.destroy();
+                                    const avgLogprob = logprobCount > 0 ? logprobSum / logprobCount : null;
+                                    resolve({ content: fullContent || '\n\n[Generation stopped — repetition loop detected in thinking]', toolCalls, avgLogprob, thinking: fullThinking.slice(0, -REPETITION_WINDOW) + '\n[thinking truncated — repetition detected]' });
+                                }
                             }
                             if (p.message?.content) {
                                 if (thinkingStarted && !fullContent) {
