@@ -268,11 +268,17 @@ function buildShellExamples(env: ShellEnvironment, workspaceRoot?: string): stri
 - Read file: Get-Content 'FULL/PATH/file.py'
 - Read line range: (Get-Content 'FULL/PATH/file.py' | Select-Object -Skip 473 -First 107)
 NOTE: bash is not installed. For full Unix shell support, install Git for Windows: winget install Git.Git`
-        : `## Shell fallback (${env.os === 'windows' ? 'Windows bash/Git Bash' : 'Unix'} — use Python above when possible)
+        : `## Shell fallback (${env.os === 'windows' ? 'Windows + Git Bash — Unix commands only' : 'Unix'} — use Python above when possible)
 - Find files: find '${ws}' -name '*pattern*' -not -path '*__pycache__*'
 - Search code: grep -rn 'def fetch_user' --include='*.py' '${ws}'
 - Read file: cat '/full/path/file.py'
-- Read line range: sed -n '474,580p' '/full/path/file.py'`;
+- Read line range: sed -n '474,580p' '/full/path/file.py'${env.os === 'windows' && env.bashPath ? `
+
+⛔ NEVER use PowerShell cmdlets in shell_read or run_command — the shell is Git Bash (Unix).
+These will ALL fail with "command not found":
+  Get-ChildItem, Get-Content, Set-Content, Select-Object, Select-String,
+  Where-Object, ForEach-Object, New-Item, Remove-Item, Write-Host
+Use bash equivalents instead: find, cat, grep, ls, cp, mv, rm, mkdir` : ''}`;
 
     return `Your PRIMARY tools are shell_read and run_command. Host: **${env.label}**. Workspace: ${ws}
 ${env.pythonCmd ? `Python available: **${py}** — use it first for all file operations (cross-platform, reliable).` : `Python NOT detected — use platform shell commands below.`}
@@ -5653,6 +5659,20 @@ Do NOT assume you have no memory — check first.`;
                         post({ type: 'toolResult', id: toolId, name, success: true, preview: toolResult.slice(0, 400), fullResult: toolResult.slice(0, 8000) });
                         this.consecutiveFailures = 0;
                         this.autoRetryCount = 0; // Reset stall-retry budget after each tool call
+
+                        // PowerShell-in-bash detection: if the result contains "command not found" for a known
+                        // PowerShell cmdlet, inject a hard correction so the model switches to bash equivalents.
+                        const psInBashMatch = toolResult.match(/\/usr\/bin\/bash[^\n]*\n[^\n]*: (Get-ChildItem|Get-Content|Set-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Write-Host|Add-Content|Out-File): command not found/);
+                        if (psInBashMatch) {
+                            const badCmd = psInBashMatch[1];
+                            const psHint = `[SYSTEM] ⛔ You used a PowerShell cmdlet (${badCmd}) but the shell is Git Bash — PowerShell commands do NOT work here.\n\nUse Unix bash equivalents:\n- Get-ChildItem → find / ls\n- Get-Content → cat\n- Select-String → grep\n- Select-Object → head / tail / awk\n- Where-Object → grep / awk\n- New-Item -ItemType File → touch\n- New-Item -ItemType Directory → mkdir -p\n- Remove-Item → rm\n\nOr use Python one-liners (most reliable):\n  python3 -c "import pathlib; [print(p) for p in pathlib.Path('.').rglob('*.py')]"\n\nNEVER use Get-ChildItem, Select-Object, Select-String, or any other PS cmdlet.`;
+                            if (isTextMode) {
+                                this.history.push({ role: 'user', content: psHint });
+                            } else {
+                                this.history.push({ role: 'tool', content: psHint });
+                            }
+                            logWarn(`[agent] PowerShell cmdlet "${badCmd}" used in Git Bash — injected bash correction`);
+                        }
 
                         // SyntaxError detection: if output contains a Python SyntaxError pointing at a .py file,
                         // inject a direct instruction to use write_file instead of attempting edit_file.
