@@ -5654,6 +5654,23 @@ Do NOT assume you have no memory — check first.`;
                         this.consecutiveFailures = 0;
                         this.autoRetryCount = 0; // Reset stall-retry budget after each tool call
 
+                        // SyntaxError detection: if output contains a Python SyntaxError pointing at a .py file,
+                        // inject a direct instruction to use write_file instead of attempting edit_file.
+                        const syntaxErrMatch = toolResult.match(/File "([^"]+\.py)"[^\n]*\n(?:[^\n]*\n)*?.*SyntaxError:/);
+                        if (syntaxErrMatch) {
+                            const brokenPath = syntaxErrMatch[1];
+                            const relBroken = path.isAbsolute(brokenPath)
+                                ? path.relative(this.workspaceRoot, brokenPath).replace(/\\/g, '/')
+                                : brokenPath;
+                            const syntaxHint = `[SYSTEM] ${relBroken} has a SyntaxError. Do NOT use edit_file on a broken file — old_string matching will fail.\n\nCorrect procedure:\n1. Read the file: shell_read "cat ${relBroken}"\n2. Write a corrected version: write_file with path="${relBroken}" and the full corrected content\n3. Validate: run_command "python3 -m py_compile ${relBroken}"\n\nDo not attempt edit_file until the file passes py_compile.`;
+                            if (isTextMode) {
+                                this.history.push({ role: 'user', content: syntaxHint });
+                            } else {
+                                this.history.push({ role: 'tool', content: syntaxHint });
+                            }
+                            logInfo(`[agent] SyntaxError detected in ${relBroken} — injected write_file guidance`);
+                        }
+
                         // Sleep sentinel: if the model already gave completion language and this
                         // tool result is clean, signal an outer-loop break so we don't cycle back
                         // for another LLM call. Only applies to read-only verification tools.
