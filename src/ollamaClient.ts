@@ -1,7 +1,7 @@
 import * as http from 'http';
 import * as https from 'https';
 import { getConfig, parseBaseUrl } from './config';
-import { logInfo, logError, toErrorMessage } from './logger';
+import { logInfo, logWarn, logError, toErrorMessage } from './logger';
 
 // ── Shared types ──────────────────────────────────────────────────────────────
 
@@ -144,6 +144,27 @@ export function streamChatRequest(
                 // Logprob accumulation — Ollama returns per-token logprobs when logprobs:true is set
                 let logprobSum = 0;
                 let logprobCount = 0;
+                // Repetition detection — abort if the model enters a token loop
+                // (e.g. "brokensoitis" repeated thousands of times)
+                const REPETITION_WINDOW = 400;   // chars to inspect
+                const REPETITION_PHRASE = 20;    // min phrase length
+                const REPETITION_THRESHOLD = 8;  // times seen = abort
+
+                const isRepeating = (content: string): boolean => {
+                    // Slide a window over the last N chars of content
+                    const tail = content.slice(-REPETITION_WINDOW);
+                    if (tail.length < REPETITION_PHRASE * REPETITION_THRESHOLD) { return false; }
+                    // Try phrase lengths from short to medium
+                    for (let len = REPETITION_PHRASE; len <= 60; len++) {
+                        const phrase = tail.slice(-len);
+                        // Count non-overlapping occurrences in the tail
+                        let count = 0;
+                        let pos = 0;
+                        while ((pos = tail.indexOf(phrase, pos)) !== -1) { count++; pos += len; }
+                        if (count >= REPETITION_THRESHOLD) { return true; }
+                    }
+                    return false;
+                };
 
                 res.on('data', (chunk: Buffer) => {
                     if (stopRef.stop) { req.destroy(); return; }
@@ -172,6 +193,14 @@ export function streamChatRequest(
                                 }
                                 fullContent += p.message.content;
                                 onToken(p.message.content);
+                                // Repetition guard: abort stream if model enters a token loop
+                                if (!resolved && isRepeating(fullContent)) {
+                                    logWarn(`[stream] Repetition loop detected after ${fullContent.length} chars — aborting stream`);
+                                    resolved = true;
+                                    req.destroy();
+                                    const avgLogprob = logprobCount > 0 ? logprobSum / logprobCount : null;
+                                    resolve({ content: fullContent.slice(0, -REPETITION_WINDOW) + '\n\n[Generation stopped — repetition loop detected]', toolCalls, avgLogprob, thinking: fullThinking });
+                                }
                             }
                             if (p.message?.tool_calls?.length) {
                                 toolCalls = p.message.tool_calls;
