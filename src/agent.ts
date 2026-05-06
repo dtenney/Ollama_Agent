@@ -4071,7 +4071,9 @@ Do NOT assume you have no memory — check first.`;
             );
             
             logInfo(`[context] Usage: ${contextStats.usagePercentage.toFixed(1)}% (${contextStats.totalTokens}/${contextStats.modelLimit} tokens, ${contextStats.messagesCount} messages)`);
-            
+            // Send live context stats every turn so the progress bar stays current
+            post({ type: 'contextStats', percentage: contextStats.usagePercentage, usedTokens: contextStats.totalTokens, totalTokens: contextStats.modelLimit });
+
             // Alert user at 70% and remind until 99%
             if (contextStats.level === 'critical' && this.lastContextLevel !== 'critical') {
                 this.lastContextLevel = 'critical';

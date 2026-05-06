@@ -164,6 +164,8 @@ const MODEL_CONTEXT_WINDOWS = {
     'mistral':          8192,
     'mixtral':         32768,
     'gemma2':           8192,
+    'gemma3':          32768,
+    'gemma4':          131072,
     'deepseek-coder':  16384,
     'deepseek-r1':     32768,
     'starcoder2':      16384,
