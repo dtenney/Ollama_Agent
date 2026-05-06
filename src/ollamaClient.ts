@@ -170,19 +170,36 @@ export function streamChatRequest(
                     return false;
                 };
 
-                // Detect list-continuation spirals: numbered list items that keep incrementing
-                // without ever resolving (e.g. "27. Check ... 28. Check ... 29. Check ...")
+                // Detect thinking spirals of several patterns:
+                // 1. Numbered list items incrementing without resolving ("27. Check... 28. Check...")
+                // 2. Hyphen-joined sentence repetition ("I-will-start-by..." repeated many times)
+                // 3. High line-to-unique-line ratio (same short lines repeating with minor variation)
                 const isListSpiral = (thinking: string): boolean => {
-                    if (thinking.length < 1000) { return false; }
-                    const tail = thinking.slice(-600);
-                    // Match consecutive numbered list items (e.g. "15. ", "16. ", "17. ")
+                    if (thinking.length < 800) { return false; }
+                    const tail = thinking.slice(-800);
+
+                    // Pattern 1: consecutive numbered list items
                     const nums = [...tail.matchAll(/^\s*(\d+)\.\s+/mg)].map(m => parseInt(m[1]));
-                    if (nums.length < 5) { return false; }
-                    // Check if the last 5 numbers are consecutive and ascending
-                    for (let i = nums.length - 4; i < nums.length; i++) {
-                        if (nums[i] !== nums[i - 1] + 1) { return false; }
+                    if (nums.length >= 5) {
+                        let consecutive = 0;
+                        for (let i = 1; i < nums.length; i++) {
+                            if (nums[i] === nums[i - 1] + 1) { consecutive++; } else { consecutive = 0; }
+                            if (consecutive >= 4) { return true; }
+                        }
                     }
-                    return true;
+
+                    // Pattern 2: hyphen-joined word-salad repetition (e.g. "I-will-use-ls-R." many times)
+                    const hyphenLines = tail.match(/^[A-Z][a-z-]+-[a-z-]+-[a-z-]+[a-z-. ]*$/mg) ?? [];
+                    if (hyphenLines.length >= 5) { return true; }
+
+                    // Pattern 3: high repetition ratio — if >60% of lines in the tail are duplicates
+                    const lines = tail.split('\n').map(l => l.trim()).filter(l => l.length > 5);
+                    if (lines.length >= 8) {
+                        const unique = new Set(lines).size;
+                        if (unique / lines.length < 0.4) { return true; }
+                    }
+
+                    return false;
                 };
 
                 res.on('data', (chunk: Buffer) => {
