@@ -5725,17 +5725,19 @@ Do NOT assume you have no memory — check first.`;
                                 const startLine = Math.max(1, lineNum - 3);
                                 const endLine = startLine + 19;
                                 // Include line numbers so model sees exact indentation (leading spaces visible)
-                                grepFailCmd = envFail.os === 'windows'
-                                    ? `$lines = Get-Content "${absFailPath}"; $lines[${startLine - 1}..${endLine - 1}] | ForEach-Object -Begin {$n=${startLine}} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`
-                                    : `awk 'NR>=${startLine} && NR<=${endLine} {printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`;
+                                // Use awk when Git Bash is available — PowerShell syntax fails in bash
+                                const useBashForLine = envFail.os !== 'windows' || !!envFail.bashPath;
+                                grepFailCmd = useBashForLine
+                                    ? `awk 'NR>=${startLine} && NR<=${endLine} {printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`
+                                    : `$lines = Get-Content "${absFailPath}"; $lines[${startLine - 1}..${endLine - 1}] | ForEach-Object -Begin {$n=${startLine}} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`;
                                 logInfo(`[agent] edit_file failed at line ${lineNum} — reading lines ${startLine}-${endLine}`);
                             } else {
-                                // No line number in error — read the full file with Get-Content so the model
-                                // gets exact raw bytes (no Select-String prefix mangling, no encoding issues).
-                                // This is critical for files with non-ASCII or corrupted bytes in strings.
-                                grepFailCmd = envFail.os === 'windows'
-                                    ? `Get-Content "${absFailPath}"`
-                                    : `cat "${absFailPath}"`;
+                                // No line number in error — read the full file so the model gets exact content.
+                                // Use cat when Git Bash is available (Get-Content is PowerShell-only and fails in bash).
+                                const useCat = envFail.os !== 'windows' || !!envFail.bashPath;
+                                grepFailCmd = useCat
+                                    ? `cat "${absFailPath}"`
+                                    : `Get-Content "${absFailPath}"`;
                                 logInfo(`[agent] edit_file old_string failed (no line hint) — injecting full file for exact byte matching`);
                             }
                             const failGrepId = `t_failgrep_${Date.now()}`;
@@ -5763,9 +5765,10 @@ Do NOT assume you have no memory — check first.`;
                                 let tailNote = '';
                                 if (this._mergeMode) {
                                     try {
-                                        const tailCmd = envFail.os === 'windows'
-                                            ? `$lines = Get-Content "${absFailPath}"; $total = $lines.Count; $start = [Math]::Max(0,$total-20); $lines[$start..($total-1)] | ForEach-Object -Begin {$n=$start+1} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`
-                                            : `awk 'END{s=NR-20; if(s<1)s=1} NR>=s{printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`;
+                                        const useBashForTail = envFail.os !== 'windows' || !!envFail.bashPath;
+                                        const tailCmd = useBashForTail
+                                            ? `awk 'END{s=NR-20; if(s<1)s=1} NR>=s{printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`
+                                            : `$lines = Get-Content "${absFailPath}"; $total = $lines.Count; $start = [Math]::Max(0,$total-20); $lines[$start..($total-1)] | ForEach-Object -Begin {$n=$start+1} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`;
                                         const tailContent = await this.runShellRead(tailCmd, this.workspaceRoot, `t_tail_${Date.now()}`);
                                         if (tailContent.trim()) {
                                             tailNote = `\n\n[LAST 20 LINES OF FILE for appending]\n${tailContent}\nTo append new methods, use old_string=the last non-blank line above (NNNN: prefix excluded), new_string=that same line + newlines + new methods.`;
