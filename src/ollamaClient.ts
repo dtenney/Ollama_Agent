@@ -150,6 +150,10 @@ export function streamChatRequest(
                 const REPETITION_PHRASE = 20;    // min phrase length
                 const REPETITION_THRESHOLD = 8;  // times seen = abort
 
+                // Hard cap on thinking block size — prevents list-continuation spirals
+                // (e.g. "27. Check ... 28. Check ... 29. Check ...") that evade phrase detection
+                const MAX_THINKING_CHARS = 8000;
+
                 const isRepeating = (content: string): boolean => {
                     // Slide a window over the last N chars of content
                     const tail = content.slice(-REPETITION_WINDOW);
@@ -164,6 +168,21 @@ export function streamChatRequest(
                         if (count >= REPETITION_THRESHOLD) { return true; }
                     }
                     return false;
+                };
+
+                // Detect list-continuation spirals: numbered list items that keep incrementing
+                // without ever resolving (e.g. "27. Check ... 28. Check ... 29. Check ...")
+                const isListSpiral = (thinking: string): boolean => {
+                    if (thinking.length < 1000) { return false; }
+                    const tail = thinking.slice(-600);
+                    // Match consecutive numbered list items (e.g. "15. ", "16. ", "17. ")
+                    const nums = [...tail.matchAll(/^\s*(\d+)\.\s+/mg)].map(m => parseInt(m[1]));
+                    if (nums.length < 5) { return false; }
+                    // Check if the last 5 numbers are consecutive and ascending
+                    for (let i = nums.length - 4; i < nums.length; i++) {
+                        if (nums[i] !== nums[i - 1] + 1) { return false; }
+                    }
+                    return true;
                 };
 
                 res.on('data', (chunk: Buffer) => {
@@ -185,13 +204,19 @@ export function streamChatRequest(
                                 }
                                 fullThinking += p.message.thinking;
                                 onToken(p.message.thinking);
-                                // Repetition guard in thinking block
-                                if (!resolved && isRepeating(fullThinking)) {
-                                    logWarn(`[stream] Repetition loop detected in thinking block after ${fullThinking.length} chars — aborting stream`);
-                                    resolved = true;
-                                    req.destroy();
-                                    const avgLogprob = logprobCount > 0 ? logprobSum / logprobCount : null;
-                                    resolve({ content: fullContent || '\n\n[Generation stopped — repetition loop detected in thinking]', toolCalls, avgLogprob, thinking: fullThinking.slice(0, -REPETITION_WINDOW) + '\n[thinking truncated — repetition detected]' });
+                                // Thinking block guards: repetition, list spiral, hard size cap
+                                if (!resolved) {
+                                    const thinkingLoop = isRepeating(fullThinking);
+                                    const thinkingSpiral = !thinkingLoop && isListSpiral(fullThinking);
+                                    const thinkingOverflow = fullThinking.length > MAX_THINKING_CHARS;
+                                    if (thinkingLoop || thinkingSpiral || thinkingOverflow) {
+                                        const reason = thinkingLoop ? 'repetition loop' : thinkingSpiral ? 'list-continuation spiral' : `thinking exceeded ${MAX_THINKING_CHARS} chars`;
+                                        logWarn(`[stream] Thinking block aborted — ${reason} after ${fullThinking.length} chars`);
+                                        resolved = true;
+                                        req.destroy();
+                                        const avgLogprob = logprobCount > 0 ? logprobSum / logprobCount : null;
+                                        resolve({ content: fullContent || `\n\n[Generation stopped — ${reason} in thinking block. Please retry.]`, toolCalls, avgLogprob, thinking: fullThinking.slice(0, 2000) + `\n[thinking truncated — ${reason}]` });
+                                    }
                                 }
                             }
                             if (p.message?.content) {
