@@ -1314,6 +1314,10 @@ function addPlanComplete() {
 }
 
 function clearChat() {
+    // Always reset the sticky confirm bar — leftover bars from prior sessions show as a brown stripe
+    const pendingBar = document.getElementById('pending-confirm-bar');
+    if (pendingBar) { pendingBar.style.display = 'none'; pendingBar.innerHTML = ''; }
+
     // Remove all message / tool-card children but keep #welcome, #scroll-btn, #pinned-section
     Array.from(messagesEl.childNodes).forEach((node) => {
         const el = /** @type {HTMLElement} */ (node);
