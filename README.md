@@ -186,7 +186,7 @@ That's it. The agent will start responding immediately.
 
 ### 🤖 AI Agent
 - Multi-turn **agentic tool loop** — the AI can call tools, read results, then continue reasoning
-- Supports **30 workspace tools** including web search, task logging, workspace indexing, and a reusable skills library (see [Agent Tools](#-agent-tools) below)
+- Supports **24 workspace tools** including web search, task logging, workspace indexing, and a reusable skills library (see [Agent Tools](#-agent-tools) below)
 - **Live command output** — terminal output streams directly into the chat
 - **Diff preview** before applying file edits
 - **Confirmation dialogs** for all destructive actions (write, delete, run command)

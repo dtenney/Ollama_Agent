@@ -1245,6 +1245,14 @@ The workspace may have a .ollamapilot/skills/ directory containing reusable help
 - If a skill matches the task (even partially), use it via shell_read or run_command rather than writing a new script.
 - After writing a script that solved a recurring or general problem (CSV diffing, log parsing, remote file sync, etc.): call save_skill to persist it for future sessions. Choose a descriptive filename like compare_csvs.py or sync_remote_logs.sh.
 - Skills are plain scripts — no special runtime needed. Treat them like a local tool library.
+
+## Context limits and large-task chunking
+You operate within a fixed context window. When context is limited, adapt your output:
+- Before starting any task that requires writing more than ~80 lines of code: state a plan first (list files you will create/modify and the sections you will write). Ask the user to confirm before writing any code.
+- Write ONE function, class, or logical section per turn. End each turn with a brief status: what was just written and what comes next. Wait for the user to say "continue" before writing the next section.
+- If you receive a [CONTEXT TIGHT] or [CONTEXT LOW] notice: immediately switch to chunked mode — output only the next logical piece, then stop.
+- If you receive a [CONTEXT CRITICAL] notice: stop all work immediately. Output a clear summary of what is done and what remains, then tell the user to open a new chat to continue.
+- Never attempt to write an entire file (>100 lines) in a single response. If asked to write a full file, write it in named sections across multiple turns.
 ${projectGuidance ?? (workspaceRoot ? buildProjectTypeGuidance(workspaceRoot) : '')}${hierarchicalCtx ? `\n\n${hierarchicalCtx}` : ''}`;
 }
 
@@ -4321,6 +4329,27 @@ Do NOT assume you have no memory — check first.`;
 
             post({ type: 'streamStart' });
 
+            // ── Context budget nudge ──────────────────────────────────────────
+            // Inject a synthetic system message each turn so the model always
+            // knows its remaining headroom and adjusts output size accordingly.
+            // Thresholds:   comfortable ≥50% remaining   →  no special guidance
+            //               tight       25–50% remaining  →  be concise
+            //               low         10–25% remaining  →  chunk large tasks
+            //               critical    <10% remaining    →  finish current step only
+            const remainingTokens = contextStats.modelLimit - contextStats.totalTokens;
+            const remainingPct = 100 - contextStats.usagePercentage;
+            let ctxBudgetNote: string;
+            if (remainingPct < 10) {
+                ctxBudgetNote = `[CONTEXT CRITICAL: ${Math.round(remainingPct)}% remaining (~${Math.round(remainingTokens / 1000)}k tokens). STOP after completing the current step. Do NOT start any new work — tell the user to start a new chat to continue.`;
+            } else if (remainingPct < 25) {
+                ctxBudgetNote = `[CONTEXT LOW: ${Math.round(remainingPct)}% remaining (~${Math.round(remainingTokens / 1000)}k tokens). If writing code, output ONE function or section at a time. After each chunk, stop and ask the user to confirm before continuing. Do not attempt to write an entire file in one response.]`;
+            } else if (remainingPct < 50) {
+                ctxBudgetNote = `[CONTEXT TIGHT: ${Math.round(remainingPct)}% remaining (~${Math.round(remainingTokens / 1000)}k tokens). Keep responses concise. If a coding task requires writing >100 lines, split it into named sections and complete one per turn.]`;
+            } else {
+                ctxBudgetNote = `[Context: ${Math.round(contextStats.usagePercentage)}% used, ~${Math.round(remainingTokens / 1000)}k tokens remaining.]`;
+            }
+            const ctxBudgetMsg: OllamaMessage = { role: 'system', content: ctxBudgetNote };
+
             // Route to fast model when the previous turn was purely reads and no edits yet
             const effectiveModel = (prevTurnWasReadOnly && this._editsThisRun === 0)
                 ? routedFastModel : model;
@@ -4390,7 +4419,7 @@ Do NOT assume you have no memory — check first.`;
                 };
                 result = await streamChatRequest(
                     effectiveModel,
-                    [{ role: 'system', content: systemContent }, ...this.history, ...(memoryNudgeMsg ? [memoryNudgeMsg] : [])],
+                    [{ role: 'system', content: systemContent }, ...this.history, ...(memoryNudgeMsg ? [memoryNudgeMsg] : []), ctxBudgetMsg],
                     tools,
                     (token) => { const t = streamFilter(token); if (t) { post({ type: 'token', text: t }); } },
                     this.stopRef
