@@ -1034,6 +1034,8 @@ Nothing else is valid. Specifically:
 - NEVER summarize a tool result and stop — after each result, call the NEXT tool or give the final answer
 - Do not ask a clarifying question when you can simply search or read the answer yourself — use your tools first. BUT: if answering correctly requires a decision or preference only the user can make, or if you've searched and genuinely have no relevant data (e.g. measurements, credentials, sample data the user hasn't provided), ask the user directly rather than guessing or spiraling
 - The one-line explanation must appear in visible response text, NOT inside <think> tags
+- After every 2-3 tool calls, emit a brief visible progress line (e.g. "Found audit_hosts.py — checking syntax next."). Never go more than 3 tool calls without producing any visible output. The user must be able to see what you are doing without opening the thought process panel.
+- Questions to the user MUST be the very last thing in your response — never bury a question after a summary paragraph. End with the question on its own line.
 
 ## Response hygiene — never do any of the following
 - NEVER add a "💭 Thought process", "## Analysis", "## Summary", or similar section header before your answer — just give the answer directly
@@ -4021,6 +4023,7 @@ Do NOT assume you have no memory — check first.`;
         const routedFastModel = cfg.modelRoutingEnabled ? (cfg.fastModel || model) : model;
         const routedCriticModel = cfg.modelRoutingEnabled ? (cfg.criticModel || model) : model;
 
+        let silentToolRuns = 0; // Consecutive turns with tool calls but no visible output to user
         for (let turn = 0; turn < MAX_TURNS; turn++) {
             if (this.stopRef.stop) { this._runOutcome = 'stopped'; break; }
             this._runTurnCount = turn + 1;
@@ -4644,6 +4647,24 @@ Do NOT assume you have no memory — check first.`;
                 content: historyContent || result.content.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<scratch_pad>[\s\S]*?<\/scratch_pad>/gi, '').trim(),
                 ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
             });
+
+            // Track silent tool runs: turns where tool calls happened but nothing visible was shown.
+            // After 3 silent runs, inject a nudge to emit a progress update before the next tool call.
+            if (toolCalls.length > 0 && !displayContent.trim()) {
+                silentToolRuns++;
+                if (silentToolRuns >= 3) {
+                    silentToolRuns = 0;
+                    const silentNudge = `[SYSTEM] You have made ${silentToolRuns + 3} tool calls without any visible output. The user cannot see what you are doing. Before calling the next tool, write ONE sentence summarising what you have found so far and what you are checking next. Example: "Found audit_hosts.py — checking syntax now." Then call the tool.`;
+                    if (isTextMode) {
+                        this.history.push({ role: 'user', content: silentNudge });
+                    } else {
+                        this.history.push({ role: 'tool', content: silentNudge });
+                    }
+                    logInfo(`[agent] Silent tool run nudge injected after 3 consecutive silent turns`);
+                }
+            } else {
+                silentToolRuns = 0; // Reset when visible content is emitted
+            }
 
             if (!toolCalls.length) {
                 // ── Think-stall guard: model produced thinking but no content and no tool calls ──
