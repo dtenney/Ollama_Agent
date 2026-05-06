@@ -5674,6 +5674,36 @@ Do NOT assume you have no memory — check first.`;
                             logWarn(`[agent] PowerShell cmdlet "${badCmd}" used in Git Bash — injected bash correction`);
                         }
 
+                        // File-not-found cross-reference: if the agent tried a path that doesn't exist but the user
+                        // already gave a valid path in their message, point the model back to the correct one.
+                        if (/No such file or directory/i.test(toolResult)) {
+                            // Extract the path the agent tried from the tool args
+                            const attemptedPath = String(args.command ?? args.path ?? '').match(/['"]?([^\s'"]+)['"']?\s*$/)?.[1] ?? '';
+                            if (attemptedPath) {
+                                // Scan recent user messages for file paths that look like real paths
+                                const userPaths: string[] = [];
+                                for (let hi = this.history.length - 1; hi >= Math.max(0, this.history.length - 10); hi--) {
+                                    const msg = this.history[hi];
+                                    if (msg.role !== 'user') { continue; }
+                                    const content = typeof msg.content === 'string' ? msg.content : '';
+                                    // Match Windows absolute paths, Unix paths, and relative paths with extensions
+                                    const found = content.match(/[A-Za-z]:\\[^\s'"]+|\/[^\s'"]{4,}|[\w./-]+\/[\w.-]+\.(?:md|py|ts|js|yaml|yml|json|sh|txt)/g) ?? [];
+                                    userPaths.push(...found);
+                                }
+                                // Find user-provided paths that differ from what the agent tried
+                                const suggestions = userPaths.filter(p => p !== attemptedPath && p.length > 4);
+                                if (suggestions.length > 0) {
+                                    const hint = `[SYSTEM] The path you tried ("${attemptedPath}") does not exist. The user already provided these paths — use the exact path from the user's message:\n${suggestions.map(p => `  ${p}`).join('\n')}\n\nDo NOT guess or derive a new filename. Use the exact path above.`;
+                                    if (isTextMode) {
+                                        this.history.push({ role: 'user', content: hint });
+                                    } else {
+                                        this.history.push({ role: 'tool', content: hint });
+                                    }
+                                    logInfo(`[agent] File-not-found correction: tried "${attemptedPath}", suggested: ${suggestions.join(', ')}`);
+                                }
+                            }
+                        }
+
                         // SyntaxError detection: if output contains a Python SyntaxError pointing at a .py file,
                         // inject a direct instruction to use write_file instead of attempting edit_file.
                         const syntaxErrMatch = toolResult.match(/File "([^"]+\.py)"[^\n]*\n(?:[^\n]*\n)*?.*SyntaxError:/);
