@@ -2338,7 +2338,8 @@ export class Agent {
     private refactorManager: MultiFileRefactoringManager;
     /** Last file operation for undo support */
     private _lastFileOp: { path: string; originalContent: string | null; action: string } | null = null;
-    private _editsThisRun = 0; // count of successful file edits in current agent run
+    private _editsThisRun = 0; // count of successful file edits in current agent turn
+    private _totalEditsThisSession = 0; // cumulative edits across all turns this chat session
     private _lastEditedFilePath: string = ''; // path of last successfully edited file
     private _wrapUpSuggested = false; // true once the wrap-up nudge has been shown this session
     /** Set when the model has given completion language — next clean tool result breaks the loop */
@@ -2846,7 +2847,7 @@ export class Agent {
         this._focusedGrepInjectedThisTurn = false; // Reset focused-grep dedup flag
         this._filesAutoReadThisRun.clear();    // Reset per-run auto-read tracking
         this._editContextInjected = false;     // Reset read-then-act flag
-        this._editsThisRun = 0;                // Reset edit counter
+        this._editsThisRun = 0;                // Reset per-turn edit counter (session total in _totalEditsThisSession)
         // Set schema-change confirmed if user's message looks like approval of a previously blocked schema change
         const lowerMsg = userMessage.toLowerCase();
         if (/\b(yes|yeah|yep|go ahead|proceed|looks good|that'?s? (right|correct|fine|good)|do it|confirm|ok|okay|sure)\b/.test(lowerMsg)) {
@@ -4897,11 +4898,24 @@ Do NOT assume you have no memory — check first.`;
                     }
                 }
 
+                // ── Mid-turn WIP save to Tier 2 ─────────────────────────
+                // After each turn where edits were made, save a WIP snapshot so the
+                // NEXT session can pick up even if the conversation keeps going.
+                if (this.memory && this._editsThisRun > 0) {
+                    try {
+                        const wipFiles = this._filesChangedThisRun.slice(0, 5).join(', ') || this._lastEditedFilePath || 'unknown';
+                        const taskSnip = (this._currentTaskMessage ?? '').slice(0, 100);
+                        const wipNote = `WIP [${new Date().toLocaleDateString()}]: ${taskSnip} — edited: ${wipFiles} — session total edits: ${this._totalEditsThisSession}`;
+                        this.memory.addEntry(2, wipNote, ['wip-sync', 'session-end', 'auto-save']).catch(() => {/* silent */});
+                        logInfo(`[memory] Mid-turn WIP saved to Tier 2`);
+                    } catch { /* skip */ }
+                }
+
                 // ── Session-end save to Tier 3 ───────────────────────────
                 // When a session completes successfully (model gave final answer after ≥1 edit),
                 // save a structured "completed feature" entry to Tier 3 so future sessions
                 // can detect it via the prior-work existence check above.
-                if (this.memory && this._editsThisRun > 0) {
+                if (this.memory && this._totalEditsThisSession > 0) {
                     const sessionFacts: string[] = [];
                     const taskMsg = this._currentTaskMessage ?? '';
                     if (taskMsg) { sessionFacts.push(`Task: ${taskMsg.slice(0, 100)}`); }
@@ -6663,7 +6677,7 @@ If the code looks correct, respond with exactly: OK`;
                     fs.mkdirSync(path.dirname(full), { recursive: true });
                     fs.writeFileSync(full, newString, 'utf8');
                     this._lastFileOp = { path: rel, originalContent: originalForOverwrite, action: 'edited' };
-                    this._editsThisRun++;
+                    this._editsThisRun++; this._totalEditsThisSession++;
                     this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
                     if (!this._filesChangedThisRun.includes(rel)) { this._filesChangedThisRun.push(rel); }
                     return `Overwrote: ${rel} (${newString.split('\n').length} lines written, corrupted file fixed)`;
@@ -6809,7 +6823,7 @@ If the code looks correct, respond with exactly: OK`;
                                     if (!accepted2) { return 'Edit cancelled by user.'; }
                                     fs.writeFileSync(full, newContent2, 'utf8');
                                     this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
-                                    this._editsThisRun++;
+                                    this._editsThisRun++; this._totalEditsThisSession++;
                                     this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
                                     if (!this._filesChangedThisRun.includes(rel)) { this._filesChangedThisRun.push(rel); }
                                     const editResult2 = `Edited: ${rel} — ${oldLines.length} line(s) replaced (indentation auto-corrected)`;
@@ -6849,7 +6863,7 @@ If the code looks correct, respond with exactly: OK`;
                                 if (!accepted3) { return 'Edit cancelled by user.'; }
                                 fs.writeFileSync(full, newContent3, 'utf8');
                                 this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
-                                this._editsThisRun++;
+                                this._editsThisRun++; this._totalEditsThisSession++;
                                 this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
                                 if (!this._filesChangedThisRun.includes(rel)) { this._filesChangedThisRun.push(rel); }
                                 const editResult3 = `Edited: ${rel} — ${oldLines.length} line(s) replaced (trailing whitespace auto-corrected)`;
@@ -6932,7 +6946,7 @@ If the code looks correct, respond with exactly: OK`;
                 fs.writeFileSync(full, newContent, 'utf8');
                 this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
                 this._readOnlyTurnsSinceLastEdit = 0;
-                this._editsThisRun++;
+                this._editsThisRun++; this._totalEditsThisSession++;
                 this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
                 if (!this._filesChangedThisRun.includes(rel)) { this._filesChangedThisRun.push(rel); }
 
@@ -7174,9 +7188,32 @@ If the code looks correct, respond with exactly: OK`;
                     fs.mkdirSync(path.dirname(full), { recursive: true });
                     fs.writeFileSync(full, content, 'utf8');
                     this._lastFileOp = { path: rel, originalContent, action: 'edited' };
-                    this._editsThisRun++;
+                    this._editsThisRun++; this._totalEditsThisSession++;
                     this.postFn({ type: 'fileChanged', path: rel, action: 'edited' });
                     if (!this._filesChangedThisRun.includes(rel)) { this._filesChangedThisRun.push(rel); }
+
+                    // Auto-validate Python files after write
+                    if (rel.endsWith('.py')) {
+                        const env = detectShellEnvironment();
+                        const pyCmd = env.pythonCmd || 'python3';
+                        const pyFull = full.replace(/\\/g, '/');
+                        try {
+                            const { execSync } = require('child_process') as typeof import('child_process');
+                            execSync(`${pyCmd} -m py_compile "${pyFull}"`, { stdio: 'pipe' });
+                        } catch (pyErr: unknown) {
+                            // Validation failed — restore backup and return error so agent must fix
+                            const errMsg = (pyErr as { stderr?: Buffer }).stderr?.toString().trim() || String(pyErr);
+                            if (doBackup && originalContent) {
+                                fs.writeFileSync(full, originalContent, 'utf8');
+                                logWarn(`[write_file] py_compile failed for ${rel} — restored backup`);
+                                return `WRITE REJECTED — ${rel} has a syntax error. Backup restored.\n\nError:\n${errMsg}\n\nFix the syntax error and call write_file again with the corrected content. Do NOT use edit_file on a broken file.`;
+                            } else {
+                                return `WARNING — ${rel} was written but has a syntax error:\n${errMsg}\n\nRun write_file again with corrected content immediately.`;
+                            }
+                        }
+                        return `File written and validated: ${rel} (${content.split('\n').length} lines) ✓ py_compile passed`;
+                    }
+
                     return `File written: ${rel} (${content.split('\n').length} lines)`;
                 } catch (e) {
                     return toErrorMessage(e);
