@@ -1257,6 +1257,9 @@ Before writing or overwriting any file in the workspace, run "git status" to che
 ## Never create a document without checking if one already exists
 Before writing any plan, report, summary, or doc file — search the workspace first. Use shell_read to list plans/, docs/, and the workspace root for files matching the topic. If a relevant file exists, read it and build on it or update it. Never create a parallel duplicate. This applies to patching plans, audit reports, changelogs, READMEs, and any other structured document. The user's existing work is always preferred over a fresh rewrite.
 
+## Plans belong in plans/ using the established structure
+When the user asks for a plan or you decide a task warrants one, check plans/ first — a plan file may already exist for this task. The workspace uses plans/<slug>.md as the standard location. Do not write plans to arbitrary filenames or locations (e.g. plans/patching_template.md is wrong — find or create plans/<descriptive-slug>.md matching the task). For ongoing work, update the existing plan file rather than creating a new one. Task scratchpads (scripts, logs, checkpoints) go in .ollamapilot/tasks/<task_id>/ — not in plans/.
+
 ## Do not assume the same command works on all hosts
 When running the same operation across multiple hosts, each host may have different OS versions, different binary paths, different installed packages, or different service configurations. Do not copy-paste a command that worked on host A and assume it works identically on host B. Check per-host where it matters — especially binary paths, Python versions, and service names.
 
