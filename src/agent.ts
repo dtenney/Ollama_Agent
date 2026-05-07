@@ -361,7 +361,7 @@ export const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'edit_file',
-            description: 'Make a targeted edit to an existing file by replacing old_string with new_string. ONLY use this when you do NOT have line numbers. If you have line numbers from a previous shell_read, use edit_file_at_line instead — it is more reliable. The old_string must match exactly (including whitespace/indentation). For complete file rewrites (e.g. replacing an entire HTML template) OR corrupted files (containing literal \\n characters), set force_overwrite=true and old_string="" to replace the entire file with new_string.',
+            description: 'Make a targeted edit to a file by replacing old_string with new_string. WARNING: If you have line numbers from a previous shell_read output, use edit_file_at_line instead — it never fails on string matching. Use edit_file only when you have NO line numbers. The old_string must match exactly (including whitespace/indentation) — never construct it from memory. For complete rewrites, set force_overwrite=true and old_string="".',
             parameters: {
                 type: 'object',
                 properties: {
@@ -394,7 +394,7 @@ export const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'edit_file_at_line',
-            description: 'Edit a file by line numbers. Use when file content with line numbers has been provided. Replaces lines start_line through end_line (inclusive, 1-based) with new_content. To insert without replacing, set end_line = start_line - 1. Never reproduce old content — just specify the line range.',
+            description: 'PREFERRED edit tool when you have line numbers. After shell_read, you know exact line numbers — use this instead of edit_file to avoid string-matching failures. Replaces lines start_line through end_line (1-based, inclusive) with new_content. To insert without replacing, set end_line = start_line - 1. No old_string needed — never fails on whitespace.',
             parameters: {
                 type: 'object',
                 properties: {
@@ -1116,8 +1116,9 @@ You have Git Bash, Python 3, and git available. Use them:
 - Decompose large scripts: if a script is >80 lines, split it into focused modules (one per concern). Small files are easier to write correctly, easier to validate, and easier to fix if something goes wrong.
 - Use git to your advantage: "git status" to see what's changed, "git stash" to temporarily set aside broken work, "git log --oneline -5" to understand recent history.
 
-- edit_file: old_string MUST be copied verbatim from a shell_read result you received THIS session. Never construct old_string from memory, inference, or what you think the file contains. The workflow is always: (1) shell_read the file, (2) find the exact lines in the output, (3) copy those exact lines as old_string, (4) call edit_file. If you have not shell_read the file this session, do that first — do not guess. Invented old_strings always fail.
-- When edit_file fails twice on a file with broken syntax (f-strings with embedded quotes, corrupted content, etc.): use write_file to write the complete corrected file. This is the correct escape hatch — do not keep guessing old_string.
+- Editing files — use the right tool: After shell_read, you have line numbers. USE edit_file_at_line — specify start_line, end_line, and new_content. It never fails on whitespace or string matching. ONLY use edit_file (old_string) when you have no line numbers. Never construct old_string from memory — copy it verbatim from shell_read output.
+- When edit_file fails: switch to edit_file_at_line immediately. If you don't have line numbers, shell_read to get them, then use edit_file_at_line. Do NOT retry edit_file with a reconstructed old_string — that loop never ends.
+- When edit_file fails twice on a file with broken syntax (f-strings with embedded quotes, corrupted content, etc.): use write_file to write the complete corrected file. This is the final escape hatch — do not keep guessing old_string.
 - Never create source files with New-Item/touch — use write_file (new files) or write_file (full rewrites)
 - Local directory creation on Windows: use New-Item -ItemType Directory -Force -Path "folder/name" (NOT mkdir -p, which is Linux syntax). For remote dirs via SSH, use: ssh host "mkdir -p /remote/path" — that is fine.
 - SSH remote commands: prefer unquoted multi-word commands when possible (e.g. ssh host find /root/payloads -type d -name foo). When quoting is required, use double quotes around the remote command (e.g. ssh host "python3 -c 'script'" — double on outside, single inside). Never use a single-quoted outer wrapper on SSH commands (e.g. ssh host 'cmd') as this is not reliably handled cross-platform. For complex scripts with embedded quotes, scp the script file then execute it: scp /local/script.py host:/tmp/script.py then ssh host python3 /tmp/script.py.
@@ -7098,12 +7099,12 @@ If the code looks correct, respond with exactly: OK`;
                             `First line of old_string matched near line ${nearLineIdx + 1}, but the rest of the block did NOT match the file.\n\n` +
                             `ACTUAL FILE CONTENT AT THAT LOCATION (lines ${ctxStart + 1}–${ctxEnd + 1}):\n${ctxBlock}\n\n` +
                             `STOP. Do NOT re-read the file. Do NOT reconstruct from memory.\n` +
-                            `Your old_string contained at least one line that differs from the file above.\n` +
-                            `Steps:\n` +
-                            `1. Find the lines you want to replace IN THE BLOCK SHOWN ABOVE\n` +
-                            `2. Copy those lines EXACTLY — every space, quote, comma, and punctuation mark\n` +
-                            `3. Call edit_file immediately with those copied lines as old_string\n` +
-                            `If you are unsure which lines differ, use a shorter old_string (just 2-3 unique lines) to make matching easier.`
+                            `Your old_string contained at least one line that differs from the file above.\n\n` +
+                            `OPTION A — edit_file with shorter old_string:\n` +
+                            `  Pick just 2-3 unique lines from the block above, copy them exactly, use as old_string.\n\n` +
+                            `OPTION B — edit_file_at_line (RECOMMENDED — no string matching needed):\n` +
+                            `  The line numbers are shown above. Call edit_file_at_line with:\n` +
+                            `    path="${rel}", start_line=<first line to replace>, end_line=<last line to replace>, new_content=<your replacement>`
                         );
                     }
 
@@ -7157,10 +7158,12 @@ If the code looks correct, respond with exactly: OK`;
                     throw new Error(
                         `edit_file failed — old_string not found anywhere in ${rel}.\n\n` +
                         `CAUSE: You constructed old_string from memory or inference. Invented strings always fail.\n\n` +
-                        `STOP. Do NOT call shell_read — the file content is shown below.\n` +
-                        `Find the exact lines you want to change in the content below.\n` +
-                        `Copy those lines character-for-character (every space, quote, punctuation).\n` +
-                        `Then call edit_file immediately.${embeddedContent}${sigHint}`
+                        `STOP. Do NOT call shell_read — the file content is shown below with LINE NUMBERS.\n\n` +
+                        `PREFERRED: Use edit_file_at_line instead — no string matching needed:\n` +
+                        `  Call edit_file_at_line with path, start_line, end_line, new_content\n` +
+                        `  The line numbers in the file content below tell you exactly what to use.\n\n` +
+                        `ALTERNATIVE: Use edit_file with old_string copied EXACTLY from the content below.\n` +
+                        `  Copy the lines character-for-character — every space, quote, punctuation.${embeddedContent}${sigHint}`
                     );
                 }
 
