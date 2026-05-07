@@ -1230,8 +1230,8 @@ When multiple commands run in sequence and something fails, identify WHICH comma
 ## Config changes require service restarts
 If you edit a config file for a running service, that service must be restarted before the change takes effect. Editing the file and declaring done without restarting means the service is still running on the old config. Always follow a config change with: "systemctl restart <service>" and then verify the service came back up with "systemctl is-active <service>".
 
-## "inactive" is not a complete finding — investigate before reporting
-When a service shows as inactive or not-found, do not report that as a final answer. First run: ssh <host> "systemctl list-unit-files | grep -i <name>" to check whether a related unit exists under a different name. If a variant is found and active, the inventory name is wrong — report the correct name and what needs to be updated. Only report a service as genuinely inactive after confirming both: (1) the exact name returns inactive, AND (2) no related unit is enabled. This applies to any unexpected negative result — a missing file, a failing command, a wrong version — always check one level deeper before concluding the thing is actually broken.
+## Report what you found, flag what is uncertain, ask one question
+Do not loop trying to resolve every uncertainty. When you have the output: report the facts you can confirm, flag anything that looks wrong or unexpected with a clear ⚠️, and if the user needs to make a decision or you hit a genuine gap, ask one question. Example: run audit_hosts.py, report the results, then add "⚠️ pihole shows inactive — this may be a wrong service name in the inventory. Want me to check the real unit name?" That is one clean pass. Do not attempt to resolve it yourself unless asked.
 
 ## Check git status before writing to any file
 Before writing or overwriting any file in the workspace, run "git status" to check if it has uncommitted local changes. If it does, do not overwrite it without explicitly noting the conflict to the user. Silent overwrites of files with pending changes destroy work.
@@ -8106,39 +8106,7 @@ if errors:
                 const accepted = isMergeAutoApprove || isAutoApprovedCmd || await this.requestConfirmation('run', cmd, 'run_command');
                 if (!accepted) { return 'Command cancelled by user.'; }
 
-                const cmdResult = await this.runCommandStreaming(cmd, root, _toolId);
-
-                // ── Service inactive follow-up guard ──────────────────────────
-                // If the output contains "inactive" and the command involved systemctl or an
-                // audit script, append a mandatory follow-up reminder. The model must not
-                // report a service as inactive without first checking for related unit names.
-                const looksLikeServiceCheck = /systemctl|audit_host|is-active/i.test(cmd);
-                const hasInactive = /\binactive\b/i.test(cmdResult);
-                if (looksLikeServiceCheck && hasInactive) {
-                    // Extract service names that appear inactive from the output
-                    const inactiveNames: string[] = [];
-                    for (const line of cmdResult.split('\n')) {
-                        if (/\binactive\b/i.test(line)) {
-                            // Try to extract the service name — look for word before "inactive" or after "Checking"
-                            const m = line.match(/Checking\s+(\S+)|(\S+)\s*\(systemd\).*inactive|(\S+)\s+inactive/i);
-                            if (m) { inactiveNames.push(m[1] || m[2] || m[3]); }
-                        }
-                    }
-                    const names = inactiveNames.length ? inactiveNames.join(', ') : 'the inactive service(s)';
-                    // Prepend the directive so the model sees the constraint BEFORE reading the output.
-                    // Appending allows the model to reason "task complete" from the output first
-                    // and then treat the directive as noise. Prepending forces it to carry the
-                    // constraint as it reads the results.
-                    return `INCOMPLETE — do not summarize yet. The output below contains inactive service(s) that require follow-up before you can report.\n` +
-                        `You must do the following for ${names} before producing any response:\n` +
-                        `1. ssh <host> "systemctl list-unit-files | grep -i <name>" — find the real unit name.\n` +
-                        `2. ssh <host> "systemctl is-active <real-unit>" — confirm running status. "enabled" != "active".\n` +
-                        `3. If the inventory name is wrong, note the correct name and ask the user if they want it fixed.\n` +
-                        `Do NOT produce your final response until these steps are complete.\n\n` +
-                        `--- SCRIPT OUTPUT ---\n` + cmdResult;
-                }
-
-                return cmdResult;
+                return this.runCommandStreaming(cmd, root, _toolId);
             }
 
             // ── memory_list ────────────────────────────────────────────────
