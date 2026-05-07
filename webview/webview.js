@@ -690,35 +690,39 @@ function startAssistantMessage() {
 function appendToken(token) {
     if (!currentMsgEl) { return; }
 
-    // Handle thinking sentinels
-    if (token === '\x01THINK_START\x01') {
-        inThinkingBlock = true;
-        thinkingBuf = '';
-        // Create collapsible thinking block in the message
-        const content = currentMsgEl.querySelector('.msg-content');
-        if (content && !currentMsgEl.querySelector('.thinking-block')) {
-            const details = document.createElement('details');
-            details.className = 'thinking-block';
-            const summary = document.createElement('summary');
-            summary.textContent = '💭 Thinking…';
-            const pre = document.createElement('pre');
-            pre.className = 'thinking-content';
-            pre.style.cssText = 'font-size:0.78em;opacity:0.6;white-space:pre-wrap;margin:4px 0 0;';
-            details.appendChild(summary);
-            details.appendChild(pre);
-            content.before(details);
+    // Handle thinking sentinels — sentinels may arrive concatenated with content,
+    // so split on them rather than using strict equality.
+    if (token.includes('\x01THINK_START\x01') || token.includes('\x01THINK_END\x01')) {
+        const parts = token.split(/(\x01THINK_(?:START|END)\x01)/);
+        for (const part of parts) {
+            if (part === '\x01THINK_START\x01') {
+                inThinkingBlock = true;
+                thinkingBuf = '';
+                const content = currentMsgEl.querySelector('.msg-content');
+                if (content && !currentMsgEl.querySelector('.thinking-block')) {
+                    const details = document.createElement('details');
+                    details.className = 'thinking-block';
+                    const summary = document.createElement('summary');
+                    summary.textContent = '💭 Thinking…';
+                    const pre = document.createElement('pre');
+                    pre.className = 'thinking-content';
+                    pre.style.cssText = 'font-size:0.78em;opacity:0.6;white-space:pre-wrap;margin:4px 0 0;';
+                    details.appendChild(summary);
+                    details.appendChild(pre);
+                    content.before(details);
+                }
+            } else if (part === '\x01THINK_END\x01') {
+                inThinkingBlock = false;
+                const details = currentMsgEl?.querySelector('.thinking-block');
+                if (details) {
+                    const summary = details.querySelector('summary');
+                    if (summary) { summary.textContent = '💭 Thought process'; }
+                }
+                scrollBottom();
+            } else if (part) {
+                appendToken(part); // recurse with clean segment
+            }
         }
-        return;
-    }
-    if (token === '\x01THINK_END\x01') {
-        inThinkingBlock = false;
-        // Update summary to show it's done
-        const details = currentMsgEl?.querySelector('.thinking-block');
-        if (details) {
-            const summary = details.querySelector('summary');
-            if (summary) { summary.textContent = '💭 Thought process'; }
-        }
-        scrollBottom();
         return;
     }
     if (inThinkingBlock) {
