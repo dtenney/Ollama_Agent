@@ -8123,10 +8123,12 @@ if errors:
                     }
                     const names = inactiveNames.length ? inactiveNames.join(', ') : 'the inactive service(s)';
                     return cmdResult +
-                        `\n\n[FOLLOW-UP REQUIRED] Before reporting any service as inactive, you must verify the unit name is correct.\n` +
-                        `For ${names}: run ssh <host> "systemctl list-unit-files | grep -i <name>" to check for related units.\n` +
-                        `If a variant exists (e.g. pihole-FTL instead of pihole), report the correct name.\n` +
-                        `Only report a service as genuinely inactive after this check.`;
+                        `\n\n[FOLLOW-UP REQUIRED] Before reporting any service as inactive, you must:\n` +
+                        `1. Run: ssh <host> "systemctl list-unit-files | grep -i <name>" — check for a related unit under a different name.\n` +
+                        `2. If a variant is found (e.g. pihole-FTL instead of pihole), run: ssh <host> "systemctl is-active <variant>" to confirm it is actually running.\n` +
+                        `3. Note: "enabled" means starts on boot — it does NOT mean running right now. Only "active" confirms the service is up.\n` +
+                        `4. Report the correct unit name and whether it is active or genuinely down.\n` +
+                        `Do this for: ${names}.`;
                 }
 
                 return cmdResult;
