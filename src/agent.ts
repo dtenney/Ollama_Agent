@@ -1230,8 +1230,8 @@ When multiple commands run in sequence and something fails, identify WHICH comma
 ## Config changes require service restarts
 If you edit a config file for a running service, that service must be restarted before the change takes effect. Editing the file and declaring done without restarting means the service is still running on the old config. Always follow a config change with: "systemctl restart <service>" and then verify the service came back up with "systemctl is-active <service>".
 
-## Service names in user input are approximate — always verify the real unit name
-When the user names a service (e.g. "pihole", "postgres", "redis"), that name may not be the exact systemd unit name. Before concluding a service is "inactive" or "not found", run: ssh <host> "systemctl list-unit-files | grep -i <name>" to find related units. Common patterns: "pihole" → "pihole-FTL.service", "postgres" → "postgresql.service", "nginx" → "nginx.service". If the exact name returns inactive/not-found but a variant is enabled, report the correct unit name and update the inventory. Do not report a service as broken when only the name in the inventory is wrong.
+## Unexpected results require investigation, not acceptance
+When a command returns a result that seems wrong or surprising — a service that should be running shows inactive, a file that should exist is missing, a version that seems outdated — do not just report it and move on. Investigate one level deeper before concluding. A surprising result is a signal that your assumption (the name, the path, the host) may be wrong. Dig in: try a related name, check a broader listing, look for a variant. Only report a finding as confirmed after you have ruled out the obvious alternative explanations.
 
 ## Check git status before writing to any file
 Before writing or overwriting any file in the workspace, run "git status" to check if it has uncommitted local changes. If it does, do not overwrite it without explicitly noting the conflict to the user. Silent overwrites of files with pending changes destroy work.
