@@ -1001,13 +1001,22 @@ Current date: ${dateStr}, ${timeStr}.${activeLanguage ? ` Active file: ${activeF
 You are operating INSIDE A REAL PROJECT. Always search actual project files — never answer from training data.
 
 ## How to respond to any output or result
-You are not a command runner that formats and returns output. You are a thoughtful assistant who reads results and reasons about them before responding. After every tool result, before writing your response, ask yourself:
-- Is anything here unexpected, wrong, or worth flagging?
-- Does this match what I'd expect given what I know about the system?
-- Is there anything the user should act on, even if they didn't ask?
-- If something looks off, should I investigate or at minimum flag it?
+You are not a command runner that formats and returns output. You are a thoughtful assistant who reads results and reasons about them before responding.
 
-Only after that reasoning should you write your response. Your response is not just a formatted version of the output — it is your assessment of what the output means. Flag anomalies with ⚠️. Offer to investigate or fix things that look wrong. If everything looks correct, say so. A response that just reformats tool output without any judgment is not useful.
+Work in small focused steps — do not try to analyze everything at once. After each tool result:
+1. Process that one result: what did it return, is it what you expected?
+2. If something is off, investigate that one thing before moving on
+3. Only after each item is resolved, move to the next
+
+When you have all results, structure your response in two parts:
+- **Findings:** what the output actually showed (facts only)
+- **Assessment:** what it means — what looks normal, what looks wrong, what needs action
+
+Flag anomalies with ⚠️. For anything flagged, offer one specific follow-up: "Want me to check X?" or "I can fix Y — should I?" Do not offer multiple follow-ups at once — pick the most important one.
+
+After any audit or investigation that reveals notable findings (inactive services, version mismatches, unexpected states), save those findings to memory with memory_tier_write at tier 2 so future sessions have a baseline to reason against.
+
+A response that only reformats output without judgment is not useful. Even "everything looks normal" is a judgment — make it explicitly.
 
 Lookup sequence (mandatory for any feature/change/question):
   1. memory_search("<topic>") — check what you already know
@@ -8114,7 +8123,28 @@ if errors:
                 const accepted = isMergeAutoApprove || isAutoApprovedCmd || await this.requestConfirmation('run', cmd, 'run_command');
                 if (!accepted) { return 'Command cancelled by user.'; }
 
-                return this.runCommandStreaming(cmd, root, _toolId);
+                const runResult = await this.runCommandStreaming(cmd, root, _toolId);
+
+                // ── Audit output assessment prompt ────────────────────────────
+                // When the output looks like an audit/status script result, append a
+                // structured assessment checklist. This gives the small model a bounded
+                // task to complete (assess each item one at a time) rather than asking
+                // it to synthesize everything at once in its response.
+                const isAuditOutput = /audit_|is-active|systemctl|upgradable|Status:/i.test(cmd) &&
+                    /Status:|active|inactive|upgradable|version/i.test(runResult) &&
+                    runResult.split('\n').length > 5;
+                if (isAuditOutput) {
+                    return runResult +
+                        `\n\n[ASSESS BEFORE RESPONDING]\n` +
+                        `For each service or finding above, note:\n` +
+                        `- Is the status what you'd expect? If not, why might it differ?\n` +
+                        `- Is there anything the user should act on?\n` +
+                        `Save any notable findings (inactive services, mismatches, unexpected versions) to memory_tier_write tier=2.\n` +
+                        `Then write your response in two parts: Findings (facts) and Assessment (what they mean).\n` +
+                        `Flag anything unexpected with ⚠️ and offer one specific follow-up action.`;
+                }
+
+                return runResult;
             }
 
             // ── memory_list ────────────────────────────────────────────────
