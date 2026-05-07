@@ -154,7 +154,7 @@ export function streamChatRequest(
                 // (e.g. "27. Check ... 28. Check ... 29. Check ...") that evade phrase detection.
                 // Kept low (3000) to force the model to commit to an action rather than
                 // looping through the same reasoning indefinitely.
-                const MAX_THINKING_CHARS = 5000;
+                const MAX_THINKING_CHARS = 12000;
 
                 const isRepeating = (content: string): boolean => {
                     // Slide a window over the last N chars of content
@@ -231,10 +231,17 @@ export function streamChatRequest(
                                     if (thinkingLoop || thinkingSpiral || thinkingOverflow) {
                                         const reason = thinkingLoop ? 'repetition loop' : thinkingSpiral ? 'list-continuation spiral' : `thinking exceeded ${MAX_THINKING_CHARS} chars`;
                                         logWarn(`[stream] Thinking block aborted — ${reason} after ${fullThinking.length} chars`);
-                                        resolved = true;
-                                        req.destroy();
-                                        const avgLogprob = logprobCount > 0 ? logprobSum / logprobCount : null;
-                                        resolve({ content: fullContent || `\n\n[Generation stopped — ${reason} in thinking block. Please retry.]`, toolCalls, avgLogprob, thinking: fullThinking.slice(0, 2000) + `\n[thinking truncated — ${reason}]` });
+                                        // Only hard-abort for loops/spirals. For size overflow, let the
+                                        // stream continue — the model may be about to start its response.
+                                        // Destroying on overflow when fullContent is empty leaves the user
+                                        // with a blank or error response.
+                                        if (thinkingLoop || thinkingSpiral) {
+                                            resolved = true;
+                                            req.destroy();
+                                            const avgLogprob = logprobCount > 0 ? logprobSum / logprobCount : null;
+                                            resolve({ content: fullContent || `\n\n[Generation stopped — ${reason} in thinking block. Please retry.]`, toolCalls, avgLogprob, thinking: fullThinking.slice(0, 2000) + `\n[thinking truncated — ${reason}]` });
+                                        }
+                                        // For overflow: log and continue — the model will exit think naturally
                                     }
                                 }
                             }
