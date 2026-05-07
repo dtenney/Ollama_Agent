@@ -7086,21 +7086,24 @@ If the code looks correct, respond with exactly: OK`;
                         }
 
                         // Inject surrounding context so the model can build a correct old_string
-                        // without a wasted re-read round-trip.
-                        const ctxStart = Math.max(0, nearLineIdx - 2);
-                        const ctxEnd = Math.min(fileLines.length - 1, nearLineIdx + oldLines.length + 4);
+                        // without a wasted re-read round-trip. Show the full span of the attempted
+                        // old_string plus a generous buffer so every differing line is visible.
+                        const ctxStart = Math.max(0, nearLineIdx - 3);
+                        const ctxEnd = Math.min(fileLines.length - 1, nearLineIdx + oldLines.length + 8);
                         const ctxBlock = fileLines.slice(ctxStart, ctxEnd + 1)
                             .map((l, i) => `${String(ctxStart + i + 1).padStart(4, ' ')}: ${l}`)
                             .join('\n');
                         throw new Error(
-                            `edit_file: old_string not found in ${rel}. ` +
-                            `First line matched at line ${nearLineIdx + 1}, but the full block didn't match.\n\n` +
-                            `ACTUAL FILE LINES AROUND THAT LOCATION:\n${ctxBlock}\n\n` +
-                            `STOP THINKING. The exact file content is shown above. Your only job now is:\n` +
-                            `1. Find the lines you want to replace in the ACTUAL FILE LINES shown above\n` +
-                            `2. Copy those lines exactly — character for character, including all indentation and punctuation\n` +
-                            `3. Call edit_file immediately with those copied lines as old_string\n\n` +
-                            `Do not re-read the file. Do not reconstruct from memory. Do not use placeholders. Copy the exact lines shown, then call the tool.`
+                            `edit_file: old_string not found in ${rel}.\n` +
+                            `First line of old_string matched near line ${nearLineIdx + 1}, but the rest of the block did NOT match the file.\n\n` +
+                            `ACTUAL FILE CONTENT AT THAT LOCATION (lines ${ctxStart + 1}–${ctxEnd + 1}):\n${ctxBlock}\n\n` +
+                            `STOP. Do NOT re-read the file. Do NOT reconstruct from memory.\n` +
+                            `Your old_string contained at least one line that differs from the file above.\n` +
+                            `Steps:\n` +
+                            `1. Find the lines you want to replace IN THE BLOCK SHOWN ABOVE\n` +
+                            `2. Copy those lines EXACTLY — every space, quote, comma, and punctuation mark\n` +
+                            `3. Call edit_file immediately with those copied lines as old_string\n` +
+                            `If you are unsure which lines differ, use a shorter old_string (just 2-3 unique lines) to make matching easier.`
                         );
                     }
 
@@ -7140,7 +7143,25 @@ If the code looks correct, respond with exactly: OK`;
                             sigHint = `\n\nDefined names in ${rel}:\n${sigs.map(s => '  ' + s).join('\n')}`;
                         }
                     } catch { /* ignore */ }
-                    throw new Error(`edit_file failed — old_string not found in ${rel}.\n\nMost likely cause: you constructed old_string from memory or inference instead of copying it from a shell_read result. Invented old_strings always fail.\n\nRequired fix: shell_read the file now, find the exact lines you want to change in the output, copy them character-for-character as old_string, then retry.${sigHint}`);
+                    // Embed the full file content (up to 150 lines) so the agent doesn't need
+                    // another round-trip shell_read — it has the content right here.
+                    let embeddedContent = '';
+                    try {
+                        const allLines = fs.readFileSync(full, 'utf8').split('\n');
+                        const MAX_EMBED = 150;
+                        const embedLines = allLines.slice(0, MAX_EMBED);
+                        embeddedContent = `\n\nFULL FILE CONTENT (${rel}, ${allLines.length} lines):\n` +
+                            embedLines.map((l, i) => `${String(i + 1).padStart(4, ' ')}: ${l}`).join('\n') +
+                            (allLines.length > MAX_EMBED ? `\n... (${allLines.length - MAX_EMBED} more lines — use shell_read if needed)` : '');
+                    } catch { /* ignore */ }
+                    throw new Error(
+                        `edit_file failed — old_string not found anywhere in ${rel}.\n\n` +
+                        `CAUSE: You constructed old_string from memory or inference. Invented strings always fail.\n\n` +
+                        `STOP. Do NOT call shell_read — the file content is shown below.\n` +
+                        `Find the exact lines you want to change in the content below.\n` +
+                        `Copy those lines character-for-character (every space, quote, punctuation).\n` +
+                        `Then call edit_file immediately.${embeddedContent}${sigHint}`
+                    );
                 }
 
                 // Ensure the match is unique to avoid unintended replacements
