@@ -8134,14 +8134,29 @@ if errors:
                     /Status:|active|inactive|upgradable|version/i.test(runResult) &&
                     runResult.split('\n').length > 5;
                 if (isAuditOutput) {
+                    // Extract specific anomalies from the output so the model doesn't have
+                    // to discover them — hand them as named facts it must address.
+                    const anomalies: string[] = [];
+                    for (const line of runResult.split('\n')) {
+                        // Inactive service
+                        const inactiveMatch = line.match(/Checking\s+(\S+)\s*\(systemd\)|(\S+)\s*\(systemd\).*inactive|\[(\S+)\].*inactive/i);
+                        if (/\binactive\b/i.test(line) && inactiveMatch) {
+                            const svc = inactiveMatch[1] || inactiveMatch[2] || inactiveMatch[3];
+                            if (svc) { anomalies.push(`⚠️ ${svc}: shows inactive — verify the service name is correct in the inventory (the real unit may differ, e.g. pihole → pihole-FTL)`); }
+                        }
+                        // Version mismatch hint (if version looks stale)
+                        if (/\[FAIL\]|\bERROR\b|\bnot found\b/i.test(line)) {
+                            anomalies.push(`⚠️ ${line.trim()} — investigate why this failed`);
+                        }
+                    }
+                    const anomalyBlock = anomalies.length
+                        ? `\nANOMALIES DETECTED — you must address each of these in your response:\n${anomalies.map(a => `  ${a}`).join('\n')}\n`
+                        : `\nNo anomalies detected — confirm this looks correct in your response.\n`;
+
                     return runResult +
-                        `\n\n[ASSESS BEFORE RESPONDING]\n` +
-                        `For each service or finding above, note:\n` +
-                        `- Is the status what you'd expect? If not, why might it differ?\n` +
-                        `- Is there anything the user should act on?\n` +
-                        `Save any notable findings (inactive services, mismatches, unexpected versions) to memory_tier_write tier=2.\n` +
-                        `Then write your response in two parts: Findings (facts) and Assessment (what they mean).\n` +
-                        `Flag anything unexpected with ⚠️ and offer one specific follow-up action.`;
+                        `\n\n[ASSESS BEFORE RESPONDING]${anomalyBlock}` +
+                        `Save any anomalies to memory_tier_write tier=2.\n` +
+                        `Write your response as: Findings (what the output showed) + Assessment (what it means + next step for each anomaly).`;
                 }
 
                 return runResult;
