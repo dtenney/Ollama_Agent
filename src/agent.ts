@@ -4581,8 +4581,7 @@ Do NOT assume you have no memory — check first.`;
                 const MAX_LINE_BUF = 400;
 
                 const stripXmlArtifacts = (s: string): string => s
-                    // Strip THINK_START/THINK_END sentinels (legacy — thinking now suppressed in ollamaClient)
-                    .replace(/\x01THINK_(?:START|END)\x01/g, '')
+                    // NOTE: do NOT strip THINK_START/THINK_END — webview uses them to switch panels
                     .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
                     .replace(/<\/?tool_call>/g, '')
                     .replace(/<function_calls>[\s\S]*?<\/function_calls>/g, '')
