@@ -8103,7 +8103,33 @@ if errors:
                 const accepted = isMergeAutoApprove || isAutoApprovedCmd || await this.requestConfirmation('run', cmd, 'run_command');
                 if (!accepted) { return 'Command cancelled by user.'; }
 
-                return this.runCommandStreaming(cmd, root, _toolId);
+                const cmdResult = await this.runCommandStreaming(cmd, root, _toolId);
+
+                // ── Service inactive follow-up guard ──────────────────────────
+                // If the output contains "inactive" and the command involved systemctl or an
+                // audit script, append a mandatory follow-up reminder. The model must not
+                // report a service as inactive without first checking for related unit names.
+                const looksLikeServiceCheck = /systemctl|audit_host|is-active/i.test(cmd);
+                const hasInactive = /\binactive\b/i.test(cmdResult);
+                if (looksLikeServiceCheck && hasInactive) {
+                    // Extract service names that appear inactive from the output
+                    const inactiveNames: string[] = [];
+                    for (const line of cmdResult.split('\n')) {
+                        if (/\binactive\b/i.test(line)) {
+                            // Try to extract the service name — look for word before "inactive" or after "Checking"
+                            const m = line.match(/Checking\s+(\S+)|(\S+)\s*\(systemd\).*inactive|(\S+)\s+inactive/i);
+                            if (m) { inactiveNames.push(m[1] || m[2] || m[3]); }
+                        }
+                    }
+                    const names = inactiveNames.length ? inactiveNames.join(', ') : 'the inactive service(s)';
+                    return cmdResult +
+                        `\n\n[FOLLOW-UP REQUIRED] Before reporting any service as inactive, you must verify the unit name is correct.\n` +
+                        `For ${names}: run ssh <host> "systemctl list-unit-files | grep -i <name>" to check for related units.\n` +
+                        `If a variant exists (e.g. pihole-FTL instead of pihole), report the correct name.\n` +
+                        `Only report a service as genuinely inactive after this check.`;
+                }
+
+                return cmdResult;
             }
 
             // ── memory_list ────────────────────────────────────────────────
