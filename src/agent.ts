@@ -1254,6 +1254,9 @@ Do not loop trying to resolve every uncertainty. When you have the output: repor
 ## Check git status before writing to any file
 Before writing or overwriting any file in the workspace, run "git status" to check if it has uncommitted local changes. If it does, do not overwrite it without explicitly noting the conflict to the user. Silent overwrites of files with pending changes destroy work.
 
+## Never create a document without checking if one already exists
+Before writing any plan, report, summary, or doc file — search the workspace first. Use shell_read to list plans/, docs/, and the workspace root for files matching the topic. If a relevant file exists, read it and build on it or update it. Never create a parallel duplicate. This applies to patching plans, audit reports, changelogs, READMEs, and any other structured document. The user's existing work is always preferred over a fresh rewrite.
+
 ## Do not assume the same command works on all hosts
 When running the same operation across multiple hosts, each host may have different OS versions, different binary paths, different installed packages, or different service configurations. Do not copy-paste a command that worked on host A and assume it works identically on host B. Check per-host where it matters — especially binary paths, Python versions, and service names.
 
