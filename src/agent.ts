@@ -8125,13 +8125,17 @@ if errors:
                         }
                     }
                     const names = inactiveNames.length ? inactiveNames.join(', ') : 'the inactive service(s)';
-                    return cmdResult +
-                        `\n\n[FOLLOW-UP REQUIRED] Before reporting any service as inactive, you must:\n` +
-                        `1. Run: ssh <host> "systemctl list-unit-files | grep -i <name>" — check for a related unit under a different name.\n` +
-                        `2. If a variant is found (e.g. pihole-FTL instead of pihole), run: ssh <host> "systemctl is-active <variant>" to confirm it is actually running.\n` +
-                        `3. Note: "enabled" means starts on boot — it does NOT mean running right now. Only "active" confirms the service is up.\n` +
-                        `4. Report the correct unit name and whether it is active or genuinely down.\n` +
-                        `Do this for: ${names}.`;
+                    // Prepend the directive so the model sees the constraint BEFORE reading the output.
+                    // Appending allows the model to reason "task complete" from the output first
+                    // and then treat the directive as noise. Prepending forces it to carry the
+                    // constraint as it reads the results.
+                    return `INCOMPLETE — do not summarize yet. The output below contains inactive service(s) that require follow-up before you can report.\n` +
+                        `You must do the following for ${names} before producing any response:\n` +
+                        `1. ssh <host> "systemctl list-unit-files | grep -i <name>" — find the real unit name.\n` +
+                        `2. ssh <host> "systemctl is-active <real-unit>" — confirm running status. "enabled" != "active".\n` +
+                        `3. If the inventory name is wrong, note the correct name and ask the user if they want it fixed.\n` +
+                        `Do NOT produce your final response until these steps are complete.\n\n` +
+                        `--- SCRIPT OUTPUT ---\n` + cmdResult;
                 }
 
                 return cmdResult;
