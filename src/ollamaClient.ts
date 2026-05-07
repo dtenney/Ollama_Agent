@@ -151,8 +151,10 @@ export function streamChatRequest(
                 const REPETITION_THRESHOLD = 8;  // times seen = abort
 
                 // Hard cap on thinking block size — prevents list-continuation spirals
-                // (e.g. "27. Check ... 28. Check ... 29. Check ...") that evade phrase detection
-                const MAX_THINKING_CHARS = 8000;
+                // (e.g. "27. Check ... 28. Check ... 29. Check ...") that evade phrase detection.
+                // Kept low (3000) to force the model to commit to an action rather than
+                // looping through the same reasoning indefinitely.
+                const MAX_THINKING_CHARS = 5000;
 
                 const isRepeating = (content: string): boolean => {
                     // Slide a window over the last N chars of content

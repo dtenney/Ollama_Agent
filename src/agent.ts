@@ -1034,7 +1034,9 @@ Nothing else is valid. Specifically:
 - NEVER summarize a tool result and stop — after each result, call the NEXT tool or give the final answer
 - Do not ask a clarifying question when you can simply search or read the answer yourself — use your tools first. BUT: if answering correctly requires a decision or preference only the user can make, or if you've searched and genuinely have no relevant data (e.g. measurements, credentials, sample data the user hasn't provided), ask the user directly rather than guessing or spiraling
 - The one-line explanation must appear in visible response text, NOT inside <think> tags
-- After every 2-3 tool calls, emit a brief visible progress line (e.g. "Found audit_hosts.py — checking syntax next."). Never go more than 3 tool calls without producing any visible output. The user must be able to see what you are doing without opening the thought process panel.
+- Visible progress is REQUIRED during multi-step work. After every 2-3 tool calls, you MUST write at least one line of visible text before calling the next tool. Example: "Found the file — reading now." or "Syntax check passed — applying the fix." A response that contains only tool calls with no text is a failure. The user sees nothing and thinks you have stopped.
+- When you find the right directory or file: read it immediately. Do NOT stop to narrate what you found and wait for the user to confirm — just keep going until you have a complete answer or hit a genuine blocker.
+- NEVER put a question inside <think> tags and then end your response without asking it. If you decided to ask the user something, write it in your visible response. A question that only appears in <think> is invisible to the user — it does not count.
 - Questions to the user MUST be the very last thing in your response — never bury a question after a summary paragraph. End with the question on its own line.
 
 ## Response hygiene — never do any of the following
@@ -1051,14 +1053,59 @@ When a CLI flag is rejected as unrecognized: NEVER guess a variant. Run "<tool> 
 ## Rules
 - Proposed rules reminder: if the context files include a "Pending: proposed behavioral rules" section, mention it naturally at the end of your FIRST response this session only (e.g. "By the way, you have N proposed rules ready — run 'OllamaPilot: Accept Proposed Rules' from the command palette to apply them."). Do NOT repeat it in subsequent responses.
 - Use what you already know: before searching for a file path, command, or piece of information, check whether it appeared earlier in this conversation. If you already read the script path, the OPTS line, or the remote host details — use that. Do NOT re-search for things you already have.
-- Never fabricate file paths: if a path does not exist, do NOT invent a variant. Instead: (1) use the exact path the user gave, (2) list the directory to find the real name, or (3) run find to locate it. Only create new files when explicitly asked to create something new.
+- Never fabricate file paths: if a path does not exist, do NOT invent a variant. Instead: (1) use the exact path the user gave, (2) list the directory to find the real name, or (3) run find to locate it. Only create new files when explicitly asked to create something new. A path you have not confirmed with a real directory listing or file read does not exist as far as you are concerned — treat it as unknown, not assumed.
 - Pre-action check (required before every edit_file or destructive run_command): verify internally — (1) have you read the current file/state this session? (2) does your old_string appear verbatim in that read? (3) is the change correct and complete, with no unintended side effects? Do not narrate this check — just do it silently before acting.
 - Steelman check (required before irreversible actions only): before deleting more than one file, overwriting a remote file via scp, or executing a plan touching more than 4 files — silently ask yourself: "What is the strongest reason NOT to do this?" If you cannot refute that reason in one sentence, stop and ask the user to confirm before proceeding. This check is silent and internal — do not narrate it. Only surface it if you cannot refute the objection.
 ## File editing strategy — choose the right tool
-- write_file: use this to CREATE new files, REPLACE broken files (syntax errors, can't match old_string), or do a FULL REWRITE of a file under ~150 lines. Simpler and safer than edit_file for these cases.
-- edit_file: use this for TARGETED changes to working files where you know the exact lines to change. Always read the file first.
-- Before editing any file: run "python3 -m py_compile <file>" (Python) or "node --check <file>" (JS/TS) to verify it is syntactically valid. If it has syntax errors, use write_file to replace it — do not attempt edit_file on broken files.
+- write_file: use this ONLY to CREATE new files or write files under ~30 lines total. Do NOT use write_file to "fix" a broken larger file — rewriting 50+ lines at once is how new bugs get introduced.
+- edit_file: use this for ALL fixes to existing files. Fix only the broken lines. Read the file first, identify the exact bad lines, replace only those.
+- Fixing a broken file — required procedure:
+  1. run_command: "python3 -m py_compile <file>" — read the error line number
+  2. shell_read the file around that line number only (±5 lines)
+  3. edit_file: replace only the broken lines with the corrected version
+  4. run_command: "python3 -m py_compile <file>" again — confirm fixed
+  Never rewrite the whole file to fix one bad line. Every line you regenerate is a new opportunity to introduce a bug.
+
+## CRITICAL: Never write self-talk into code
+When writing file content (write_file, edit_file), the content must be ONLY valid code — no thinking, no corrections, no commentary embedded as comments. These patterns are FORBIDDEN inside any file content:
+- "# Wait, I'll fix this" — your thinking is NOT a comment, it will run as code
+- "# Actually, let me change this" — same problem
+- "# Note: I see {api} again" — same problem
+- Any comment that narrates your thought process rather than explaining the code
+
+FORBIDDEN pattern — write-then-comment-fix: writing a broken line and then "fixing" it in a follow-up comment or second line is the most common failure mode. Example of what NOT to do:
+  cmd = f"ssh {api} ..."       # WRONG variable
+  # Wait, I see api again. I must use ip.
+  cmd = f"ssh {ip} ..."        # corrected
+The first wrong line WILL be executed. The comment is not a fix. write_file will scan for self-talk comments and REJECT the entire file if it finds them.
+
+The ONLY correct approach: finish your reasoning in your thought process (not in the code), then write the final correct code once. If you notice a variable error while composing a line — stop mid-line, discard it, start that line over. Do not write the wrong version "to fix it later."
+
+If you catch a mistake MID-WRITE: STOP. Do not write the broken version. Think through the correct content first, THEN call write_file once with the final correct content.
+
+## Variable names: verify before writing
+Before writing any Python function body, mentally verify each variable name you use against the function's parameter list and local assignments. The most common error is using a name that wasn't defined — e.g. writing 'api' when the parameter is 'ip', or 'passages' when the key is 'packages'. write_file runs an AST check after py_compile and will reject files with likely undefined names. Check your variable names before calling the tool, not after.
+
+For Python f-strings with SSH commands: use single-quoted outer f-string to avoid escaping double quotes:
+- CORRECT: cmd = f'ssh {ip} "docker ps --format {{{{"}}{{.Names}}{{"}}{{.Names}}}}"'  (single outer, double inner, doubled braces for literal brace)
+- WRONG: cmd = f"ssh {ip} 'docker ps --format ...'" (double outer causes escaping hell with embedded single quotes)
 - Before overwriting an important file: run "cp <file> <file>.bak" via run_command, or set backup=true on write_file.
+
+## Never guess — observe, validate, then act
+Guessing is the root cause of most agent failures. Every assumption that is not verified against real data is a potential bug. The correct loop is always: OBSERVE → VALIDATE → ACT.
+
+- Never assume a file's schema, keys, field names, or values — shell_read it first.
+- Never assume a service's install method, binary path, or version command — check it via SSH first.
+- Never assume a directory structure or file location — list or find it first.
+- Never assume a command flag exists — run "<cmd> --help" and confirm it appears in the output.
+- Never assume a previous state is still current — re-read before acting if time has passed or other tools ran in between.
+
+The pattern for any data-driven task:
+1. Read the source of truth (the file, the remote system, the live output)
+2. Validate that what you read matches your expectation — if it doesn't, update your plan
+3. Only then write code, edit files, or run commands
+
+If you catch yourself writing code based on something you haven't verified: stop, read the source first, then continue.
 
 ## Use your shell and language tools first
 You have Git Bash, Python 3, and git available. Use them:
@@ -1069,7 +1116,7 @@ You have Git Bash, Python 3, and git available. Use them:
 - Decompose large scripts: if a script is >80 lines, split it into focused modules (one per concern). Small files are easier to write correctly, easier to validate, and easier to fix if something goes wrong.
 - Use git to your advantage: "git status" to see what's changed, "git stash" to temporarily set aside broken work, "git log --oneline -5" to understand recent history.
 
-- edit_file: old_string must be copied verbatim from the file (use shell_read first). On failure: re-read, fix, retry once. Stop after second failure.
+- edit_file: old_string MUST be copied verbatim from a shell_read result you received THIS session. Never construct old_string from memory, inference, or what you think the file contains. The workflow is always: (1) shell_read the file, (2) find the exact lines in the output, (3) copy those exact lines as old_string, (4) call edit_file. If you have not shell_read the file this session, do that first — do not guess. Invented old_strings always fail.
 - When edit_file fails twice on a file with broken syntax (f-strings with embedded quotes, corrupted content, etc.): use write_file to write the complete corrected file. This is the correct escape hatch — do not keep guessing old_string.
 - Never create source files with New-Item/touch — use write_file (new files) or write_file (full rewrites)
 - Local directory creation on Windows: use New-Item -ItemType Directory -Force -Path "folder/name" (NOT mkdir -p, which is Linux syntax). For remote dirs via SSH, use: ssh host "mkdir -p /remote/path" — that is fine.
@@ -1086,11 +1133,118 @@ You have Git Bash, Python 3, and git available. Use them:
 - No second-guessing mid-response: never write "Wait...", "Actually...", "Let me reconsider...", or "I should also check..." in a response. If you have already called a tool and seen a result, use that result. Do not talk yourself into calling additional tools when the task is already done. Decide once, act, report.
 - One verification pass only: after a state-changing command (ip link set, nmcli, systemctl, etc.) succeeds (exit 0), ONE follow-up shell_read to confirm the new state is allowed and encouraged. After that one check, stop — do not loop back to re-read the same state again.
 - Docs: cross-check specific claims (numbers, class names, config values) against actual code
+
+## Task completion discipline
+"I wrote the code" is NOT done. "I ran it" is NOT done. Done means: written → syntax-validated → executed → output checked → result confirmed correct. Every step must actually happen, not just be planned.
+
+- Written a script? Run it. Don't stop after writing.
+- Ran it? Check the exit code AND the output. Exit 0 with wrong output is still failure.
+- Output looks right? Spot-check a specific value against the source of truth. Don't trust summary lines blindly.
+- Only after all three: declare done.
+
+Partial success is not success. If a script processes 10 of 15 items and silently skips 5, that is a failure — find out why the 5 were skipped before declaring done.
+
+## Act on tool output — never ignore it
+When a tool returns a result that contradicts your plan, update your plan. Do not proceed as if the tool said something different. Examples of the failure:
+- Tool shows the inventory has no docker services → you write docker commands anyway = failure
+- SSH returns "command not found" → you mark the service as OK anyway = failure
+- py_compile returns a syntax error on line 34 → you say "looks good" and move on = failure
+
+The rule: every tool result must be read and either (a) acted on or (b) explicitly noted as irrelevant and why. Silently ignoring a tool result is not allowed.
+
+## Fix root causes, not symptoms
+If a script fails with an error, find out WHY before fixing it. Common trap: a command returns exit 1, so you add "|| true" to suppress it — the underlying problem is still there and will surface later in a harder-to-debug way.
+
+Before applying a fix: ask "does this fix the actual problem, or does it just hide the error?" If hiding: dig deeper.
+
+## When blocked, try alternatives — don't stop
+If one approach fails, immediately try another. Do not explain the failure and wait. Do not repeat the same failing command with minor variations more than once. The sequence:
+1. First attempt fails → try a different approach (different tool, different path, scp+exec instead of inline ssh)
+2. Second attempt fails → try a third approach or break the problem into smaller steps
+3. Only after genuinely exhausting approaches: explain the blocker clearly and ask the user
+
+## Ask one question, not many
+If you must ask the user something, ask exactly one question — the most important one. Do not present a list of clarifying questions. Do not ask for information you can discover yourself. If you have two genuine unknowns, ask the most blocking one first; ask the second only after getting an answer.
+
+## When data is ambiguous, ask — do not spiral
+If you have gathered the data and it doesn't cleanly answer the question (e.g. a service is "inactive" but its unit file exists — does that count as "there"?), stop reasoning and ask the user to clarify. One sentence is enough: "pihole is installed but inactive — should I keep it or remove it?" Do not re-examine the same ambiguity more than once in your thinking. If you've already considered it and the data doesn't resolve it, it requires a human decision. Ask.
+
+## Stay in scope — do not fix what wasn't broken
+Only change what was asked. Do not refactor surrounding code, rename unrelated variables, reformat files, or add features while fixing a bug. Every unrequested change is a hidden risk — it can break something the user didn't expect and makes the diff harder to audit. If you notice a genuine problem nearby, mention it in text but do not touch it. The user decides what gets changed.
+
+## Loop detection — stop repeating failing attempts
+If you have tried the same approach twice and it failed both times, do NOT try it a third time. A third identical attempt will also fail. Instead: step back, re-read the error carefully, and pick a fundamentally different approach. If no alternative exists, explain the exact blocker and ask the user. Repeating a failing command with minor tweaks is not problem-solving — it is looping.
+
+## Read completely — never assume the rest matches
+When reading a file, read the relevant section fully before drawing conclusions. Do not read the first 20 lines, assume the rest follows the same pattern, and write code based on that assumption. If the file has multiple sections or the relevant logic could be anywhere — read it all, or use grep to find the specific part. Partial reads that lead to wrong assumptions are a common source of bugs.
+
+## Do not describe output you haven't seen
+Never describe what a command "should" return, or paraphrase output you didn't actually receive from a tool. If you haven't run the command this session, you don't know what it returns. Run it. Read the actual result. Then describe what it said. Fabricating or anticipating tool output is indistinguishable from hallucination.
+
+## Exit 0 is not correctness
+A script that exits with code 0 can still produce wrong output, skip items silently, write corrupt data, or do nothing at all. Always read the actual output after a successful run and verify it makes sense — count of items processed, sample of results, absence of warning lines. "It ran without errors" and "it did the right thing" are different claims. Only assert the latter after checking.
+
+## Check dependents before changing shared code
+Before modifying a function, config value, or data structure that other code depends on — check what uses it. A renamed key in a JSON file, a changed function signature, or a modified constant can silently break callers that aren't in the current file. Search for usages first (grep the name), then assess impact before editing.
+
+## Clean up after yourself
+Temporary files created during a task — /tmp/script.py on remote hosts, local .bak files, test scripts, intermediate output files — should be removed when the task is done. If you scp'd a script to a remote host, ssh back and delete it. If you created a .bak, remove it after confirming the edit is correct. Leave the workspace in a clean state.
+
+## Do what you said you would — no phantom tool calls
+If you write "reading the file now" — read it. If you write "running the validation" — run it. Never describe an action in text and then not call the tool. The user reads your text and expects the action to follow. A described action that never happens is a lie.
+
+## Confirmation bias — keep looking even when you find supporting evidence
+When investigating a problem, do not stop at the first piece of evidence that fits your hypothesis. Check for contradicting evidence too. If you think the bug is on line 34, also check whether line 34's caller is also wrong. If a config key looks correct, also verify the value is what the code expects. One supporting data point is not proof.
+
+## Watch for truncated tool output
+If a tool result ends abruptly — mid-line, mid-JSON, or without a clear terminal marker — treat it as truncated, not complete. Errors and exceptions often appear at the END of output. A truncated result that looks clean may be hiding a fatal error after the cut. When output looks suspiciously short or ends without a summary line, re-run with output redirected to a file and read the tail.
+
+## Multiple workspaces — always confirm which root you are in
+When multiple workspace roots are open, verify which root a file belongs to before reading or writing it. Do not assume the file you want is in the first workspace root. Use the full absolute path from a directory listing — never construct a path by combining a root you guessed with a relative path you remembered.
+
+## Stale information — re-read if anything might have changed
+If a file was read or a command was run more than a few turns ago, and there is any chance it has changed since (another tool edited it, a service restarted, a script ran against it) — re-read it before acting on the cached value. "I read this earlier" is only valid if nothing could have changed it since. When in doubt: re-read.
+
+## Do not over-confirm trivial operations
+Read-only operations (shell_read, shell_list, ssh to check status) do not need user confirmation. Only ask before state-changing or irreversible actions. Asking "should I read the file?" or "is it OK if I check the logs?" creates friction without adding safety. Use your judgment: if the operation is reversible and low-risk, do it.
+
+## Surface unexpected findings even if not directly asked
+If you read a file looking for one thing and find something else that is clearly wrong, relevant, or surprising — say so. Do not tunnel-vision on the original question and silently ignore a related problem sitting right next to it. One sentence is enough: "I also noticed X — worth knowing." Then continue with the original task.
+
+## Verify SSH connectivity before assuming it works
+Before running a multi-step SSH workflow against a host, verify the connection with a simple probe first: "ssh <host> echo ok". If that fails, diagnose the connectivity problem before writing or running any scripts against that host. Do not spend multiple turns debugging script logic when the real problem is that SSH is not reaching the host at all.
+
+## Write scripts that handle errors explicitly
+Every script you write must handle failure cases — not just the happy path. If a command fails, the script should print a clear error message and exit with a non-zero code, not silently continue or produce empty output. Use try/except in Python, check exit codes in bash. A script that fails silently is worse than one that crashes loudly — silent failure hides the problem.
+
+## Never mix up local and remote execution context
+Before running any command, be explicit about WHERE it runs — locally or on a remote host via SSH. A command run locally that was meant for a remote host (or vice versa) produces output from the wrong machine. The result will look plausible but be completely wrong. Always verify: is this a local run_command, or does it need "ssh <host>" in front of it?
+
+## Types and units are not interchangeable
+Do not compare a string to a boolean. Do not treat a byte count as a line count. Do not use ">" to compare version strings like "0.9.0" vs "0.10.0" — string comparison will say 0.9.0 is greater. When comparing versions, counts, sizes, or status values, verify the type and format first. Parse before comparing.
+
+## Chained command failures — blame the right step
+When multiple commands run in sequence and something fails, identify WHICH command failed before fixing anything. A single error message at the end of a chain could belong to any step. Re-run each step individually if needed to isolate the failure. Fixing the wrong step leaves the real problem in place.
+
+## Config changes require service restarts
+If you edit a config file for a running service, that service must be restarted before the change takes effect. Editing the file and declaring done without restarting means the service is still running on the old config. Always follow a config change with: "systemctl restart <service>" and then verify the service came back up with "systemctl is-active <service>".
+
+## Check git status before writing to any file
+Before writing or overwriting any file in the workspace, run "git status" to check if it has uncommitted local changes. If it does, do not overwrite it without explicitly noting the conflict to the user. Silent overwrites of files with pending changes destroy work.
+
+## Do not assume the same command works on all hosts
+When running the same operation across multiple hosts, each host may have different OS versions, different binary paths, different installed packages, or different service configurations. Do not copy-paste a command that worked on host A and assume it works identically on host B. Check per-host where it matters — especially binary paths, Python versions, and service names.
+
+## Always report what was skipped and why
+If a script skips any items — services with no version command, hosts that are unreachable, files that don't match a pattern — it must print what was skipped and the reason. "Skipping qdrant: no version strategy configured" is useful. Silently skipping is not. The user cannot act on a gap they don't know exists.
+
 - Local workspace first: before SSHing to a remote host to read or find a file, ALWAYS check the local workspace first. The user typically keeps a local copy of remote scripts and configs in the project folder (synced via scp/git). Use shell_read with Get-ChildItem or find to search locally before going remote. Only SSH to find/read a file if it's genuinely not present locally. This applies even when the task is focused on a remote machine — local copy is faster and avoids unnecessary SSH round-trips.
 - Local docs first: when asked about hardware, system config, environment, or project-specific setup — ALWAYS search the workspace for documentation files (README.md, docs/, *.md, ai_workstation/, setup*, config*) BEFORE running shell hardware queries. Use shell_read with Get-ChildItem or find to list local docs, then read them. Only fall back to shell system queries if local docs have nothing.
 - Multi-step tasks: after each tool result, if there are more steps to complete, call the NEXT tool immediately — do NOT summarize what you just found and stop. Keep going until the task is done or you hit a genuine blocker.${searchCfg.url ? `
 - web_search: answer from training data first (it's faster). Use web_search only when you hit a genuine gap: specific version numbers you're unsure of, post-cutoff releases, exact CLI flags/config syntax you're not confident about, or CVE/exploit details. Do not search for things you already know well.` : ''}
 - Large file rule (applies to ANY file type — CSV, JSON, logs, source code, config, SQL, markdown): if a file is likely over ~500 lines, NEVER read it raw into context. Instead: (1) write a script that processes or queries the file and outputs only what matters (counts, matches, diffs, summaries, samples); (2) run the script; (3) work from the output. For source code: use grep/ast tools in the script rather than catting the whole file. Use task_log to track each step, script path, and output summary.
+- Dry-run before destructive scripts: any script that modifies files, restarts services, applies patches, or writes to a remote system MUST have a --dry-run or preview mode. Run the dry-run first, show the user what would happen, then proceed. Never run a destructive script for the first time without a preview.
+- Surface key findings clearly: when a tool result contains something important (an error, an unexpected value, a mismatch), state it explicitly in your visible response. Do not bury it in a long output block. The user should not have to read raw tool output to find the critical fact.
 - Validation is mandatory: after any script that modifies files or data, you MUST run a verification step before declaring done. The verification must confirm: items processed, items changed, items with errors, and a short sample of changes. Never say "done" without running this check.
 - Script output contract: every processing or transformation script you write must print a structured summary as its last line: {"processed": N, "changed": N, "errors": N, "sample": [...]}. This makes validation easy to parse without reading output files into context.
 - Workspace index: before reading any file over ~500 lines, check if .ollamapilot/index/<relpath>.summary.md exists (shell_read it). If found and dated within 7 days, use the summary instead of the full file. If not found, call workspace_index to generate it first, then read the summary.
@@ -2294,6 +2448,11 @@ export class Agent {
     /** Track repeated failing edit_file attempts on the same (path, old_string) — not reset by read_file */
     private _failedEditSignatures = new Map<string, number>();
     private readonly MAX_SAME_EDIT_FAILURES = 2;
+    /** Track total edit_file failures per file path regardless of old_string variation */
+    private _failedEditByFile = new Map<string, number>();
+    private readonly MAX_FILE_EDIT_FAILURES = 3;
+    /** Track files that have been read this session via shell_read or cat — used to enforce read-before-edit */
+    private _filesReadThisSession = new Set<string>();
     /** Track repeated identical tool calls to prevent infinite loops */
     private lastToolSignature = '';
     private consecutiveRepeats = 0;
@@ -4653,15 +4812,14 @@ Do NOT assume you have no memory — check first.`;
             // After 3 silent runs, inject a nudge to emit a progress update before the next tool call.
             if (toolCalls.length > 0 && !displayContent.trim()) {
                 silentToolRuns++;
-                if (silentToolRuns >= 3) {
-                    silentToolRuns = 0;
-                    const silentNudge = `[SYSTEM] You have made ${silentToolRuns + 3} tool calls without any visible output. The user cannot see what you are doing. Before calling the next tool, write ONE sentence summarising what you have found so far and what you are checking next. Example: "Found audit_hosts.py — checking syntax now." Then call the tool.`;
+                if (silentToolRuns % 3 === 0) {
+                    const silentNudge = `[SYSTEM] ${silentToolRuns} tool calls with no visible output. The user sees nothing. Before your NEXT tool call, write one sentence of visible text: what you found so far and what you are checking next. Example: "Found the file — reading it now." Do not skip this.`;
                     if (isTextMode) {
                         this.history.push({ role: 'user', content: silentNudge });
                     } else {
                         this.history.push({ role: 'tool', content: silentNudge });
                     }
-                    logInfo(`[agent] Silent tool run nudge injected after 3 consecutive silent turns`);
+                    logInfo(`[agent] Silent tool run nudge injected after ${silentToolRuns} consecutive silent turns`);
                 }
             } else {
                 silentToolRuns = 0; // Reset when visible content is emitted
@@ -5745,11 +5903,37 @@ Do NOT assume you have no memory — check first.`;
                                     }
                                 } catch { /* ignore */ }
 
+                                // 3. If bare filename (no dir component), also do a recursive search across all workspace roots
+                                let recursiveHits = '';
+                                if (!attemptedPath.includes('/') && !attemptedPath.includes('\\') && attemptedPath.includes('.')) {
+                                    try {
+                                        const baseName = path.basename(attemptedPath, path.extname(attemptedPath));
+                                        const ext = path.extname(attemptedPath);
+                                        const roots = [this.workspaceRoot, ...((this as any)._extraRoots ?? [])];
+                                        const hits: string[] = [];
+                                        const walkDir = (dir: string, depth: number) => {
+                                            if (depth > 5 || hits.length >= 10) { return; }
+                                            try {
+                                                for (const entry of fs.readdirSync(dir)) {
+                                                    if (entry.startsWith('.') || entry === 'node_modules' || entry === '__pycache__') { continue; }
+                                                    const full2 = path.join(dir, entry);
+                                                    if (fs.statSync(full2).isDirectory()) { walkDir(full2, depth + 1); }
+                                                    else if (entry.endsWith(ext) && entry.toLowerCase().includes(baseName.toLowerCase().slice(0, 6))) { hits.push(full2); }
+                                                }
+                                            } catch { /* ignore */ }
+                                        };
+                                        for (const root of roots) { walkDir(root, 0); }
+                                        if (hits.length > 0) {
+                                            recursiveHits = `\nFiles with similar names found in workspace:\n${hits.map(h => `  ${h}`).join('\n')}`;
+                                        }
+                                    } catch { /* ignore */ }
+                                }
+
                                 const userPathBlock = suggestions.length > 0
                                     ? `\nThe user already provided these paths — prefer these over guessing:\n${suggestions.map(p => `  ${p}`).join('\n')}`
                                     : '';
 
-                                const hint = `[SYSTEM] "${attemptedPath}" does not exist. Do NOT invent a filename.${userPathBlock}${dirListing}\n\nNext steps (in order):\n1. If the user gave a path above, use that exact path.\n2. If the directory listing shows a similar file, use that exact name.\n3. If still uncertain, run: find . -name "*.md" | head -20  to locate the file.\nNever fabricate a path — only use paths you have confirmed exist.`;
+                                const hint = `[SYSTEM] "${attemptedPath}" does not exist. Do NOT invent a filename.${userPathBlock}${dirListing}${recursiveHits}\n\nNext steps (in order):\n1. If similar files are listed above, use that exact full path.\n2. If the user gave a path above, use that exact path.\n3. If still uncertain, run: find . -name "*${path.basename(attemptedPath, path.extname(attemptedPath))}*" to locate it.\nNever fabricate a path — only use paths you have confirmed exist.`;
 
                                 if (isTextMode) {
                                     this.history.push({ role: 'user', content: hint });
@@ -5768,13 +5952,23 @@ Do NOT assume you have no memory — check first.`;
                             const relBroken = path.isAbsolute(brokenPath)
                                 ? path.relative(this.workspaceRoot, brokenPath).replace(/\\/g, '/')
                                 : brokenPath;
-                            const syntaxHint = `[SYSTEM] ${relBroken} has a SyntaxError. Do NOT use edit_file on a broken file — old_string matching will fail.\n\nCorrect procedure:\n1. Read the file: shell_read "cat ${relBroken}"\n2. Write a corrected version: write_file with path="${relBroken}" and the full corrected content\n3. Validate: run_command "python3 -m py_compile ${relBroken}"\n\nDo not attempt edit_file until the file passes py_compile.`;
+                            const syntaxHint = `[SYSTEM] ${relBroken} has a SyntaxError. Fix only the broken lines — do NOT rewrite the whole file.\n\nCorrect procedure:\n1. Note the line number from the error above\n2. shell_read the file around that line (±5 lines) to see the exact broken content\n3. edit_file: replace only the broken line(s) with the corrected version\n4. run_command "python3 -m py_compile ${relBroken}" to confirm fixed\n\nNever rewrite the whole file to fix one bad line. Every line you regenerate is a new chance to introduce a different bug.`;
                             if (isTextMode) {
                                 this.history.push({ role: 'user', content: syntaxHint });
                             } else {
                                 this.history.push({ role: 'tool', content: syntaxHint });
                             }
                             logInfo(`[agent] SyntaxError detected in ${relBroken} — injected write_file guidance`);
+                        }
+
+                        // Unicode error hint for shell_read
+                        if (/UnicodeEncodeError|UnicodeDecodeError|charmap.*codec/i.test(toolResult) && name === 'shell_read') {
+                            const unicodeHint = `[SYSTEM] The file contains non-ASCII characters (emoji or special chars) that Python's default encoding cannot handle on Windows.\n\nFix: use cat instead of python3 open() to read the file:\n  cat "path/to/file"\nOr add errors='replace' to open(): open('path', encoding='utf-8', errors='replace')\nDo NOT retry the same command.`;
+                            if (isTextMode) {
+                                this.history.push({ role: 'user', content: unicodeHint });
+                            } else {
+                                this.history.push({ role: 'tool', content: unicodeHint });
+                            }
                         }
 
                         // Sleep sentinel: if the model already gave completion language and this
@@ -5814,11 +6008,22 @@ Do NOT assume you have no memory — check first.`;
                         const editSig = `${String(args.path ?? '')}::${normalizedOld}`;
                         const editFailCount = (this._failedEditSignatures.get(editSig) ?? 0) + 1;
                         this._failedEditSignatures.set(editSig, editFailCount);
-                        if (editFailCount >= this.MAX_SAME_EDIT_FAILURES) {
+
+                        // Also track per-file regardless of old_string variation — catches agents that
+                        // evade the signature counter by slightly varying old_string each attempt.
+                        const filePath = String(args.path ?? '');
+                        const fileFailCount = (this._failedEditByFile.get(filePath) ?? 0) + 1;
+                        this._failedEditByFile.set(filePath, fileFailCount);
+                        const shouldWarn = editFailCount >= this.MAX_SAME_EDIT_FAILURES || fileFailCount >= this.MAX_FILE_EDIT_FAILURES;
+
+                        if (shouldWarn) {
                             const sweepHint = this._isSweepTask
                                 ? ` This is a sweep task — some blocks you are trying to edit may ALREADY have been updated in a previous turn. Use shell_read with Select-String to find lines that are STILL missing the change (e.g. "Select-String -NotMatch 'logger.error'" or search for the original text), rather than retrying blocks you may have already edited.`
                                 : '';
-                            const editHint = `You have tried to edit "${args.path}" with the same old_string ${editFailCount} times and it keeps failing.\n\nIf the file contains broken syntax (f-strings with embedded quotes, corrupted content, etc.) that makes exact old_string matching impossible: use edit_file with old_string="" and force_overwrite=true to write the ENTIRE corrected file as new_string. This is the correct escape hatch for files that cannot be patched incrementally.\n\nDo not keep guessing old_string variants.${sweepHint}`;
+                            const reason = fileFailCount >= this.MAX_FILE_EDIT_FAILURES
+                                ? `You have made ${fileFailCount} failed edit_file attempts on "${args.path}" with different old_string values — varying old_string is not working.`
+                                : `You have tried to edit "${args.path}" with the same old_string ${editFailCount} times and it keeps failing.`;
+                            const editHint = `${reason}\n\nSTOP using edit_file on this file. The correct escape hatch is write_file — use it to rewrite the ENTIRE file with the correct content. Do not attempt another edit_file on this file.\n\nFor JSON files: rewrite the entire file with write_file.\nFor Python files: rewrite the entire file with write_file (the file will be syntax-checked automatically).\n\nDo not keep guessing old_string variants.${sweepHint}`;
                             logWarn(`[agent] edit_file same-signature failure ${editFailCount}x on "${args.path}" — forcing re-read`);
                             if (isTextMode) {
                                 this.history.push({ role: 'user', content: `Tool ${name} returned:\n${toolResult}\n---\n[SYSTEM: ${editHint}]` });
@@ -6641,10 +6846,15 @@ If the code looks correct, respond with exactly: OK`;
 
             // ── edit_file ──────────────────────────────────────────────────
             case 'edit_file': {
-                const rel            = String(args.path ?? '');
+                let rel              = String(args.path ?? '');
                 const oldString      = String(args.old_string ?? '');
                 const newString      = String(args.new_string ?? '');
                 const forceOverwrite = Boolean(args.force_overwrite);
+
+                // Strip markdown bold markers from path arg
+                if (/\*\*|__/.test(rel)) {
+                    rel = rel.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/__([^_]+)__/g, '$1');
+                }
 
                 if (!rel)       { throw new Error('path is required'); }
 
@@ -6886,8 +7096,11 @@ If the code looks correct, respond with exactly: OK`;
                             `edit_file: old_string not found in ${rel}. ` +
                             `First line matched at line ${nearLineIdx + 1}, but the full block didn't match.\n\n` +
                             `ACTUAL FILE LINES AROUND THAT LOCATION:\n${ctxBlock}\n\n` +
-                            `Set old_string to the EXACT lines from the file above (without the NNNN: prefix). ` +
-                            `Do NOT re-read the file — use the lines shown here.`
+                            `STOP THINKING. The exact file content is shown above. Your only job now is:\n` +
+                            `1. Find the lines you want to replace in the ACTUAL FILE LINES shown above\n` +
+                            `2. Copy those lines exactly — character for character, including all indentation and punctuation\n` +
+                            `3. Call edit_file immediately with those copied lines as old_string\n\n` +
+                            `Do not re-read the file. Do not reconstruct from memory. Do not use placeholders. Copy the exact lines shown, then call the tool.`
                         );
                     }
 
@@ -6915,7 +7128,19 @@ If the code looks correct, respond with exactly: OK`;
                         );
                     }
 
-                    throw new Error(`edit_file: old_string not found in ${rel}. The first line of old_string was not found in the file. Re-read the file and try again.`);
+                    // Extract function signatures to help agent use correct names
+                    let sigHint = '';
+                    try {
+                        const fileLines2 = fs.readFileSync(full, 'utf8').split('\n');
+                        const sigs = fileLines2
+                            .filter(l => /^\s*(def |class |[a-z_]+ *=)/.test(l))
+                            .slice(0, 15)
+                            .map(l => l.trim());
+                        if (sigs.length) {
+                            sigHint = `\n\nDefined names in ${rel}:\n${sigs.map(s => '  ' + s).join('\n')}`;
+                        }
+                    } catch { /* ignore */ }
+                    throw new Error(`edit_file failed — old_string not found in ${rel}.\n\nMost likely cause: you constructed old_string from memory or inference instead of copying it from a shell_read result. Invented old_strings always fail.\n\nRequired fix: shell_read the file now, find the exact lines you want to change in the output, copy them character-for-character as old_string, then retry.${sigHint}`);
                 }
 
                 // Ensure the match is unique to avoid unintended replacements
@@ -6944,6 +7169,25 @@ If the code looks correct, respond with exactly: OK`;
                 if (!accepted) { return 'Edit cancelled by user.'; }
 
                 fs.writeFileSync(full, newContent, 'utf8');
+
+                // py_compile validation for Python files edited via edit_file
+                if (rel.endsWith('.py')) {
+                    const env = detectShellEnvironment();
+                    const pyCmd = env.pythonCmd || 'python3';
+                    const pyFull = full.replace(/\\/g, '/');
+                    try {
+                        const { execSync } = require('child_process') as typeof import('child_process');
+                        execSync(`${pyCmd} -m py_compile "${pyFull}"`, { stdio: 'pipe' });
+                    } catch (pyErr: unknown) {
+                        const errMsg = (pyErr as { stderr?: Buffer }).stderr?.toString().trim() || String(pyErr);
+                        if (original !== undefined) {
+                            fs.writeFileSync(full, original, 'utf8');
+                            logWarn(`[edit_file] py_compile failed for ${rel} — restored backup`);
+                        }
+                        return `EDIT REJECTED — ${rel} has a syntax error after edit. Backup restored.\n\nError:\n${errMsg}\n\nNote the line number above. shell_read the file around that line, then edit_file to fix only the broken line(s).`;
+                    }
+                }
+
                 this._lastFileOp = { path: rel, originalContent: original, action: 'edited' };
                 this._readOnlyTurnsSinceLastEdit = 0;
                 this._editsThisRun++; this._totalEditsThisSession++;
@@ -7179,6 +7423,12 @@ If the code looks correct, respond with exactly: OK`;
                 try {
                     const originalContent = fs.existsSync(full) ? fs.readFileSync(full, 'utf8') : '';
 
+                    // Hard-reject write_file on large existing files — use edit_file instead
+                    // Only block large rewrites for Python source files — data files (JSON, YAML, MD) are safe to rewrite
+                    if (rel.endsWith('.py') && originalContent && originalContent.split('\n').length > 40) {
+                        return `WRITE REJECTED — ${rel} is ${originalContent.split('\n').length} lines. Do NOT rewrite large Python files with write_file — use edit_file to change only the specific lines that need updating.\n\nProcedure:\n1. shell_read the relevant section\n2. edit_file with old_string/new_string for just the changed lines\n3. run_command "python3 -m py_compile ${rel}" to validate`;
+                    }
+
                     const accepted = await this.requestConfirmation('edit', `Write "${rel}" entirely (${content.split('\n').length} lines)`, 'write_file');
                     if (!accepted) { return 'Write cancelled by user.'; }
 
@@ -7194,6 +7444,26 @@ If the code looks correct, respond with exactly: OK`;
 
                     // Auto-validate Python files after write
                     if (rel.endsWith('.py')) {
+                        // Pre-check: reject content containing self-talk comment patterns before even writing
+                        const selfTalkPatterns = [
+                            /^\s*#\s*(wait|actually|let me|i see|i'll fix|oops|note:|todo:|hmm|hold on|i need to|i should|i must|i will fix)/im,
+                            /^\s*#\s*wait,?\s+i('ll| will)/im,
+                            /^\s*#\s*actually,?\s+/im,
+                        ];
+                        const selfTalkMatch = selfTalkPatterns.find(p => p.test(content));
+                        if (selfTalkMatch) {
+                            const matchedLine = content.split('\n').find(l => selfTalkMatch.test(l))?.trim() ?? '';
+                            return `WRITE REJECTED — content contains self-talk comment: "${matchedLine}"\n\nDo NOT retry write_file with the whole file. Instead:\n1. shell_read the current file to see what is actually on disk\n2. Identify only the specific broken lines\n3. edit_file to replace just those lines with the corrected version\n4. run_command "python3 -m py_compile <file>" to confirm`;
+                        }
+
+                        // Pre-check: reject emoji in Python files — causes UnicodeEncodeError on Windows
+                        // and makes edit_file old_string matching fail when the model reads back ASCII approximations
+                        const emojiPattern = /[\u{1F300}-\u{1FFFF}]|[\u{2600}-\u{27BF}]/u;
+                        if (emojiPattern.test(content)) {
+                            const emojiLine = content.split('\n').find(l => emojiPattern.test(l))?.trim() ?? '';
+                            return `WRITE REJECTED — Python files must not contain emoji characters. Found: "${emojiLine}"\n\nEmoji cause UnicodeEncodeError on Windows and break edit_file matching. Use plain ASCII: [OK], [FAIL], [WARN], [DRY-RUN] instead of emoji symbols.`;
+                        }
+
                         const env = detectShellEnvironment();
                         const pyCmd = env.pythonCmd || 'python3';
                         const pyFull = full.replace(/\\/g, '/');
@@ -7206,11 +7476,52 @@ If the code looks correct, respond with exactly: OK`;
                             if (doBackup && originalContent) {
                                 fs.writeFileSync(full, originalContent, 'utf8');
                                 logWarn(`[write_file] py_compile failed for ${rel} — restored backup`);
-                                return `WRITE REJECTED — ${rel} has a syntax error. Backup restored.\n\nError:\n${errMsg}\n\nFix the syntax error and call write_file again with the corrected content. Do NOT use edit_file on a broken file.`;
+                                return `WRITE REJECTED — ${rel} has a syntax error. Backup restored.\n\nError:\n${errMsg}\n\nDo NOT retry write_file with the whole file — you keep introducing new bugs on other lines when you regenerate everything.\n\nInstead:\n1. Note the line number from the error above\n2. shell_read the current file around that line (±5 lines)\n3. edit_file to replace only the broken line(s) with the corrected version\n4. run_command "python3 -m py_compile ${rel}" to confirm fixed`;
                             } else {
-                                return `WARNING — ${rel} was written but has a syntax error:\n${errMsg}\n\nRun write_file again with corrected content immediately.`;
+                                return `WARNING — ${rel} was written but has a syntax error:\n${errMsg}\n\nDo NOT retry write_file. Use edit_file to fix only the broken line shown above.`;
                             }
                         }
+                        // AST undefined-name check — runs only when py_compile passes (file is syntactically valid)
+                        try {
+                            const { execSync: execSync2 } = require('child_process') as typeof import('child_process');
+                            const env2 = detectShellEnvironment();
+                            const pyCmd2 = env2.pythonCmd || 'python3';
+                            const checkScript = `
+import ast, sys
+src = open(sys.argv[1], encoding='utf-8').read()
+tree = ast.parse(src)
+errors = []
+for node in ast.walk(tree):
+    if isinstance(node, ast.FunctionDef):
+        args = {a.arg for a in node.args.args}
+        assigned = set()
+        used = set()
+        for child in ast.walk(node):
+            if isinstance(child, ast.Assign):
+                for t in child.targets:
+                    if isinstance(t, ast.Name): assigned.add(t.id)
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                used.add(child.id)
+        defined = args | assigned | set(dir(__builtins__) if isinstance(dir(__builtins__), list) else dir(__builtins__))
+        for name in used:
+            if name not in defined and not name.startswith('_'):
+                errors.append(f"line {getattr(child, 'lineno', '?')}: '{name}' may be undefined in {node.name}()")
+if errors:
+    print('UNDEFINED_NAMES:' + '|'.join(errors[:5]))
+`.trim();
+                            const scriptPath = pyFull + '.check.py';
+                            fs.writeFileSync(scriptPath, checkScript, 'utf8');
+                            const checkResult = execSync2(`${pyCmd2} "${scriptPath}" "${pyFull}"`, { stdio: 'pipe', encoding: 'utf8' });
+                            fs.unlinkSync(scriptPath);
+                            if (checkResult.includes('UNDEFINED_NAMES:')) {
+                                const issues = checkResult.replace('UNDEFINED_NAMES:', '').trim();
+                                if (doBackup && originalContent) {
+                                    fs.writeFileSync(full, originalContent, 'utf8');
+                                }
+                                return `WRITE REJECTED — ${rel} has likely undefined variable names:\n${issues.replace(/\|/g, '\n')}\n\nThese look like typos (e.g. 'api' instead of 'ip', 'passages' instead of 'packages'). Fix these names and call write_file again.`;
+                            }
+                        } catch { /* ignore AST check errors — py_compile will catch syntax issues */ }
+
                         return `File written and validated: ${rel} (${content.split('\n').length} lines) ✓ py_compile passed`;
                     }
 
@@ -7346,6 +7657,17 @@ If the code looks correct, respond with exactly: OK`;
             case 'shell_read': {
                 let cmd = String(args.command ?? '');
                 if (!cmd) { throw new Error('command is required'); }
+
+                // Strip markdown bold/italic markers that the model may have accidentally
+                // injected into paths (e.g. **source** → source). These come from the model
+                // bolding words in its own reasoning and then copying the path literally.
+                if (/\*\*|__/.test(cmd)) {
+                    const stripped = cmd.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/__([^_]+)__/g, '$1');
+                    if (stripped !== cmd) {
+                        logWarn(`[shell_read] Stripped markdown bold markers from command: "${cmd}" → "${stripped}"`);
+                        cmd = stripped;
+                    }
+                }
 
                 // Auto-fix forward slashes in Windows path arguments (not flags like /S /N /I)
                 if (process.platform === 'win32') {
@@ -7535,6 +7857,15 @@ If the code looks correct, respond with exactly: OK`;
             case 'run_command': {
                 let cmd = String(args.command ?? '');
                 if (!cmd) { throw new Error('command is required'); }
+
+                // Strip markdown bold markers from commands (same issue as shell_read)
+                if (/\*\*|__/.test(cmd)) {
+                    const stripped = cmd.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/__([^_]+)__/g, '$1');
+                    if (stripped !== cmd) {
+                        logWarn(`[run_command] Stripped markdown bold markers from command: "${cmd}" → "${stripped}"`);
+                        cmd = stripped;
+                    }
+                }
 
                 // Auto-fix: wmic is deprecated/removed on Windows 11 ARM — convert to Get-CimInstance.
                 if (process.platform === 'win32' && /\bwmic\b/i.test(cmd)) {
