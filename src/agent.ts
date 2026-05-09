@@ -981,7 +981,7 @@ A response that only reformats output without judgment is not useful. Even "ever
 
 Lookup sequence (mandatory for any feature/change/question):
   1. memory_search("<topic>") — check what you already know
-  2. shell_read locally — search the workspace for the file (Get-ChildItem / find). Local copies exist for most remote scripts/configs.
+  2. shell_read locally — search the workspace for the file (find). Local copies exist for most remote scripts/configs.
   3. SSH to remote — only if the file is genuinely not in the local workspace
   4. edit_file — make the change to the local copy, then scp to remote
 ${autoSaveBlock}
@@ -1286,8 +1286,8 @@ If your investigation reveals a discrepancy between what is configured and what 
 
 **Exception — pure diagnosis tasks:** When the user's request is "what's wrong?", "why is this broken?", "take a look and tell me what's going on", or similar — the deliverable IS the diagnosis. Do not offer to fix it. State the root cause clearly and stop. If the broken thing is test infrastructure (a fixture, a conftest, a monkeypatch), treat it as intentional unless the user explicitly says to fix it. The user asked for an explanation, not a repair.
 
-- Local workspace first: before SSHing to a remote host to read or find a file, ALWAYS check the local workspace first. The user typically keeps a local copy of remote scripts and configs in the project folder (synced via scp/git). Use shell_read with Get-ChildItem or find to search locally before going remote. Only SSH to find/read a file if it's genuinely not present locally. This applies even when the task is focused on a remote machine — local copy is faster and avoids unnecessary SSH round-trips.
-- Local docs first: when asked about hardware, system config, environment, or project-specific setup — ALWAYS search the workspace for documentation files (README.md, docs/, *.md, ai_workstation/, setup*, config*) BEFORE running shell hardware queries. Use shell_read with Get-ChildItem or find to list local docs, then read them. Only fall back to shell system queries if local docs have nothing.
+- Local workspace first: before SSHing to a remote host to read or find a file, ALWAYS check the local workspace first. The user typically keeps a local copy of remote scripts and configs in the project folder (synced via scp/git). Use shell_read with find to search locally before going remote. Only SSH to find/read a file if it's genuinely not present locally. This applies even when the task is focused on a remote machine — local copy is faster and avoids unnecessary SSH round-trips.
+- Local docs first: when asked about hardware, system config, environment, or project-specific setup — ALWAYS search the workspace for documentation files (README.md, docs/, *.md, ai_workstation/, setup*, config*) BEFORE running shell hardware queries. Use shell_read with find to list local docs, then read them. Only fall back to shell system queries if local docs have nothing.
 - Multi-step tasks: after each tool result, if there are more steps to complete, call the NEXT tool immediately — do NOT summarize what you just found and stop. Keep going until the task is done or you hit a genuine blocker.${searchCfg.url ? `
 - web_search: answer from training data first (it's faster). Use web_search only when you hit a genuine gap: specific version numbers you're unsure of, post-cutoff releases, exact CLI flags/config syntax you're not confident about, or CVE/exploit details. Do not search for things you already know well.` : ''}
 - Large file rule (applies to ANY file type — CSV, JSON, logs, source code, config, SQL, markdown): if a file is likely over ~500 lines, NEVER read it raw into context. Instead: (1) write a script that processes or queries the file and outputs only what matters (counts, matches, diffs, summaries, samples); (2) run the script; (3) work from the output. For source code: use grep/ast tools in the script rather than catting the whole file. Use task_log to track each step, script path, and output summary.
@@ -3274,26 +3274,19 @@ export class Agent {
                 const searchId = `t_pre_explain_${Date.now()}`;
                 post({ type: 'toolCall', id: searchId, name: 'shell_read', args: { command: `grep -rn "${query}" .` } });
                 let searchResult = '';
-                const env = detectShellEnvironment();
-                // Use PowerShell only when Windows AND no Git Bash — otherwise always use Unix commands.
-                const isWin = env.os === 'windows' && !env.bashPath;
                 try {
                     // Search each keyword individually (content search) and also by filename
                     const individualResults: string[] = [];
                     for (const kw of uniqueKws) {
                         try {
                             // Content search: grep for keyword in all files
-                            const grepCmd = isWin
-                                ? `Get-ChildItem -Recurse -Filter "*.py" | Select-String -Pattern "${kw}" | Select-Object -First 50 | ForEach-Object { "$($_.Path):$($_.LineNumber): $($_.Line)" }`
-                                : `grep -rn "${kw}" --include="*.py" -l 2>/dev/null | head -30`;
+                            const grepCmd = `grep -rn "${kw}" --include="*.py" . 2>/dev/null | head -30`;
                             const r = await this.executeTool('shell_read', { command: grepCmd }, `${searchId}_${kw}`);
                             individualResults.push(r);
                         } catch { /* skip failed keyword */ }
                         // Also find files whose NAME contains this keyword
                         try {
-                            const findCmd = isWin
-                                ? `Get-ChildItem -Recurse -Filter "*${kw}*.py" | Select-Object -ExpandProperty FullName | Select-Object -First 20`
-                                : `find . -name "*${kw}*.py" -not -path "*/node_modules/*" -not -path "*/__pycache__/*" 2>/dev/null | head -20`;
+                            const findCmd = `find . -name "*${kw}*.py" -not -path "*/node_modules/*" -not -path "*/__pycache__/*" 2>/dev/null | head -20`;
                             const found = await this.executeTool('shell_read', { command: findCmd }, `${searchId}_fn_${kw}`);
                             logInfo(`[pre-explain] find(*${kw}*.py): ${found.split('\n').filter(l => l.trim()).length} results — ${found.slice(0, 200)}`);
                             // Convert to search-result format
@@ -3377,7 +3370,7 @@ export class Agent {
                 const readResults: Array<{ f: string; content: string; hits: number }> = [];
                 for (const { f } of scored.slice(0, 4)) {
                     const readId = `t_pre_read_${Date.now()}`;
-                    const catCmd = isWin ? `Get-Content "${f}"` : `cat "${f}"`;
+                    const catCmd = `cat "${f}"`;
                     post({ type: 'toolCall', id: readId, name: 'shell_read', args: { command: catCmd } });
                     try {
                         const content = await this.executeTool('shell_read', { command: catCmd }, readId);
@@ -3838,14 +3831,12 @@ export class Agent {
                                   `   Do NOT use Add-Content, Get-Content, or any PowerShell cmdlets — they will fail in Git Bash.\n` +
                                   `5. After the merge succeeds, delete the smaller file with run_command "rm <file>".\n` +
                                   `6. Repeat for all files in the cluster until only the largest remains.\n\n`
-                                : `1. Get method lists: run shell_read with "Select-String -Pattern '^\\s*(def |class )' <file>" on EACH file to see all method/class names.\n` +
-                                  `2. Identify unique methods in the smaller files that do NOT appear in the largest file. Assume they are unique unless you see the same name in the largest file's Select-String output.\n` +
-                                  `3. For each unique method: read its full implementation from the source file with "Get-Content <file> | Out-String". Copy the REAL code verbatim — do NOT summarize or abbreviate.\n` +
-                                  `4. Append unique methods to the END of the largest file using run_command with Add-Content.\n` +
-                                  `   IMPORTANT: Use SINGLE-QUOTE here-strings only — @' ... '@ — NEVER use double-quote here-strings (@" ... "@):\n` +
-                                  `   run_command: Add-Content -Path 'C:/full/path/to/file.py' -Value @'\n\ndef my_method(self):\n    pass\n'@\n` +
-                                  `   This is REQUIRED — do NOT use edit_file for appending.\n` +
-                                  `5. After the Add-Content succeeds (exit 0), delete that smaller file with run_command Remove-Item.\n` +
+                                : `1. Get method lists: run shell_read with "grep -n '^\\s*\\(def \\|class \\)' <file>" on EACH file to see all method/class names.\n` +
+                                  `2. Identify unique methods in the smaller files that do NOT appear in the largest file.\n` +
+                                  `3. For each unique method: read its full implementation from the source file with "cat <file>". Copy the REAL code verbatim — do NOT summarize or abbreviate.\n` +
+                                  `4. Append unique methods to the END of the largest file using edit_file with force_overwrite=false, or use write_file to rewrite the merged file.\n` +
+                                  `   Do NOT use Add-Content, Get-Content, or any PowerShell cmdlets — use bash equivalents (cat, grep, echo >>).\n` +
+                                  `5. After the merge succeeds, delete the smaller file with run_command "rm <file>".\n` +
                                   `6. Repeat for all files in the cluster until only the largest remains.\n\n`) +
                             `RULES:\n` +
                             `- If a smaller file has NO unique methods (all duplicates), just delete it.\n` +
@@ -5078,13 +5069,8 @@ Do NOT assume you have no memory — check first.`;
                         const stopWords = new Set(['show','me','how','the','a','an','is','are','does','do','what','where','find','all','please','works','work','working','this','that','it','in','on','of','for','to','and','or','with','by','from','at','into','save','saved','saving','get','set','use','used','make','made','take','taken','run','new','old','add','added','create','created','update','updated','delete','deleted']);
                         const keywords = lastMsg.split(/\W+/).filter(w => w.length > 3 && !stopWords.has(w.toLowerCase()));
                         const bestKeyword = keywords.slice(0, 5).sort((a, b) => b.length - a.length)[0] ?? lastMsg.slice(0, 40);
-                        // Use PowerShell only when Windows AND no Git Bash — otherwise always use Unix grep.
-                        const _autoEnv = detectShellEnvironment();
-                        const isWin = _autoEnv.os === 'windows' && !_autoEnv.bashPath;
                         const wsRoot = this.workspaceRoot ? this.workspaceRoot.replace(/\\/g, '/') : '.';
-                        const grepCmd = isWin
-                            ? `Get-ChildItem -Path '${wsRoot}' -Recurse -Include '*.py','*.ts','*.js' | Select-String -Pattern '${bestKeyword}' | Select-Object Path,LineNumber,Line | Select-Object -First 20`
-                            : `grep -rn --include="*.py" --include="*.ts" --include="*.js" -l "${bestKeyword}" "${wsRoot}" 2>/dev/null | head -10`;
+                        const grepCmd = `grep -rn '${bestKeyword}' --include='*.py' --include='*.ts' --include='*.js' '${wsRoot}' 2>/dev/null | head -20`;
                         const searchId = `t_autosearch_${Date.now()}`;
                         post({ type: 'toolCall', id: searchId, name: 'shell_read', args: { command: grepCmd } });
                         let searchResult = '';
@@ -5459,13 +5445,9 @@ Do NOT assume you have no memory — check first.`;
                     if (this._mergeMode && name === 'edit_file') {
                         const targetPath = String(args.path ?? '');
                         const absPath = path.isAbsolute(targetPath) ? targetPath : path.join(this.workspaceRoot, targetPath);
-                        const envRepeat = detectShellEnvironment();
                         let tailNote = '';
                         try {
-                            // Use PowerShell only when Windows AND no Git Bash — otherwise use awk.
-                            const tailCmd = (envRepeat.os === 'windows' && !envRepeat.bashPath)
-                                ? `$lines = Get-Content "${absPath}"; $total = $lines.Count; $start = [Math]::Max(0,$total-20); $lines[$start..($total-1)] | ForEach-Object -Begin {$n=$start+1} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`
-                                : `awk 'END{s=NR-20; if(s<1)s=1} NR>=s{printf "%04d: %s\\n", NR, $0}' "${absPath}"`;
+                            const tailCmd = `awk 'END{s=NR-20; if(s<1)s=1} NR>=s{printf "%04d: %s\\n", NR, $0}' "${absPath}"`;
                             const tailContent = await this.runShellRead(tailCmd, this.workspaceRoot, `t_tail_repeat_${Date.now()}`);
                             if (tailContent.trim()) {
                                 tailNote = `\n\n[LAST 20 LINES OF FILE]\n${tailContent}\nThe file is too large to match via old_string. Use the LAST NON-BLANK line above as old_string (without the NNNN: prefix), and set new_string to that same line PLUS a blank line PLUS all new methods/functions you want to add.`;
@@ -5567,8 +5549,7 @@ Do NOT assume you have no memory — check first.`;
                         const priorTurns = this.history.filter(h => h.role === 'assistant').length;
                         const listingCap = priorTurns > 1 ? 1 : 3;
                         if (this._exploreShellReadCount >= listingCap) {
-                            const _exploreEnv = detectShellEnvironment();
-                            const _exploreReadCmd = (_exploreEnv.os === 'windows' && !!_exploreEnv.bashPath) ? 'cat' : (_exploreEnv.os === 'windows' ? 'Get-Content' : 'cat');
+                            const _exploreReadCmd = 'cat';
                             const exploreCapMsg = `[SYSTEM: You have listed directories ${this._exploreShellReadCount} time(s). Stop listing files. You already know the codebase structure from prior turns. Read the specific files you need to make this change using ${_exploreReadCmd}, then present your CONFIRM plan or make the edit. Do NOT list more directories.]`;
                             if (isTextMode) {
                                 this.history.push({ role: 'user', content: exploreCapMsg });
@@ -5602,14 +5583,14 @@ Do NOT assume you have no memory — check first.`;
                             const absP = path.isAbsolute(fileMatch[1]) ? fileMatch[1] : path.join(this.workspaceRoot, fileMatch[1]);
                             let tailNote = '';
                             try {
-                                const tailCmd = `$lines = Get-Content "${absP}"; $total = $lines.Count; $start = [Math]::Max(0,$total-40); $lines[$start..($total-1)] | ForEach-Object -Begin {$n=$start+1} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`;
+                                const tailCmd = `awk 'END{s=NR-40; if(s<1)s=1} NR>=s{printf "%04d: %s\\n", NR, $0}' "${absP}"`;
                                 const tailContent = await this.runShellRead(tailCmd, this.workspaceRoot, `t_tail_reread_${Date.now()}`);
                                 if (tailContent.trim()) {
                                     tailNote = `\n\n[LAST 40 LINES OF ${fname}]\n${tailContent}\n`;
                                 }
                             } catch { /* ignore */ }
                             const absTarget = absP.replace(/\\/g, '/');
-                            const forceMsg = `[BLOCKED] You have read "${fname}" ${count} times already. STOP re-reading it.\n\nYou have enough information. You MUST now append any unique methods to the surviving (larger) file using Add-Content, then delete "${fname}".\n\nUse this exact pattern:\n  run_command: Add-Content -Path '<surviving_file_path>' -Value @'\n<paste method code here>\n'@\n\nThen delete with:\n  run_command: Remove-Item -Path '${absTarget}' -Force\n\nIf you believe "${fname}" has no unique methods (all duplicates), skip the Add-Content and just delete it.${tailNote}\nDo NOT call shell_read again. Act NOW.`;
+                            const forceMsg = `[BLOCKED] You have read "${fname}" ${count} times already. STOP re-reading it.\n\nYou have enough information. You MUST now append any unique methods to the surviving (larger) file using edit_file, then delete "${fname}".\n\nUse this exact pattern:\n  edit_file: append the unique method code to the END of the surviving file\n\nThen delete with:\n  run_command: rm '${absTarget}'\n\nIf you believe "${fname}" has no unique methods (all duplicates), skip the append and just delete it.${tailNote}\nDo NOT call shell_read again. Act NOW.`;
                             logWarn(`[merge-guard] Blocked re-read of ${fname} (count=${count})`);
                             if (isTextMode) {
                                 this.history.push({ role: 'user', content: `Tool ${name} returned:\n${forceMsg}` });
@@ -5736,7 +5717,7 @@ Do NOT assume you have no memory — check first.`;
                 if (isWriteBeforeExploreVulnerable) {
                     const isVagueRequest = /\b(shorten|simplify|streamline|improve|integrate|workflow|process|feature|business|could we|can we|would it be|is it possible|reduce|fewer|less clicks?|less steps?)\b/i.test(this._currentTaskMessage);
                     if (isVagueRequest) {
-                        const explorationRedirect = `[EXPLORE FIRST] You are attempting to write a file before reading the actual codebase. For this type of request you MUST explore the real project files first.\n\nDo NOT write files or save plans until you have:\n1. Listed relevant directories: Get-ChildItem app/templates -Recurse -Filter *.html | Select FullName\n2. Read the actual source files that are relevant to this task\n3. Identified the real file paths (not guessed ones)\n\nStart now by exploring the real codebase structure.`;
+                        const explorationRedirect = `[EXPLORE FIRST] You are attempting to write a file before reading the actual codebase. For this type of request you MUST explore the real project files first.\n\nDo NOT write files or save plans until you have:\n1. Listed relevant directories: find app/templates -name "*.html"\n2. Read the actual source files that are relevant to this task\n3. Identified the real file paths (not guessed ones)\n\nStart now by exploring the real codebase structure.`;
                         post({ type: 'toolCall', id: toolId, name, args });
                         post({ type: 'toolResult', id: toolId, name, success: false, preview: explorationRedirect });
                         if (isTextMode) {
@@ -5823,10 +5804,7 @@ Do NOT assume you have no memory — check first.`;
                     if (hasStub) {
                         logWarn(`[merge-guard] Blocked stub edit_file — new_string contains placeholder comments`);
                         this._guardEvents.push({ type: 'merge-guard', reason: 'edit_file new_string contains stub/placeholder code', file: String(args.path ?? '') });
-                        const _stubShellEnv = detectShellEnvironment();
-                        const _stubReadCmd = (_stubShellEnv.os === 'windows' && !!_stubShellEnv.bashPath)
-                            ? `cat '<source_file>'`
-                            : (_stubShellEnv.os === 'windows' ? `Get-Content '<source_file>' | Out-String` : `cat '<source_file>'`);
+                        const _stubReadCmd = `cat '<source_file>'`;
                         const stubMsg = `[BLOCKED] Your new_string contains stub/placeholder code like "# Implementation from X.py\\npass" or "# Additional methods would be inserted here" instead of real code.\n\nYou MUST copy the ACTUAL method bodies verbatim from the source file.\n\nStep 1: Run shell_read with: ${_stubReadCmd}\nStep 2: Find the specific method in the output\nStep 3: Copy the ENTIRE method body — every line, verbatim, with correct indentation\nStep 4: Use that copied code as the new_string in edit_file\n\nDo NOT write placeholder comments or pass statements. Do NOT summarize. Copy real code only.`;
                         if (isTextMode) {
                             this.history.push({ role: 'user', content: `[tool:edit_file] ${stubMsg}` });
@@ -5878,32 +5856,6 @@ Do NOT assume you have no memory — check first.`;
                         }
                     }
 
-                    // Auto-fix: if model used `cat` on Windows (no Git Bash) and got "not recognized" error,
-                    // silently retry with Get-Content so the model gets real file content.
-                    // Skip this when Git Bash is active — cat works fine there.
-                    if (name === 'shell_read'
-                        && /is not recognized|Cannot find path|is not a valid/i.test(toolResult)
-                        && /^\s*cat\s/i.test(String(args.command ?? ''))
-                        && !detectShellEnvironment().bashPath) {
-                        const catCmd = String(args.command ?? '');
-                        // Replace leading `cat ` with `Get-Content `, preserve the path argument
-                        const gcCmd = catCmd.replace(/^\s*cat\s+/i, 'Get-Content ');
-                        logInfo(`[agent] cat failed on Windows — retrying with Get-Content: ${gcCmd}`);
-                        const retryId = `t_gc_${Date.now()}`;
-                        post({ type: 'toolCall', id: retryId, name: 'shell_read', args: { command: gcCmd } });
-                        try {
-                            const gcResult = await this.runShellRead(gcCmd, this.workspaceRoot, retryId);
-                            post({ type: 'toolResult', id: retryId, name: 'shell_read', success: true, preview: gcResult.slice(0, 150) });
-                            if (gcResult && gcResult.length > toolResult.length) {
-                                logInfo(`[agent] Get-Content retry succeeded — ${gcResult.length} chars`);
-                                toolResult = gcResult;
-                                // Update args so downstream interceptors see the corrected command
-                                (args as Record<string, unknown>).command = gcCmd;
-                            }
-                        } catch (e) {
-                            post({ type: 'toolResult', id: retryId, name: 'shell_read', success: false, preview: String(e) });
-                        }
-                    }
                     // Intercept large file reads when user wants an edit: replace with focused grep
                     // For sweep edit tasks: if Get-Content hit the 16K limit, re-read with a higher cap (32K)
                     // Only applies to edit tasks — read-only analysis queries don't need the full file content
@@ -5965,11 +5917,7 @@ Do NOT assume you have no memory — check first.`;
                                 let realFileHint = '';
                                 if (searchPattern) {
                                     try {
-                                        const envStub2 = detectShellEnvironment();
-                                        // Use PowerShell only when Windows AND no Git Bash.
-                                        const realSearchCmd = (envStub2.os === 'windows' && !envStub2.bashPath)
-                                            ? `Get-ChildItem -Path '${wsRootStub}/app/templates' -Recurse -Include '*.html' | Where-Object { $_.FullName -notmatch '__pycache__' } | Select-String -Pattern '${searchPattern}' | Select-Object Path,LineNumber,Line | Select-Object -First 10`
-                                            : `grep -rn '${searchPattern}' '${wsRootStub}/app/templates' --include='*.html' | head -10`;
+                                        const realSearchCmd = `grep -rn '${searchPattern}' '${wsRootStub}/app/templates' --include='*.html' | head -10`;
                                         const realSearchId = `t_stubsearch_${Date.now()}`;
                                         post({ type: 'toolCall', id: realSearchId, name: 'shell_read', args: { command: realSearchCmd } });
                                         const realSearchResult = await this.runShellRead(realSearchCmd, this.workspaceRoot, realSearchId);
@@ -5994,7 +5942,7 @@ Do NOT assume you have no memory — check first.`;
                             && /models[/\\].*\.py['"]/i.test(String(args.command ?? ''));
                         if (formTaskHint) {
                             const wsRootForm = this.workspaceRoot.replace(/\\/g, '/');
-                            toolResult += `\n\n[NEXT STEP] You've confirmed the model schema. Now find the HTML form. Search templates:\nshell_read: Get-ChildItem -Path '${wsRootForm}/app/templates' -Recurse -Include '*.html' | Select-Object FullName\nThen search for where the inline form renders this input, and look for the JS submit handler that sends this data.`;
+                            toolResult += `\n\n[NEXT STEP] You've confirmed the model schema. Now find the HTML form. Search templates:\nshell_read: find '${wsRootForm}/app/templates' -name '*.html'\nThen search for where the inline form renders this input, and look for the JS submit handler that sends this data.`;
                         }
                     }
 
@@ -6012,7 +5960,6 @@ Do NOT assume you have no memory — check first.`;
                         const interceptPathMatch = interceptCmd.match(/['"](.*?)['"]/);
                         const interceptPath = interceptPathMatch?.[1] ?? '';
                         if (interceptPath) {
-                            const envI = detectShellEnvironment();
                             const absInterceptPath = path.isAbsolute(interceptPath)
                                 ? interceptPath
                                 : path.join(this.workspaceRoot, interceptPath.replace(/\//g, path.sep));
@@ -6024,10 +5971,7 @@ Do NOT assume you have no memory — check first.`;
                             const interceptPattern = interceptKw
                                 ? `except|raise|\\.error\\(|\\.critical\\(|${interceptKw}`
                                 : 'except|raise|\\.error\\(|\\.critical\\(';
-                            // Use PowerShell only when Windows AND no Git Bash.
-                            const focusCmd = (envI.os === 'windows' && !envI.bashPath)
-                                ? `Get-Content "${absInterceptPath}" | Select-String -Pattern "${interceptPattern}" -Context 3,3`
-                                : `grep -n -A 3 -B 3 -E "${interceptPattern}" "${absInterceptPath}" | head -200`;
+                            const focusCmd = `grep -n -A 3 -B 3 -E "${interceptPattern}" "${absInterceptPath}" | head -200`;
                             logInfo(`[agent] Intercepting large file read (${toolResult.length} chars) → focused grep: ${focusCmd}`);
                             try {
                                 const focusResult = await this.runShellRead(focusCmd, this.workspaceRoot, toolId + '_focus');
@@ -6263,25 +6207,17 @@ Do NOT assume you have no memory — check first.`;
                     if (name === 'edit_file' && this._mergeMode && /matches \d+ locations/i.test(toolResult)) {
                         const failedPath = String(args.path ?? '');
                         const absFailPath = path.isAbsolute(failedPath) ? failedPath : path.join(this.workspaceRoot, failedPath.replace(/\//g, path.sep));
-                        const envFail = detectShellEnvironment();
                         let tailNote = '';
                         try {
-                            // Use PowerShell only when Windows AND no Git Bash — otherwise use awk.
-                            const tailCmd = (envFail.os === 'windows' && !envFail.bashPath)
-                                ? `$lines = Get-Content "${absFailPath}"; $total = $lines.Count; $start = [Math]::Max(0,$total-20); $lines[$start..($total-1)] | ForEach-Object -Begin {$n=$start+1} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`
-                                : `awk 'END{s=NR-20; if(s<1)s=1} NR>=s{printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`;
+                            const tailCmd = `awk 'END{s=NR-20; if(s<1)s=1} NR>=s{printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`;
                             const tailContent = await this.runShellRead(tailCmd, this.workspaceRoot, `t_tail_ambig_${Date.now()}`);
                             if (tailContent.trim()) {
                                 tailNote = `\n\n[LAST 20 LINES OF FILE]\n${tailContent}\nThe NNNN: prefix is NOT part of the file. Use the last non-blank line as old_string and append your new methods after it.`;
                             }
                         } catch { /* ignore */ }
                         const absFailPathFwd = absFailPath.replace(/\\/g, '/');
-                        const _ambigEnv = detectShellEnvironment();
-                        const _ambigBash = _ambigEnv.os === 'windows' && !!_ambigEnv.bashPath;
                         const ambigMsg = `[BLOCKED] Your old_string matches multiple locations — edit_file cannot be used here.\n\nTo append to the END of the file:\n` +
-                            (_ambigBash
-                                ? `Use write_file to rewrite the merged file, or use edit_file_at_line with the exact line number from the tail shown below. Do NOT use Add-Content, Get-Content, or any PowerShell cmdlet — the shell is Git Bash.`
-                                : `Use run_command with Add-Content instead:\n\n  run_command: Add-Content -Path '${absFailPathFwd}' -Value @'\n<your new function code here>\n'@\n\nDo NOT use edit_file again for this append. Use Add-Content with a here-string to write the new function to the end of the file.`) +
+                            `Use write_file to rewrite the merged file, or use edit_file_at_line with the exact line number from the tail shown below. Do NOT use Add-Content, Get-Content, or any PowerShell cmdlet — the shell is Git Bash.` +
                             tailNote;
                         if (isTextMode) {
                             this.history.push({ role: 'user', content: `Tool ${name} returned:\n${toolResult}\n---\n[SYSTEM: ${ambigMsg}]` });
@@ -6297,7 +6233,6 @@ Do NOT assume you have no memory — check first.`;
                         && !String(args.path ?? '').endsWith('.ollamapilot-plan.md')) {
                         const failedPath = String(args.path ?? '');
                         if (failedPath) {
-                            const envFail = detectShellEnvironment();
                             // Resolve to absolute path for the read command
                             const absFailPath = path.isAbsolute(failedPath)
                                 ? failedPath
@@ -6311,19 +6246,11 @@ Do NOT assume you have no memory — check first.`;
                                 const startLine = Math.max(1, lineNum - 3);
                                 const endLine = startLine + 19;
                                 // Include line numbers so model sees exact indentation (leading spaces visible)
-                                // Use awk when Git Bash is available — PowerShell syntax fails in bash
-                                const useBashForLine = envFail.os !== 'windows' || !!envFail.bashPath;
-                                grepFailCmd = useBashForLine
-                                    ? `awk 'NR>=${startLine} && NR<=${endLine} {printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`
-                                    : `$lines = Get-Content "${absFailPath}"; $lines[${startLine - 1}..${endLine - 1}] | ForEach-Object -Begin {$n=${startLine}} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`;
+                                grepFailCmd = `awk 'NR>=${startLine} && NR<=${endLine} {printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`;
                                 logInfo(`[agent] edit_file failed at line ${lineNum} — reading lines ${startLine}-${endLine}`);
                             } else {
                                 // No line number in error — read the full file so the model gets exact content.
-                                // Use cat when Git Bash is available (Get-Content is PowerShell-only and fails in bash).
-                                const useCat = envFail.os !== 'windows' || !!envFail.bashPath;
-                                grepFailCmd = useCat
-                                    ? `cat "${absFailPath}"`
-                                    : `Get-Content "${absFailPath}"`;
+                                grepFailCmd = `cat "${absFailPath}"`;
                                 logInfo(`[agent] edit_file old_string failed (no line hint) — injecting full file for exact byte matching`);
                             }
                             const failGrepId = `t_failgrep_${Date.now()}`;
@@ -6351,10 +6278,7 @@ Do NOT assume you have no memory — check first.`;
                                 let tailNote = '';
                                 if (this._mergeMode) {
                                     try {
-                                        const useBashForTail = envFail.os !== 'windows' || !!envFail.bashPath;
-                                        const tailCmd = useBashForTail
-                                            ? `awk 'END{s=NR-20; if(s<1)s=1} NR>=s{printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`
-                                            : `$lines = Get-Content "${absFailPath}"; $total = $lines.Count; $start = [Math]::Max(0,$total-20); $lines[$start..($total-1)] | ForEach-Object -Begin {$n=$start+1} -Process { "{0:D4}: {1}" -f $n,$_; $n++ }`;
+                                        const tailCmd = `awk 'END{s=NR-20; if(s<1)s=1} NR>=s{printf "%04d: %s\\n", NR, $0}' "${absFailPath}"`;
                                         const tailContent = await this.runShellRead(tailCmd, this.workspaceRoot, `t_tail_${Date.now()}`);
                                         if (tailContent.trim()) {
                                             tailNote = `\n\n[LAST 20 LINES OF FILE for appending]\n${tailContent}\nTo append new methods, use old_string=the last non-blank line above (NNNN: prefix excluded), new_string=that same line + newlines + new methods.`;
@@ -6546,16 +6470,14 @@ Do NOT assume you have no memory — check first.`;
                                 nudge = `You already have the file content above. Use edit_file with EXACT strings from the [AUTO-READ] section. Do NOT search again.`;
                                 // skip the grep/read block below by jumping to the else
                             } else {
-                            const env2 = detectShellEnvironment();
-                            // Keep backslashes as-is for Windows paths; convert forward slashes for Unix
-                            let pathForCmd = env2.os === 'windows' ? relevantPath.replace(/\//g, '\\') : relevantPath;
+                            const pathForCmd = relevantPath.replace(/\\/g, '/');
                             // If path has no directory separators it's a bare filename — not usable for auto-read.
                             // Skip rather than generating a command that will fail with "path not found".
-                            if (!pathForCmd.includes('/') && !pathForCmd.includes('\\')) {
+                            if (!pathForCmd.includes('/')) {
                                 logInfo(`[agent] Auto-read skipped — bare filename with no directory: ${pathForCmd}`);
                                 nudge = `The file listing showed only filenames without full paths. Use shell_read with the full path including directory (e.g. 'cat "${this.workspaceRoot.replace(/\\/g, '/')}/${pathForCmd}"') to read the file.`;
                             } else {
-                            // Build a focused grep/Select-String command to extract only relevant sections
+                            // Build a focused grep command to extract only relevant sections
                             // (exception/error handling + user-task keywords) with surrounding context lines.
                             // This prevents the full file (potentially thousands of lines) from flooding context.
                             // Only use specific, low-frequency task keywords (skip noisy terms like 'log', 'ocr', 'process').
@@ -6568,14 +6490,8 @@ Do NOT assume you have no memory — check first.`;
                             const grepPattern = autoKeywords
                                 ? `except|raise|\\.error\\(|\\.critical\\(|${autoKeywords}`
                                 : 'except|raise|\\.error\\(|\\.critical\\(';
-                            // Use PowerShell only when Windows AND no Git Bash.
-                            const _usePs = env2.os === 'windows' && !env2.bashPath;
-                            const grepCmd = _usePs
-                                ? `Get-Content "${pathForCmd}" | Select-String -Pattern "${grepPattern}" -Context 3,3`
-                                : `grep -n -A 3 -B 3 -E "${grepPattern}" "${pathForCmd}" | head -200`;
-                            const catCmd = _usePs
-                                ? `Get-Content "${pathForCmd}"`
-                                : `cat "${pathForCmd}"`;
+                            const grepCmd = `grep -n -A 3 -B 3 -E "${grepPattern}" "${pathForCmd}" | head -200`;
+                            const catCmd = `cat "${pathForCmd}"`;
                             const autoReadId = `t_autoread_${Date.now()}`;
                             let fileContent = '';
                             let usedFullRead = false;
@@ -6655,12 +6571,8 @@ Do NOT assume you have no memory — check first.`;
                             const fileNameMatch = cmdStr.match(/['\"]([^'"]*?([^'/\\]+\.\w+))['"]/i);
                             const fileName = fileNameMatch?.[2] ?? '';
                             const wsRoot2 = this.workspaceRoot.replace(/\\/g, '/');
-                            const env2 = detectShellEnvironment();
-                            // Use PowerShell only when Windows AND no Git Bash.
                             const searchCmd = fileName
-                                ? ((env2.os === 'windows' && !env2.bashPath)
-                                    ? `Get-ChildItem -Path '${wsRoot2}' -Recurse -Filter '${fileName}' | Where-Object { $_.FullName -notmatch '__pycache__|htmlcov' } | Select-Object FullName`
-                                    : `find '${wsRoot2}' -name '${fileName}' -not -path '*__pycache__*' -not -path '*htmlcov*'`)
+                                ? `find '${wsRoot2}' -name '${fileName}' -not -path '*__pycache__*' -not -path '*htmlcov*'`
                                 : '';
                             if (searchCmd) {
                                 const autoSearchId = `t_autosearch_${Date.now()}`;
@@ -6676,8 +6588,7 @@ Do NOT assume you have no memory — check first.`;
                                 const pathLines = searchResult.split('\n').map(l => l.trim()).filter(l => /\.\w+$/.test(l) && isAbsPath(l));
                                 const bestPath = pathLines.find(l => /service/i.test(l)) ?? pathLines[0];
                                 if (bestPath) {
-                                    // Use PowerShell only when Windows AND no Git Bash.
-                                    const readCmd = (env2.os === 'windows' && !env2.bashPath) ? `Get-Content "${bestPath.replace(/\//g, '\\')}"` : `cat "${bestPath}"`;
+                                    const readCmd = `cat "${bestPath}"`;
                                     const autoReadId2 = `t_autoread2_${Date.now()}`;
                                     post({ type: 'toolCall', id: autoReadId2, name: 'shell_read', args: { command: readCmd } });
                                     let fileContent2 = '';
@@ -6709,15 +6620,12 @@ Do NOT assume you have no memory — check first.`;
                                         nudge = `[NEW FILE] "${relFromCmd}" does not exist yet — you need to CREATE it.\n\nUse edit_file with:\n- path="${relFromCmd}"\n- old_string="" (empty string — this creates a new file)\n- new_string=<complete file content>\n\nWrite a complete Python module with the proper Flask Blueprint setup and the requested route. Use a sibling file from the same directory as a template for imports and structure.`;
                                     } else {
                                         const wsRoot3 = this.workspaceRoot.replace(/\\/g, '/');
-                                        const env3b = detectShellEnvironment();
-                                        const broadSearchCmd = env3b.os === 'windows'
-                                            ? `Get-ChildItem -Path '${wsRoot3}' -Recurse -Include '*.html','*.py','*.ts','*.js' | Where-Object { $_.FullName -notmatch '__pycache__|htmlcov' } | Select-Object FullName | Select-Object -First 30`
-                                            : `find '${wsRoot3}' -type f \\( -name '*.html' -o -name '*.py' \\) -not -path '*__pycache__*' | head -30`;
-                                        nudge = `[FILE NOT FOUND] "${fileName}" does not exist at that path and was not found anywhere in the project.\n\nDo NOT create this file. The feature you are looking for is likely implemented inline in an existing file.\n\nSearch for it by content — run this to list all templates and routes:\n${broadSearchCmd}\n\nThen look for the form/section that handles this feature inside those existing files using Select-String.`;
+                                        const broadSearchCmd = `find '${wsRoot3}' -type f \\( -name '*.html' -o -name '*.py' \\) -not -path '*__pycache__*' | head -30`;
+                                        nudge = `[FILE NOT FOUND] "${fileName}" does not exist at that path and was not found anywhere in the project.\n\nDo NOT create this file. The feature you are looking for is likely implemented inline in an existing file.\n\nSearch for it by content — run this to list all templates and routes:\n${broadSearchCmd}\n\nThen look for the form/section that handles this feature inside those existing files using grep.`;
                                     }
                                 }
                             } else {
-                                nudge = `The file you tried to read returned almost no content (${toolResult.length} chars) — it may be at the wrong path. Use shell_read with Get-ChildItem -Recurse -Filter to find the correct absolute path first.`;
+                                nudge = `The file you tried to read returned almost no content (${toolResult.length} chars) — it may be at the wrong path. Use shell_read with find to search for the correct absolute path first.`;
                             }
                         } else if (wantsEdit && !isReviewTask && !isPlanTask && /Get-Content|cat\s/i.test(String(args.command ?? '')) && toolResult.length > 2000 && !isSweepMessage) {
                             // Model read a large file — extract focused section to help it find the right old_string.
@@ -6725,7 +6633,6 @@ Do NOT assume you have no memory — check first.`;
                             const cmdStr2 = String(args.command ?? '');
                             const pathMatch2 = cmdStr2.match(/['"](.*?)['"]/);
                             const largePath = pathMatch2?.[1] ?? '';
-                            const env3 = detectShellEnvironment();
                             if (largePath) {
                                 const autoKeywords2 = lastUserMsg
                                     .toLowerCase()
@@ -6735,10 +6642,7 @@ Do NOT assume you have no memory — check first.`;
                                 const grepPattern2 = autoKeywords2
                                     ? `except|raise|\\.error\\(|\\.critical\\(|${autoKeywords2}`
                                     : 'except|raise|\\.error\\(|\\.critical\\(';
-                                // Use PowerShell only when Windows AND no Git Bash.
-                                const focusedCmd = (env3.os === 'windows' && !env3.bashPath)
-                                    ? `Get-Content "${largePath}" | Select-String -Pattern "${grepPattern2}" -Context 3,3`
-                                    : `grep -n -A 3 -B 3 -E "${grepPattern2}" "${largePath}" | head -200`;
+                                const focusedCmd = `grep -n -A 3 -B 3 -E "${grepPattern2}" "${largePath}" | head -200`;
                                 logInfo(`[agent] Large file read, running focused grep: ${focusedCmd}`);
                                 const focusId = `t_focus_${Date.now()}`;
                                 post({ type: 'toolCall', id: focusId, name: 'shell_read', args: { command: focusedCmd } });
@@ -6767,23 +6671,15 @@ Do NOT assume you have no memory — check first.`;
                             const patternMatch = emptyCmd.match(/-Pattern\s+['"]([^'"]+)['"]/i) ?? emptyCmd.match(/grep\s+['""]?([^\s'"]+)/i);
                             const pattern = patternMatch?.[1] ?? '';
                             const wsRoot = this.workspaceRoot.replace(/\\/g, '/');
-                            const _broadEnv = detectShellEnvironment();
-                            // Use PowerShell only when Windows AND no Git Bash.
-                            const broadenHint = (_broadEnv.os === 'windows' && !_broadEnv.bashPath)
-                                ? `Get-ChildItem -Path '${wsRoot}' -Recurse -Filter '*.html' | Select-String -Pattern '${pattern || 'customer'}' | Select-Object Path,LineNumber,Line | Select-Object -First 20`
-                                : `grep -rn "${pattern || 'customer'}" "${wsRoot}" --include="*.html" | head -20`;
+                            const broadenHint = `grep -rn "${pattern || 'customer'}" "${wsRoot}" --include="*.html" | head -20`;
                             nudge = `[SEARCH RETURNED NO RESULTS] The pattern was not found with that command. Do NOT guess or invent file paths — the search found nothing.\n\nTry a broader search:\nshell_read with: ${broadenHint}\n\nIf that also returns nothing, tell the user the feature was not found rather than fabricating an answer.`;
                         } else if (isEmptyFileSearch) {
-                            const env2 = detectShellEnvironment();
                             const wsRoot = this.workspaceRoot;
                             // Extract filename from the failed command to build a recursive search hint
                             const failedCmd = String(args.command ?? '');
                             const failedFilenameMatch = failedCmd.match(/['"\/\\]([^'"\/\\]+\.[a-z]{2,4})['"]/i);
                             const failedFilename = failedFilenameMatch?.[1] ?? '';
-                            // Use PowerShell only when Windows AND no Git Bash.
-                            const recursiveHint = (env2.os === 'windows' && !env2.bashPath)
-                                ? `Get-ChildItem -Path "${wsRoot}" -Recurse -Filter "${failedFilename || '*.py'}" | Select-Object FullName`
-                                : `find "${wsRoot}" -name "${failedFilename || '*.py'}" 2>/dev/null`;
+                            const recursiveHint = `find "${wsRoot}" -name "${failedFilename || '*.py'}" 2>/dev/null`;
                             nudge = `The path you tried does not exist. The file is not at that location. Search RECURSIVELY to find the correct path:\nshell_read with: ${recursiveHint}\nWorkspace root: "${wsRoot}"`;
 
                         } else if (/\b(find|where|all|every|places?|used?|locate|show)\b/i.test(this.lastUserMessage ?? '')) {
@@ -7080,16 +6976,13 @@ If the code looks correct, respond with exactly: OK`;
             case 'rename_file':
             case 'delete_file': {
                 // These tools have been removed. Use shell_read/run_command instead.
-                const env2 = detectShellEnvironment();
-                // Use PowerShell only when Windows AND no Git Bash.
-                const isWin2 = env2.os === 'windows' && !env2.bashPath;
                 return `The tool "${name}" is no longer available. Use shell commands instead:\n` +
-                    `- Read a file: shell_read with ${isWin2 ? 'Get-Content path/to/file' : 'cat path/to/file'}\n` +
-                    `- Find files: shell_read with ${isWin2 ? 'Get-ChildItem -Recurse -Filter "*name*"' : 'find . -name "*name*"'}\n` +
-                    `- Search content: shell_read with ${isWin2 ? 'Get-ChildItem -Recurse -Filter "*.py" | Select-String -Pattern "keyword"' : 'grep -rn "keyword" --include="*.py" .'}\n` +
-                    `- Create/overwrite file: run_command with ${isWin2 ? 'Set-Content' : 'cat > file << EOF'}\n` +
-                    `- Move/rename: run_command with ${isWin2 ? 'Move-Item old new' : 'mv old new'}\n` +
-                    `- Delete: run_command with ${isWin2 ? 'Remove-Item path' : 'rm path'}`;
+                    `- Read a file: shell_read with cat path/to/file\n` +
+                    `- Find files: shell_read with find . -name "*name*"\n` +
+                    `- Search content: shell_read with grep -rn "keyword" --include="*.py" .\n` +
+                    `- Create/overwrite file: run_command with cat > file << EOF\n` +
+                    `- Move/rename: run_command with mv old new\n` +
+                    `- Delete: run_command with rm path`;
             }
 
             // ── edit_file ──────────────────────────────────────────────────
@@ -7165,11 +7058,7 @@ If the code looks correct, respond with exactly: OK`;
                         throw new Error(`edit_file: "${rel}" does not exist yet. To CREATE a new file, call edit_file with old_string="" (empty string) and new_string=<complete file content>. Do not use New-Item or Set-Content.`);
                     }
                     const wsRoot4 = this.workspaceRoot.replace(/\\/g, '/');
-                    const env4 = detectShellEnvironment();
-                    // Use PowerShell only when Windows AND no Git Bash.
-                    const searchCmd4 = (env4.os === 'windows' && !env4.bashPath)
-                        ? `Get-ChildItem -Path '${wsRoot4}' -Recurse -Filter '${fileName4}' | Where-Object { $_.FullName -notmatch '__pycache__|htmlcov' } | Select-Object FullName`
-                        : `find '${wsRoot4}' -name '${fileName4}' -not -path '*__pycache__*'`;
+                    const searchCmd4 = `find '${wsRoot4}' -name '${fileName4}' -not -path '*__pycache__*'`;
                     throw new Error(`edit_file: "${rel}" does not exist on disk. Do NOT create it — the file you want to edit is at a different path.\n\nSearch for it: shell_read with command="${searchCmd4}"\n\nThen re-read the correct file and retry edit_file with the actual path.`);
                 }
 
@@ -7182,13 +7071,9 @@ If the code looks correct, respond with exactly: OK`;
                     if (stubLineCount < 15 && !hasRealHtmlMarkers) {
                         const wsRootStub2 = this.workspaceRoot.replace(/\\/g, '/');
                         const fileName6 = path.basename(rel);
-                        const envStub3 = detectShellEnvironment();
                         // Extract a keyword from the stub to find the real file
                         const stubKw = stubCheck.match(/\{\{\s*form\.(\w+)|id=["'](\w+)["']|name=["'](\w+)["']/)?.[1] ?? fileName6.replace(/\.\w+$/, '');
-                        // Use PowerShell only when Windows AND no Git Bash.
-                        const realSearchCmd2 = (envStub3.os === 'windows' && !envStub3.bashPath)
-                            ? `Get-ChildItem -Path '${wsRootStub2}/app/templates' -Recurse -Include '*.html' | Where-Object { $_.FullName -notmatch '__pycache__' } | Select-String -Pattern '${stubKw}' | Select-Object Path,LineNumber,Line | Select-Object -First 10`
-                            : `grep -rn '${stubKw}' '${wsRootStub2}/app/templates' --include='*.html' | head -10`;
+                        const realSearchCmd2 = `grep -rn '${stubKw}' '${wsRootStub2}/app/templates' --include='*.html' | head -10`;
                         throw new Error(`edit_file: BLOCKED — "${rel}" is a stub file (${stubLineCount} lines, no HTML structure). It is a placeholder, not the real template.\n\nDo NOT edit this stub. Find the real template:\nshell_read with command="${realSearchCmd2}"\n\nThen edit the real file instead.`);
                     }
                 }
@@ -8273,7 +8158,7 @@ if errors:
                                           .replace(/\s*\|\s*head\s+(-n\s+)?\d+/i, '');
                         return shellResult + '\n\n---\n' +
                             '[WARNING: TRUNCATED DOC READ] You only read part of this documentation file. ' +
-                            `You MUST read the full file before cross-checking claims. Run: shell_read Get-Content '${fullCmd.match(/'([^']+\.md[^']*)'|"([^"]+\.md[^"]*)"/i)?.[1] ?? 'the file'}'`;
+                            `You MUST read the full file before cross-checking claims. Run: shell_read cat '${fullCmd.match(/'([^']+\.md[^']*)'|"([^"]+\.md[^"]*)"/i)?.[1] ?? 'the file'}'`;
                     }
 
                     const hints = extractDocVerificationHints(shellResult);
@@ -10220,7 +10105,6 @@ ${sampleHtml}
     ): { lines: string[]; maxHop: number } {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const { execSync } = require('child_process') as typeof import('child_process');
-        const isWin = process.platform === 'win32';
         const rootNorm = root.replace(/\\/g, '/');
         const excludeNorm = excludeRelPath.replace(/\\/g, '/');
 
@@ -10239,9 +10123,7 @@ ${sampleHtml}
                     const searchDir = fs.existsSync(path.join(root, 'app'))
                         ? path.join(root, 'app')
                         : root;
-                    const grepCmd = isWin
-                        ? `findstr /s /n "${fn}" "${searchDir}\\*.py" 2>nul`
-                        : `grep -rn --include="*.py" "\\b${fn}\\b" "${searchDir}" 2>/dev/null`;
+                    const grepCmd = `grep -rn --include="*.py" "\\b${fn}\\b" "${searchDir}" 2>/dev/null`;
                     const raw = execSync(grepCmd, { timeout: 3000, encoding: 'utf8' }).toString();
 
                     const callerLines = raw.split('\n')
