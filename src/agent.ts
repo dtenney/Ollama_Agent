@@ -4983,17 +4983,27 @@ Do NOT assume you have no memory — check first.`;
                 // Signature: no tool calls, thinking content > 1500 chars, visible content
                 // is mostly "Wait/Actually" oscillation (repeated short phrases).
                 const thinkingLen = (result.thinking ?? '').length;
+                const LOOP_RE = /(?:actually|wait)[,.]?\s+i.ll\s+(use|just|try)\b/gi;
+                // Detect oscillation in either <think> block OR visible content (gemma4 loops in content)
+                const thinkingLoopText = result.thinking ?? '';
+                const contentLoopText = result.content ?? '';
                 const isThinkingLoop = !toolCalls.length
-                    && thinkingLen > 1500
                     && this.autoRetryCount < this.MAX_AUTO_RETRIES
-                    && (/(?:wait|actually)[,.]?\s+i.ll\s+just/gi.exec(result.thinking ?? '') !== null
-                        || (result.thinking ?? '').split(/wait,?\s+i.ll/gi).length > 3);
+                    && (
+                        // Classic think-block loop: long thinking with oscillation
+                        (thinkingLen > 1500 && (LOOP_RE.test(thinkingLoopText) || thinkingLoopText.split(/wait,?\s+i.ll/gi).length > 3))
+                        ||
+                        // Visible-content loop: model emits repeated "Actually, I'll use..." in response text
+                        (contentLoopText.split(/(?:actually|wait)[,.]?\s+i.ll\s+(?:use|just|try)\b/gi).length > 4)
+                    );
                 if (isThinkingLoop) {
                     this.autoRetryCount++;
-                    logWarn(`[agent] Thinking loop detected (thinking=${thinkingLen} chars, turn ${turn}) — injecting circuit-breaker`);
+                    const loopSource = thinkingLen > 1500 ? 'thinking' : 'content';
+                    const loopLen = loopSource === 'thinking' ? thinkingLen : contentLoopText.length;
+                    logWarn(`[agent] ${loopSource} loop detected (${loopSource}=${loopLen} chars, turn ${turn}) — injecting circuit-breaker`);
                     this.history.pop();
-                    const lastThought = (result.thinking ?? '').trim().slice(-400);
-                    const loopBreaker = `[SYSTEM: You are stuck in a thinking loop — your last ${thinkingLen} characters of reasoning oscillated without acting. Stop reasoning. Your last thought was: "${lastThought}". Pick ONE action from that thought and execute it NOW with a single tool call. Do not think further — just call the tool.]`;
+                    const lastThought = (loopSource === 'thinking' ? thinkingLoopText : contentLoopText).trim().slice(-400);
+                    const loopBreaker = `[SYSTEM: You are stuck in a reasoning loop — your last ${loopLen} characters oscillated without acting. Stop reasoning. Your last thought was: "${lastThought}". Pick ONE action and execute it NOW with a single tool call. Do not think further — just call the tool.]`;
                     this.history.push({ role: 'user', content: loopBreaker });
                     post({ type: 'removeLastAssistant' });
                     continue;
@@ -7870,6 +7880,8 @@ if errors:
                 {
                     const winBashForPS = process.platform === 'win32' ? detectShellEnvironment().bashPath : '';
                     const isSshCmd = /^\s*(ssh|scp|sftp)\b/i.test(cmd);
+                    // On Windows with Git Bash, PowerShell cmdlets always fail with "command not found".
+                    // Block on ANY platform when bash is active (bashPath set) — never attempt to run PS cmdlets.
                     if (winBashForPS && !isSshCmd && /\b(Get-ChildItem|Get-Content|Set-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Write-Host|Out-File|Add-Content)\b/i.test(cmd)) {
                         logWarn(`[shell_read] Blocked PowerShell cmdlet in bash context: ${cmd.slice(0, 80)}`);
                         // Try to auto-convert common patterns:
@@ -7890,15 +7902,18 @@ if errors:
                                 converted = `find '${searchPath}'${findName} -not -path '*/__pycache__/*' 2>/dev/null | head -40`;
                             }
                         } else {
-                            // Get-Content → cat (handles both single and double quotes)
-                            const gcMatch = cmd.match(/Get-Content\s+['"]([^'"]+)['"]/i);
-                            if (gcMatch) {
-                                converted = `cat '${gcMatch[1].replace(/\\/g, '/')}'`;
-                            }
-                            // Get-Content X | Select-String -Pattern Y → grep Y X
-                            const gcSsMatch = cmd.match(/Get-Content\s+['"]([^'"]+)['"]\s*\|\s*Select-String\s+(?:-Pattern\s+)?['"]([^'"]+)['"]/i);
+                            // Get-Content X | Select-String -Pattern Y → grep -n Y X (check pipe first)
+                            const gcSsMatch = cmd.match(/Get-Content\s+["']?([^"'|\s][^|]*)["']?\s*\|\s*Select-String\s+(?:-Pattern\s+)?["']([^"']+)["']/i);
                             if (gcSsMatch) {
-                                converted = `grep -n '${gcSsMatch[2]}' '${gcSsMatch[1].replace(/\\/g, '/')}' 2>/dev/null`;
+                                const filePath = gcSsMatch[1].trim().replace(/^["']|["']$/g, '').replace(/\\/g, '/');
+                                converted = `grep -n '${gcSsMatch[2]}' '${filePath}' 2>/dev/null`;
+                            } else {
+                                // Get-Content → cat (handles both single and double quotes, paths with spaces/colons)
+                                const gcMatch = cmd.match(/Get-Content\s+["']?([^"'\r\n|]+?)["']?\s*(?:\||$)/i);
+                                if (gcMatch) {
+                                    const filePath = gcMatch[1].trim().replace(/\\/g, '/');
+                                    converted = `cat '${filePath}'`;
+                                }
                             }
                         }
 
