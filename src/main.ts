@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { OllamaAgentProvider, runDiagnostics } from './provider';
 import { fetchModels, streamChatRequest, keepAliveModel } from './ollamaClient';
 import { getConfig } from './config';
-import { channel, logInfo, logError, toErrorMessage, initFileLogger, exportLog } from './logger';
+import { channel, logInfo, logWarn, logError, toErrorMessage, initFileLogger, exportLog } from './logger';
 import { startMCPServer, stopAllMCPServers } from './mcpClient';
 import { loadMCPConfig, createExampleMCPConfig } from './mcpConfig';
 import { TieredMemoryManager } from './memoryCore';
@@ -21,6 +21,7 @@ import { scanProjectDocs } from './docScanner';
 import { ingestMarkdownFiles } from './markdownIngest';
 import { CodeIndexer } from './codeIndex';
 import { ensureEnvironmentContext } from './environmentProbe';
+import { detectShellEnvironment } from './agent';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -29,6 +30,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     logInfo(`extensionUri: ${context.extensionUri.fsPath}`);
     channel.show(true);
     context.subscriptions.push(channel);
+
+    // ── Check Git Bash requirement on Windows ─────────────────────────────────
+    if (process.platform === 'win32') {
+        const shellEnv = detectShellEnvironment();
+        if (!shellEnv.bashPath) {
+            vscode.window.showErrorMessage(
+                'OllamaPilot requires Git Bash on Windows. Install Git for Windows, then reload VS Code.',
+                'Get Git for Windows'
+            ).then(choice => {
+                if (choice === 'Get Git for Windows') {
+                    vscode.env.openExternal(vscode.Uri.parse('https://git-scm.com/download/win'));
+                }
+            });
+            logWarn('[activation] Git Bash not found — agent shell commands will fail');
+        } else {
+            logInfo(`[activation] Git Bash: ${shellEnv.bashPath}`);
+        }
+    }
 
     // ── Start MCP servers ────────────────────────────────────────────────────
     const mcpConfigs = loadMCPConfig();
