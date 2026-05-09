@@ -315,7 +315,8 @@ export function streamChatRequest(
                                     resolved = true;
                                     req.destroy();
                                     const avgLogprob = logprobCount > 0 ? logprobSum / logprobCount : null;
-                                    resolve({ content: fullContent.slice(0, -REPETITION_WINDOW) + '\n\n[Generation stopped — repetition loop detected]', toolCalls, avgLogprob, thinking: fullThinking });
+                                    const trimAt = Math.max(0, fullContent.length - REPETITION_WINDOW);
+                                    resolve({ content: fullContent.slice(0, trimAt) + '\n\n[Generation stopped — repetition loop detected]', toolCalls, avgLogprob, thinking: fullThinking });
                                 }
                             }
                             if (p.message?.tool_calls?.length) {

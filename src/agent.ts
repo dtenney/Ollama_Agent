@@ -3025,8 +3025,8 @@ export class Agent {
         
         // Trim history BEFORE adding new message to prevent exceeding limit
         if (this.history.length >= this.MAX_HISTORY_MESSAGES) {
-            const removed = this.history.length - this.MAX_HISTORY_MESSAGES + 1;
-            this.history = this.history.slice(-this.MAX_HISTORY_MESSAGES + 1);
+            const removed = this.history.length - this.MAX_HISTORY_MESSAGES;
+            this.history = this.history.slice(-this.MAX_HISTORY_MESSAGES);
             logInfo(`[agent] History trimmed: removed ${removed} old messages`);
         }
         
@@ -10206,7 +10206,8 @@ ${sampleHtml}
         // Use case-insensitive comparison on Windows (paths may differ in drive letter case)
         const fullNorm = process.platform === 'win32' ? full.toLowerCase() : full;
         const rootNorm = process.platform === 'win32' ? root.toLowerCase() : root;
-        if (!fullNorm.startsWith(rootNorm)) {
+        const rootNormWithSep = rootNorm.endsWith(path.sep) ? rootNorm : rootNorm + path.sep;
+        if (fullNorm !== rootNorm && !fullNorm.startsWith(rootNormWithSep)) {
             throw new Error(`Path "${rel}" is outside the workspace`);
         }
         // Resolve symlinks to prevent escaping workspace via symlink
@@ -10215,7 +10216,8 @@ ${sampleHtml}
             const realNorm = process.platform === 'win32' ? real.toLowerCase() : real;
             const rootReal = fs.realpathSync(root);
             const rootRealNorm = process.platform === 'win32' ? rootReal.toLowerCase() : rootReal;
-            if (!realNorm.startsWith(rootRealNorm)) {
+            const rootRealNormWithSep = rootRealNorm.endsWith(path.sep) ? rootRealNorm : rootRealNorm + path.sep;
+            if (realNorm !== rootRealNorm && !realNorm.startsWith(rootRealNormWithSep)) {
                 throw new Error(`Path "${rel}" resolves outside the workspace via symlink`);
             }
         } catch (err) {
