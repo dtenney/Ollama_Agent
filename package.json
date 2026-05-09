@@ -214,6 +214,10 @@
       {
         "command": "ollamaAgent.acceptProposedRules",
         "title": "OllamaPilot: Accept Proposed Rules"
+      },
+      {
+        "command": "ollamaAgent.runDreamCycle",
+        "title": "OllamaPilot: Run Dream Cycle"
       }
     ],
     "menus": {
@@ -535,6 +539,11 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Model name to use for the automated critic review pass after edits when `routing.enabled` is true (e.g. `qwen2.5-coder:7b`). Leave empty to use the main model."
+        },
+        "ollamaAgent.dreamModel": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Model to use for the dream cycle (self-improvement analysis). Leave empty to use the main model. Prefer a model with a large context window (≥32k) since the dream prompt includes feedback logs and session history."
         },
         "ollamaAgent.contextFile.autoUpdateDays": {
           "type": "number",

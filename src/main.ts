@@ -22,6 +22,7 @@ import { ingestMarkdownFiles } from './markdownIngest';
 import { CodeIndexer } from './codeIndex';
 import { ensureEnvironmentContext } from './environmentProbe';
 import { detectShellEnvironment } from './agent';
+import { runDreamCycle } from './dreamAgent';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -858,6 +859,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             const doc = await vscode.workspace.openTextDocument(exportPath);
             await vscode.window.showTextDocument(doc);
             vscode.window.showInformationMessage(`Log exported to ${path.basename(exportPath)} — select all and copy to share with another agent.`);
+        }),
+
+        vscode.commands.registerCommand('ollamaAgent.runDreamCycle', async () => {
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!root) { vscode.window.showWarningMessage('No workspace folder open.'); return; }
+            logInfo('[dream] Manual trigger via command palette');
+            await runDreamCycle(root, null, null);
         }),
 
         vscode.commands.registerCommand('ollamaAgent.acceptProposedRules', async () => {

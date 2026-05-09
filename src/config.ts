@@ -61,6 +61,8 @@ export interface OllamaConfig {
     criticModel: string;
     /** Enable automatic multi-model routing based on operation type. */
     modelRoutingEnabled: boolean;
+    /** Model to use for the dream cycle. Empty = use main model. */
+    dreamModel: string;
     /** Days before AGENTS.md is considered stale and auto-refresh is triggered on workspace open. 0 = disabled. */
     contextFileAutoUpdateDays: number;
 }
@@ -108,6 +110,7 @@ export function getConfig(): OllamaConfig {
         fastModel:                 c.get<string> ('routing.fastModel',             ''),
         criticModel:               c.get<string> ('routing.criticModel',            ''),
         modelRoutingEnabled:       c.get<boolean>('routing.enabled',                false),
+        dreamModel:                c.get<string> ('dreamModel',                     ''),
         contextFileAutoUpdateDays: c.get<number> ('contextFile.autoUpdateDays',     7),
     };
 }

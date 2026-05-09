@@ -347,7 +347,8 @@ export async function runDreamCycle(
         return;
     }
 
-    const model = getConfig().model;
+    const cfg = getConfig();
+    const model = cfg.dreamModel || cfg.model;
     let rawOutput: string;
     try {
         rawOutput = await executeDream(workspaceRoot, logContent, memory, codeIndexer, model);
