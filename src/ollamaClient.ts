@@ -318,6 +318,25 @@ export function streamChatRequest(
                                     const trimAt = Math.max(0, fullContent.length - REPETITION_WINDOW);
                                     resolve({ content: fullContent.slice(0, trimAt) + '\n\n[Generation stopped — repetition loop detected]', toolCalls, avgLogprob, thinking: fullThinking });
                                 }
+                                // Oscillation guard for <think>-in-content models (gemma4, etc.):
+                                // "Wait, I'll use..." / "Actually, I'll just..." repeated many times.
+                                // isRepeating misses this because each iteration varies slightly.
+                                // Only check when content is large enough to be a real spiral (> 3000 chars).
+                                if (!resolved && fullContent.length > 3000) {
+                                    const tail = fullContent.slice(-3000);
+                                    const oscillations = (tail.match(/\b(?:wait|actually)[,.]?\s+i.ll\s+(?:use|just|try|do|check|re-read|call)\b/gi) ?? []).length;
+                                    if (oscillations >= 6) {
+                                        logWarn(`[stream] Oscillation spiral detected (${oscillations} wait/actually cycles in last 3000 chars) — aborting`);
+                                        resolved = true;
+                                        req.destroy();
+                                        const avgLogprob2 = logprobCount > 0 ? logprobSum / logprobCount : null;
+                                        // Strip the looping think block from output — keep only content before the spiral
+                                        const thinkStart = fullContent.lastIndexOf('<think>');
+                                        const cleanContent = thinkStart > 0 ? fullContent.slice(0, thinkStart) : '';
+                                        onToken('\n\n[Generation stopped — reasoning loop detected. Please retry.]');
+                                        resolve({ content: cleanContent + '\n\n[Generation stopped — reasoning loop detected. Please retry.]', toolCalls, avgLogprob: avgLogprob2, thinking: fullThinking });
+                                    }
+                                }
                             }
                             if (p.message?.tool_calls?.length) {
                                 toolCalls = p.message.tool_calls;
