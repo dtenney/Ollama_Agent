@@ -56,9 +56,7 @@ interface FilePlan {
 
 let _cachedShellEnv: ShellEnvironment | null = null;
 
-/** PowerShell cmdlet names that require spawning powershell.exe rather than shell:true.
- *  Shared between runCommandStreaming and runShellRead to ensure consistent routing. */
-const PS_CMDLETS = /^(Get-ChildItem|Get-Content|Set-Content|Out-File|Out-Host|Add-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Move-Item|Copy-Item|Test-Path|Write-Host|Measure-Object|Sort-Object|mkdir|md|rmdir)$/;
+/** Git Bash is required on Windows. PowerShell routing is not supported. */
 
 /**
  * Strip PowerShell Select-String -Context output prefixes so the model
@@ -159,18 +157,11 @@ export function detectShellEnvironment(): ShellEnvironment {
                 }
             } catch { /* bash not in PATH */ }
         }
+        shell = 'bash';
         if (bashPath) {
-            shell = 'bash';
             logInfo(`[shell-env] Git Bash found: ${bashPath}`);
         } else {
-            // Fall back to PowerShell, then cmd
-            try {
-                execSync('powershell -NoProfile -ExecutionPolicy Bypass -Command "echo ok"', { stdio: 'pipe', timeout: 3000 });
-                shell = 'powershell';
-            } catch {
-                shell = 'cmd';
-            }
-            logWarn('[shell-env] bash not found on Windows — falling back to PowerShell/cmd. Install Git for Windows for full Unix shell support.');
+            logWarn('[shell-env] Git Bash not found on Windows — install Git for Windows. Commands will fail without it.');
         }
     } else {
         // Unix: check SHELL env var, fall back to detection
@@ -197,34 +188,18 @@ export function detectShellEnvironment(): ShellEnvironment {
     const osName: ShellEnvironment['os'] = isWin ? 'windows' : isMac ? 'macos' : 'linux';
 
     if (isWin) {
-        const hasBash = shell === 'bash';
         _cachedShellEnv = {
             os: 'windows',
-            shell,
+            shell: 'bash',
             pythonCmd,
             bashPath,
-            label: hasBash
-                ? 'Windows (bash/Git Bash)'
-                : `Windows (${shell === 'powershell' ? 'PowerShell' : 'cmd'})`,
-            // When bash is available use Unix commands, otherwise Windows equivalents
-            findCmd: hasBash
-                ? "find . -name '*pattern*' -not -path '*__pycache__*'"
-                : 'dir /s /b *pattern*',
-            grepCmd: hasBash
-                ? "grep -rn 'text' --include='*.py' ."
-                : 'findstr /S /N /I "text" *.py',
-            treeCmd: hasBash
-                ? 'find folder -type f | head -50'
-                : 'tree /F folder',
-            mkdirCmd: hasBash
-                ? 'mkdir -p folder1 folder2'
-                : 'mkdir folder1 && mkdir folder2',
-            moveCmd: hasBash
-                ? 'mv old/path new/path'
-                : 'move old\\path new\\path',
-            catCmd: hasBash
-                ? 'cat file.txt'
-                : 'type file.txt',
+            label: 'Windows (bash/Git Bash)',
+            findCmd: "find . -name '*pattern*' -not -path '*__pycache__*'",
+            grepCmd: "grep -rn 'text' --include='*.py' .",
+            treeCmd: 'find folder -type f | head -50',
+            mkdirCmd: 'mkdir -p folder1 folder2',
+            moveCmd: 'mv old/path new/path',
+            catCmd: 'cat file.txt',
         };
     } else {
         _cachedShellEnv = {
@@ -261,30 +236,16 @@ function buildShellExamples(env: ShellEnvironment, workspaceRoot?: string): stri
 
     const gitSection = `- Git status/log/diff:       shell_read → git status  |  git log --oneline -20  |  git diff`;
 
-    const fallbackSection = env.os === 'windows' && !env.bashPath
-        ? `## PowerShell fallback (Windows, no bash — use Python above when possible)
-- Find files: Get-ChildItem -Path '${ws}' -Recurse -Filter '*pattern*' | Select-Object FullName
-- Search code: Get-ChildItem -Path '${ws}' -Recurse -Filter '*.py' | Select-String -Pattern 'def foo' | Select-Object Path,LineNumber,Line -First 20
-- Read file: Get-Content 'FULL/PATH/file.py'
-- Read line range: (Get-Content 'FULL/PATH/file.py' | Select-Object -Skip 473 -First 107)
-NOTE: bash is not installed. For full Unix shell support, install Git for Windows: winget install Git.Git`
-        : `## Shell fallback (${env.os === 'windows' ? 'Windows + Git Bash — Unix commands only' : 'Unix'} — use Python above when possible)
+    const fallbackSection = `## Shell fallback (${env.os === 'windows' ? 'Windows + Git Bash — Unix commands only' : 'Unix'} — use Python above when possible)
 - Find files: find '${ws}' -name '*pattern*' -not -path '*__pycache__*'
 - Search code: grep -rn 'def fetch_user' --include='*.py' '${ws}'
 - Read file: cat '/full/path/file.py'
-- Read line range: sed -n '474,580p' '/full/path/file.py'${env.os === 'windows' && env.bashPath ? `
+- Read line range: sed -n '474,580p' '/full/path/file.py'${env.os === 'windows' ? `
 
-⛔ NEVER use PowerShell cmdlets in shell_read or run_command — the shell is Git Bash (Unix).
-These will ALL fail with "command not found":
+⛔ NEVER use PowerShell cmdlets — the shell is Git Bash (Unix). These will fail with "command not found":
   Get-ChildItem, Get-Content, Set-Content, Select-Object, Select-String,
   Where-Object, ForEach-Object, New-Item, Remove-Item, Write-Host
-Use bash equivalents instead: find, cat, grep, ls, cp, mv, rm, mkdir
-
-BANNED patterns on Git Bash (these ALWAYS fail — do not attempt even once):
-  Get-Content "file" | Select-String -Pattern "..."   →  use: grep -n "pattern" "file"
-  Get-Content "file"                                   →  use: cat "file"
-  Select-String -Pattern "x" file.py                  →  use: grep -n "x" file.py
-  Get-ChildItem -Recurse | Select-String               →  use: grep -rn "pattern" .` : ''}`;
+Use bash equivalents: find, cat, grep, ls, cp, mv, rm, mkdir -p` : ''}`;
 
     return `Your PRIMARY tools are shell_read and run_command. Host: **${env.label}**. Workspace: ${ws}
 ${env.pythonCmd ? `Python available: **${py}** — use it first for all file operations (cross-platform, reliable).` : `Python NOT detected — use platform shell commands below.`}
@@ -336,15 +297,8 @@ CRITICAL: NEVER use echo, Add-Content, Set-Content, or shell redirection to writ
 
     if (hasPython) { return pythonExamples; }
 
-    // Python not available — fall back to platform shell examples
-    // IMPORTANT: when Git Bash is present (env.bashPath), always use Unix commands even on Windows.
-    const shellFallback = env.os === 'windows' && !env.bashPath
-        ? `\n\nPython not found — using PowerShell fallback:
-EXAMPLE - Find files: <tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem -Path '${ws}' -Recurse -Filter '*payment*' | Select-Object FullName"}}</tool>
-EXAMPLE - Search code: <tool>{"name": "shell_read", "arguments": {"command": "Get-ChildItem -Path '${ws}/app' -Recurse -Filter '*.py' | Select-String -Pattern 'def process_payment' | Select-Object Path,LineNumber,Line -First 10"}}</tool>
-EXAMPLE - Read file: <tool>{"name": "shell_read", "arguments": {"command": "Get-Content 'FULL/PATH/file.py'"}}</tool>
-EXAMPLE - Read lines 474-580: <tool>{"name": "shell_read", "arguments": {"command": "(Get-Content 'FULL/PATH/file.py' | Select-Object -Skip 473 -First 107)"}}</tool>`
-        : `\n\nPython not found — using shell fallback:
+    // Python not available — fall back to shell (Git Bash on Windows, native bash/sh on Unix)
+    const shellFallback = `\n\nPython not found — using shell fallback:
 EXAMPLE - Find files: <tool>{"name": "shell_read", "arguments": {"command": "find '${ws}' -type f -name '*payment*' -not -path '*__pycache__*'"}}</tool>
 EXAMPLE - Search code: <tool>{"name": "shell_read", "arguments": {"command": "grep -rn 'def process_payment' --include='*.py' '${ws}'"}}</tool>
 EXAMPLE - Read file: <tool>{"name": "shell_read", "arguments": {"command": "cat '/full/path/payment_service.py'"}}</tool>
@@ -999,8 +953,6 @@ Rules:
 
     const workspaceInfo = workspaceRoot ? `Workspace: ${workspaceRoot}` : '';
     const searchCfg = getSearchConfig();
-    const _promptShellEnv = detectShellEnvironment();
-    const _hasBash = _promptShellEnv.os === 'windows' && !!_promptShellEnv.bashPath;
     const webSearchLine = searchCfg.url
         ? `  web_search         — search the web via SearXNG (${searchCfg.url}); use for examples, docs, libraries\n  web_fetch          — fetch and read a web page by URL`
         : '';
@@ -1158,13 +1110,13 @@ You have Git Bash, Python 3, and git available. Use them:
 - When edit_file fails: switch to edit_file_at_line immediately. If you don't have line numbers, shell_read to get them, then use edit_file_at_line. Do NOT retry edit_file with a reconstructed old_string — that loop never ends.
 - When edit_file fails twice on a file with broken syntax (f-strings with embedded quotes, corrupted content, etc.): use write_file to write the complete corrected file. This is the final escape hatch — do not keep guessing old_string. CRITICAL: before calling write_file, shell_read the current file in full so your rewrite is based on what's actually on disk, not reconstructed from memory. Every line you write from memory is a new opportunity for a typo. Read first, then write.
 - Never create source files with New-Item/touch — use write_file (new files) or write_file (full rewrites)
-${_hasBash ? '- Local directory creation on Windows (Git Bash): use mkdir -p "folder/name" — Git Bash supports standard Unix syntax.' : '- Local directory creation on Windows: use New-Item -ItemType Directory -Force -Path "folder/name" (NOT mkdir -p, which is Linux syntax).'} For remote dirs via SSH, use: ssh host "mkdir -p /remote/path" — that is fine.
+- Local directory creation: use mkdir -p "folder/name" (Git Bash on Windows, native bash on Unix). For remote dirs via SSH, use: ssh host "mkdir -p /remote/path" — that is fine.
 - SSH remote commands: prefer unquoted multi-word commands when possible (e.g. ssh host find /root/payloads -type d -name foo). When quoting is required, use double quotes around the remote command (e.g. ssh host "python3 -c 'script'" — double on outside, single inside). Never use a single-quoted outer wrapper on SSH commands (e.g. ssh host 'cmd') as this is not reliably handled cross-platform. For complex scripts with embedded quotes, scp the script file then execute it: scp /local/script.py host:/tmp/script.py then ssh host python3 /tmp/script.py.
 - Remote path rule — CRITICAL: remote paths in ssh/scp commands must be absolute paths that came directly from a previous shell_read/find result on the remote machine. NEVER construct a remote path by appending a local relative path or workspace-relative path to a remote base. Example of the bug to avoid: if the remote base is /srv/app/myproject and the local workspace folder is also named myproject, do NOT produce /srv/app/myproject/srv/app/myproject. The correct path is simply /srv/app/myproject. When in doubt about the remote path, run ssh host "find /srv -name <filename> -type f" to get the exact path before using it.
-${_hasBash ? '- Shell chaining (Git Bash): use && to chain commands normally — Git Bash supports standard bash syntax.' : '- PowerShell chaining: PowerShell 5 (default on Windows) does NOT support &&. Use ; to chain commands (e.g. Get-Content file | ssh host \'cat > /tmp/f\'; ssh host python3 /tmp/f). Never write cmd1 && cmd2 when the first command is a PowerShell cmdlet. Use separate run_command calls if the second command should only run on success — call run_command for the upload, check the result, then call run_command for the execution.'}
+- Shell chaining: use && to chain commands normally — Git Bash supports standard bash syntax.
 - Never write Python scripts as inline one-liners via python3 -c "...". Inline scripts break with any embedded quotes or newlines. Always: (1) write the script to a local file with edit_file, (2) scp it to /tmp/ on the remote, (3) run it with ssh host python3 /tmp/script.py. This applies even for short 3-line scripts.
 - SSH failure recovery: if an SSH command exits non-zero due to path or quoting issues (e.g. "No such file or directory", exit 127, exit 255), do NOT explain and stop — immediately retry using the scp+exec pattern: write the logic to a local .py file, scp it to /tmp/ on the remote, then ssh host python3 /tmp/script.py.
-${_hasBash ? '- Local file/dir operations: use Unix bash commands (cat, grep, find, mkdir -p, cp, mv, rm). NEVER use PowerShell cmdlets (Get-Content, Select-String, Get-ChildItem, etc.) — the shell is Git Bash and they will fail with "command not found".' : '- Local file/dir operations use PowerShell cmdlets. Never use mkdir -p locally on Windows.'}
+- Local file/dir operations: use Unix bash commands (cat, grep, find, mkdir -p, cp, mv, rm). NEVER use PowerShell cmdlets (Get-Content, Select-String, Get-ChildItem, etc.) — the shell is Git Bash and they will fail with "command not found".
 - get_diagnostics: call after every edit. Also call first when user asks about errors.
 - Bug fix is complete when edit_file succeeds, not when you've described the fix
 - Never end with a list of things to verify — do the verification yourself with shell_read
@@ -1520,13 +1472,10 @@ If you've failed at the same problem twice — two edit_file failures, two shell
 
 This applies to shell commands too. If a command fails once, try one corrected alternative. If that also fails, stop and explain — do not keep guessing syntax variations.
 
-${_hasBash ? `Common Git Bash traps to avoid on first attempt (not after failing):
+Common bash traps to avoid on first attempt (not after failing):
 - Reading a line range: use sed -n '474,580p' file.py  OR  awk 'NR>=474&&NR<=580' file.py
 - Reading a file: cat file.py  (NOT Get-Content, which is PowerShell-only and will fail)
-- Counting lines: wc -l file.py  (NOT (Get-Content file.py).Count)` : `Common PowerShell traps to avoid on first attempt (not after failing):
-- Reading a line range: use -Skip N -First M, NOT -Index N..M (ranges don't work with -Index)
-- Reading a file section: (Get-Content 'file.py' | Select-Object -Skip 473 -First 107)
-- Counting lines: (Get-Content 'file.py').Count`}
+- Counting lines: wc -l file.py  (NOT (Get-Content file.py).Count)
 
 Burning turns on variations the developer can't see is the worst outcome. Surfacing the problem early keeps them in control.
 
@@ -6786,7 +6735,8 @@ Do NOT assume you have no memory — check first.`;
                                 const grepPattern2 = autoKeywords2
                                     ? `except|raise|\\.error\\(|\\.critical\\(|${autoKeywords2}`
                                     : 'except|raise|\\.error\\(|\\.critical\\(';
-                                const focusedCmd = env3.os === 'windows'
+                                // Use PowerShell only when Windows AND no Git Bash.
+                                const focusedCmd = (env3.os === 'windows' && !env3.bashPath)
                                     ? `Get-Content "${largePath}" | Select-String -Pattern "${grepPattern2}" -Context 3,3`
                                     : `grep -n -A 3 -B 3 -E "${grepPattern2}" "${largePath}" | head -200`;
                                 logInfo(`[agent] Large file read, running focused grep: ${focusedCmd}`);
@@ -6817,7 +6767,9 @@ Do NOT assume you have no memory — check first.`;
                             const patternMatch = emptyCmd.match(/-Pattern\s+['"]([^'"]+)['"]/i) ?? emptyCmd.match(/grep\s+['""]?([^\s'"]+)/i);
                             const pattern = patternMatch?.[1] ?? '';
                             const wsRoot = this.workspaceRoot.replace(/\\/g, '/');
-                            const broadenHint = process.platform === 'win32'
+                            const _broadEnv = detectShellEnvironment();
+                            // Use PowerShell only when Windows AND no Git Bash.
+                            const broadenHint = (_broadEnv.os === 'windows' && !_broadEnv.bashPath)
                                 ? `Get-ChildItem -Path '${wsRoot}' -Recurse -Filter '*.html' | Select-String -Pattern '${pattern || 'customer'}' | Select-Object Path,LineNumber,Line | Select-Object -First 20`
                                 : `grep -rn "${pattern || 'customer'}" "${wsRoot}" --include="*.html" | head -20`;
                             nudge = `[SEARCH RETURNED NO RESULTS] The pattern was not found with that command. Do NOT guess or invent file paths — the search found nothing.\n\nTry a broader search:\nshell_read with: ${broadenHint}\n\nIf that also returns nothing, tell the user the feature was not found rather than fabricating an answer.`;
@@ -6828,7 +6780,8 @@ Do NOT assume you have no memory — check first.`;
                             const failedCmd = String(args.command ?? '');
                             const failedFilenameMatch = failedCmd.match(/['"\/\\]([^'"\/\\]+\.[a-z]{2,4})['"]/i);
                             const failedFilename = failedFilenameMatch?.[1] ?? '';
-                            const recursiveHint = env2.os === 'windows'
+                            // Use PowerShell only when Windows AND no Git Bash.
+                            const recursiveHint = (env2.os === 'windows' && !env2.bashPath)
                                 ? `Get-ChildItem -Path "${wsRoot}" -Recurse -Filter "${failedFilename || '*.py'}" | Select-Object FullName`
                                 : `find "${wsRoot}" -name "${failedFilename || '*.py'}" 2>/dev/null`;
                             nudge = `The path you tried does not exist. The file is not at that location. Search RECURSIVELY to find the correct path:\nshell_read with: ${recursiveHint}\nWorkspace root: "${wsRoot}"`;
@@ -6868,7 +6821,7 @@ Do NOT assume you have no memory — check first.`;
                         const MAX_LINES = 120;
                         if (lines.length > MAX_LINES) {
                             const kept = lines.slice(0, MAX_LINES).join('\n');
-                            toolResultForHistory = kept + `\n\n[TRUNCATED — file has ${lines.length} lines, showing first ${MAX_LINES}. Use Get-Content -Tail N or Select-String to read specific sections if needed.]`;
+                            toolResultForHistory = kept + `\n\n[TRUNCATED — file has ${lines.length} lines, showing first ${MAX_LINES}. Use cat to read specific sections, or sed -n 'N,Mp' file.py for a line range.]`;
                             logInfo(`[merge-guard] Truncated shell_read result from ${lines.length} to ${MAX_LINES} lines to preserve context`);
                         }
                     }
@@ -7232,7 +7185,8 @@ If the code looks correct, respond with exactly: OK`;
                         const envStub3 = detectShellEnvironment();
                         // Extract a keyword from the stub to find the real file
                         const stubKw = stubCheck.match(/\{\{\s*form\.(\w+)|id=["'](\w+)["']|name=["'](\w+)["']/)?.[1] ?? fileName6.replace(/\.\w+$/, '');
-                        const realSearchCmd2 = envStub3.os === 'windows'
+                        // Use PowerShell only when Windows AND no Git Bash.
+                        const realSearchCmd2 = (envStub3.os === 'windows' && !envStub3.bashPath)
                             ? `Get-ChildItem -Path '${wsRootStub2}/app/templates' -Recurse -Include '*.html' | Where-Object { $_.FullName -notmatch '__pycache__' } | Select-String -Pattern '${stubKw}' | Select-Object Path,LineNumber,Line | Select-Object -First 10`
                             : `grep -rn '${stubKw}' '${wsRootStub2}/app/templates' --include='*.html' | head -10`;
                         throw new Error(`edit_file: BLOCKED — "${rel}" is a stub file (${stubLineCount} lines, no HTML structure). It is a placeholder, not the real template.\n\nDo NOT edit this stub. Find the real template:\nshell_read with command="${realSearchCmd2}"\n\nThen edit the real file instead.`);
@@ -9187,10 +9141,7 @@ ${sampleHtml}
                     try {
                         // Use shell_read-style find to list files matching the pattern
                         const { execSync: execS } = require('child_process') as typeof import('child_process');
-                        const isWin = process.platform === 'win32';
-                        const findCmd = isWin
-                            ? `powershell -NoProfile -Command "Get-ChildItem -Path '${root}' -Recurse -File | Where-Object { $_.FullName -like '*${pattern.replace(/\*\*/g, '*')}*' } | Select-Object -ExpandProperty FullName"`
-                            : `find "${root}" -type f -name "${path.basename(pattern)}" 2>/dev/null`;
+                        const findCmd = `find "${root}" -type f -name "${path.basename(pattern)}" 2>/dev/null`;
                         const out = execS(findCmd, { timeout: 10000, encoding: 'utf8' });
                         candidates = out.split('\n').map(l => l.trim()).filter(Boolean);
                     } catch {
@@ -9417,10 +9368,9 @@ ${sampleHtml}
 
             // Routing priority (checked in order — first match wins):
             //   0. Windows + Git Bash → bash.exe -c "cmd" for ALL commands (ssh/scp/sftp/unix)
-            //   1. ssh/scp/sftp (no bash) → parseSshArgs + direct spawn, non-interactive flags injected
-            //   2. python/python3/py -c "..." → spawn python directly, newlines preserved in script body
-            //   3. PowerShell cmdlets / local mkdir/mv/cp/rm on Windows → powershell.exe array args
-            //   4. Everything else → collapse newlines (injection guard) then shell:true
+            //   1. python/python3/py -c "..." → spawn python directly, newlines preserved in script body
+            //   2. ssh/scp/sftp (no bash) → parseSshArgs + direct spawn, non-interactive flags injected
+            //   3. Everything else → collapse newlines (injection guard) then shell:true
 
             // Resolve bash path for Windows bash routing — when present, bash handles
             // ALL commands including ssh/scp/sftp (Git Bash ships its own OpenSSH).
@@ -9448,20 +9398,6 @@ ${sampleHtml}
                 logInfo(`[ssh/bash] Injected non-interactive SSH options into: ${safeCmd}`);
             }
 
-            // Only test PS keywords on the first token of the command (before any quoted args)
-            // to avoid matching keywords inside quoted remote-command payloads.
-            const firstToken = safeCmd.trimStart().split(/\s/)[0];
-            const isPSCmd = !isSshCmd && !pyMatch && process.platform === 'win32'
-                && (PS_CMDLETS.test(firstToken) || /\$_|\$PSItem/.test(safeCmd));
-
-            // PowerShell 5 doesn't support && — rewrite to ; for PS-routed commands.
-            // We only rewrite && that appear OUTSIDE quoted strings to avoid mangling remote payloads.
-            // Simple heuristic: replace ' && ' with ' ; ' when running through PS (not SSH/python).
-            if (isPSCmd && safeCmd.includes('&&')) {
-                safeCmd = safeCmd.replace(/\s*&&\s*/g, '; ');
-                logInfo(`[run_command] Rewrote && → ; for PowerShell compatibility`);
-            }
-
             // Disable MSYS path conversion so Git Bash doesn't rewrite c:/foo/bar → c:\foo\bar
             // inside Python string arguments. Without this, python3 -c "...path='c:/foo'..." breaks.
             const bashEnv = { ...process.env, MSYS_NO_PATHCONV: '1', MSYS2_ARG_CONV_EXCL: '*' };
@@ -9472,7 +9408,7 @@ ${sampleHtml}
                     ? spawn(pyMatch[1], ['-c', pyMatch[2]], { cwd, env: { ...process.env } })
                     : (isSshCmd && !isSshChained)
                         ? (() => {
-                            // No bash: use parseSshArgs to safely tokenize and spawn ssh directly
+                            // No bash on Windows (shouldn't happen): use parseSshArgs as last resort
                             const args = Agent.parseSshArgs(cmd.trim());
                             const exe = args.shift()!;
                             if (/^(ssh|scp|sftp)$/.test(exe.split(/[\\/]/).pop() ?? exe)) {
@@ -9481,9 +9417,7 @@ ${sampleHtml}
                             logInfo(`[ssh] Spawning without shell: ${exe} ${args.map(a => JSON.stringify(a)).join(' ')}`);
                             return spawn(exe, args, { cwd, env: { ...process.env }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
                         })()
-                        : isPSCmd
-                            ? spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', safeCmd], { cwd, env: { ...process.env } })
-                            : spawn(safeCmd, { cwd, env: { ...process.env }, shell: true, windowsHide: true });
+                        : spawn(safeCmd, { cwd, env: { ...process.env }, shell: true, windowsHide: true });
             this.trackChild(child);
 
             let output = '';
@@ -9583,11 +9517,10 @@ ${sampleHtml}
             post({ type: 'commandStart', id: cmdId, cmd });
 
             // Routing priority (when Git Bash is available on Windows, it handles everything):
-            //   0. Windows + bash: spawn bash -c "cmd" for all commands including ssh/scp/sftp
+            //   0. Windows + Git Bash: spawn bash -c "cmd" for all commands including ssh/scp/sftp
             //   1. python/python3/py -c "..." → spawn python directly, newlines preserved
             //   2. ssh/scp/sftp (no bash) → parseSshArgs + direct spawn, non-interactive flags injected
-            //   3. PowerShell cmdlets / local mkdir on Windows → powershell.exe array args
-            //   4. Everything else → collapse newlines then shell:true
+            //   3. Everything else → collapse newlines then shell:true
 
             const winBashPathR = process.platform === 'win32' ? detectShellEnvironment().bashPath : '';
 
@@ -9608,16 +9541,6 @@ ${sampleHtml}
                 logInfo(`[ssh/bash/shell_read] Injected non-interactive SSH options into: ${cmdR}`);
             }
 
-            const firstTokenR = cmdR.trimStart().split(/\s/)[0];
-            const isPowerShellCmd = !isSshCmdR && !pyMatchR && process.platform === 'win32'
-                && (PS_CMDLETS.test(firstTokenR) || /\$_|\$PSItem/.test(cmdR));
-
-            // PowerShell 5 doesn't support && — rewrite to ; for PS-routed commands.
-            if (isPowerShellCmd && cmdR.includes('&&')) {
-                cmdR = cmdR.replace(/\s*&&\s*/g, '; ');
-                logInfo(`[shell_read] Rewrote && → ; for PowerShell compatibility`);
-            }
-
             // Disable MSYS path conversion for shell_read bash invocations too
             const bashEnvR = { ...process.env, MSYS_NO_PATHCONV: '1', MSYS2_ARG_CONV_EXCL: '*' };
             let child;
@@ -9627,7 +9550,7 @@ ${sampleHtml}
             } else if (pyMatchR) {
                 child = spawn(pyMatchR[1], ['-c', pyMatchR[2]], { cwd, env: { ...process.env } });
             } else if (isSshCmdR && !isSshChainedR) {
-                // No bash: use parseSshArgs to safely tokenize and spawn ssh directly
+                // No bash on Windows (shouldn't happen): use parseSshArgs as last resort
                 const args = Agent.parseSshArgs(cmd.trim());
                 const exe = args.shift()!;
                 if (/^(ssh|scp|sftp)$/.test(exe.split(/[\\/]/).pop() ?? exe)) {
@@ -9635,8 +9558,6 @@ ${sampleHtml}
                 }
                 logInfo(`[ssh/shell_read] Spawning without shell: ${exe} ${args.map(a => JSON.stringify(a)).join(' ')}`);
                 child = spawn(exe, args, { cwd, env: { ...process.env }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-            } else if (isPowerShellCmd) {
-                child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', cmdR], { cwd, env: { ...process.env } });
             } else {
                 child = spawn(cmdR, [], { cwd, env: { ...process.env }, shell: true });
             }
