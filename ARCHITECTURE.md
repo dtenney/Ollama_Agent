@@ -123,13 +123,17 @@ System prompt rules guide the agent to:
 - Write each pipeline stage as a separate script with JSON handoff via `stage_N_summary.json`
 - Write test scripts to `.ollamapilot/tasks/<id>/test_<issue>.py` after fixing data bugs
 
-## Shell routing (Windows)
+## Shell routing
 
-`detectShellEnvironment()` in `src/agent.ts` probes for the best available shell at extension startup and caches the result:
+Git Bash is **required** on Windows. PowerShell and cmd are not supported.
 
-1. **Windows + Git Bash** (preferred) — probes `C:\Program Files\Git\bin\bash.exe` and common Git install paths, then `where bash`. When found, all `run_command` and `shell_read` commands (including `ssh`/`scp`/`sftp`) are routed through `bash.exe -c "…"`. SSH non-interactive flags (`-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new`) are injected directly into the command string before passing to bash.
-2. **Windows + PowerShell** (fallback) — cmdlets matching `PS_CMDLETS` (shared constant) are spawned via `powershell.exe -Command`. Other commands use `shell: true`.
-3. **Windows + cmd** (last resort) — used if PowerShell probe also fails.
-4. **Unix/macOS** — uses `$SHELL` env var; defaults to `bash`.
+`detectShellEnvironment()` in `src/agent.ts` probes for Git Bash at extension startup and caches the result. On activation, if `bashPath` is empty a VS Code error notification is shown with a link to the Git for Windows installer.
 
-`ShellEnvironment.bashPath` stores the Git Bash path so both `runCommandStreaming` and `runShellRead` can reference the same value without re-probing.
+**Routing priority** (same logic in both `runCommandStreaming` and `runShellRead`):
+
+1. **Windows + Git Bash** — all commands (including `ssh`/`scp`/`sftp`) are routed through `bash.exe -c "…"`. SSH non-interactive flags are injected into the command string before passing to bash. MSYS path conversion is disabled (`MSYS_NO_PATHCONV=1`) to prevent bash from rewriting Windows paths inside Python string arguments.
+2. **Python `-c "…"`** (no bash / Unix) — spawned directly to preserve embedded newlines in inline scripts.
+3. **ssh/scp/sftp** (no bash) — tokenized via `parseSshArgs` and spawned directly with non-interactive flags.
+4. **Everything else** — `shell: true`.
+
+`ShellEnvironment.bashPath` stores the resolved Git Bash path. `ShellEnvironment.shell` is always `'bash'` on Windows regardless of whether bash was found.
