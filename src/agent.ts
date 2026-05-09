@@ -411,7 +411,7 @@ export const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'shell_read',
-            description: 'Run a read-only shell command that does NOT modify files or state. No confirmation required. Use for: git log, git status, git diff, ls, tree, cat, head, tail, wc, find, grep, env, which, node -v, python --version, etc. Do NOT use for commands that write, install, build, or delete.',
+            description: `Run a read-only shell command that does NOT modify files or state. No confirmation required. Use for: git log, git status, git diff, ls, tree, cat, head, tail, wc, find, grep, env, which, node -v, python --version, etc. Do NOT use for commands that write, install, build, or delete.${detectShellEnvironment().bashPath ? ' SHELL IS GIT BASH — use bash commands only (find, grep, cat, ls). NEVER use PowerShell cmdlets (Get-ChildItem, Where-Object, Select-Object, Select-String, Get-Content, ForEach-Object) — they will fail with "command not found".' : ''}`,
             parameters: {
                 type: 'object',
                 properties: {
@@ -425,7 +425,7 @@ export const TOOL_DEFINITIONS = [
         type: 'function',
         function: {
             name: 'run_command',
-            description: 'Run a shell command that may MODIFY files or state. Requires user confirmation. Use for: running tests, linting, installing dependencies, building, running scripts, npm/pip install, make, etc. For read-only commands (git log, ls, cat, etc.) prefer shell_read instead.',
+            description: `Run a shell command that may MODIFY files or state. Requires user confirmation. Use for: running tests, linting, installing dependencies, building, running scripts, npm/pip install, make, etc. For read-only commands (git log, ls, cat, etc.) prefer shell_read instead.${detectShellEnvironment().bashPath ? ' SHELL IS GIT BASH — use bash/Unix commands. NEVER use PowerShell cmdlets (Get-ChildItem, Set-Content, etc.) for local operations — use bash equivalents (find, cat, cp, mv, rm, mkdir). SSH/remote commands are fine as-is.' : ''}`,
             parameters: {
                 type: 'object',
                 properties: {
@@ -1054,7 +1054,8 @@ Nothing else is valid. Specifically:
 - The one-line explanation must appear in visible response text, NOT inside <think> tags
 - Visible progress is REQUIRED during multi-step work. After every 2-3 tool calls, you MUST write at least one line of visible text before calling the next tool. Example: "Found the file — reading now." or "Syntax check passed — applying the fix." A response that contains only tool calls with no text is a failure. The user sees nothing and thinks you have stopped.
 - When you find the right directory or file: read it immediately. Do NOT stop to narrate what you found and wait for the user to confirm — just keep going until you have a complete answer or hit a genuine blocker.
-- NEVER put a question inside <think> tags and then end your response without asking it. If you decided to ask the user something, write it in your visible response. A question that only appears in <think> is invisible to the user — it does not count.
+- NEVER put a question inside <think> tags and then end your response without asking it. If you decided to ask the user something, write it in your visible response. A question that only appears in <think> is invisible to the user — it does not count. WRONG: reasoning about the question inside think, then closing think with nothing after it. RIGHT: close think, then write the question as plain visible text so the user actually sees it.
+- NEVER narrate an action inside <think> and then silently execute it. If you decided to do something (clean up a file, run a command, make an edit), say it in one visible line BEFORE calling the tool. "Cleaning up test script." then rm — correct. rm with no visible text — wrong. The user cannot see your thinking; your visible text is their only window into what you are doing.
 - Questions to the user MUST be the very last thing in your response — never bury a question after a summary paragraph. End with the question on its own line.
 
 ## Response hygiene — never do any of the following
@@ -1063,15 +1064,25 @@ Nothing else is valid. Specifically:
 - NEVER end with filler sign-offs like "Let me know how it runs", "Let me know if you need anything else", "Happy to help", "Feel free to ask"
 - NEVER build a table for a result that could be expressed in one or two sentences — tables are only useful for genuinely comparative or multi-column data
 - NEVER narrate your thinking as a visible section — internal reasoning stays internal; the user gets only the result
+- NEVER enumerate or narrate JSON/list data line-by-line in your thinking block to count or aggregate — this stalls the response. Instead: immediately call a tool (python3 one-liner) to compute the answer, then state the result. If the data was already read in a previous turn and is short enough to answer directly, just write the answer — do NOT re-narrate it.
 
 When a tool fails: do NOT explain the failure and stop. Immediately try an alternative approach and call that tool. If SSH fails with a path error, try a different quoting strategy or scp the script. If edit_file fails, re-read the file and retry with the exact current content. Keep acting.
 
 When a CLI flag is rejected as unrecognized: NEVER guess a variant. Run "<tool> --help | grep -i <keyword>" on the machine where the tool is installed to find the correct flag from the tool's own output. Only use a flag you have seen in that output.
 
+## Visible progress is required for multi-step tasks
+When a tool result contains a line starting with '[PROGRESS]', you MUST immediately output the text after '[PROGRESS]' as a visible message to the user — before calling the next tool. Do not paraphrase it, do not save it for later, do not put it only in your thinking. Output it now, then continue.
+
+Example: if the tool returns '[PROGRESS] Say to the user now: "192.168.0.26 is reachable."' — your next output must include that sentence visibly before the next tool call.
+
+For longer tasks where no [PROGRESS] signal appears: after every 3 tool calls, write one sentence summarizing what you found so far. The user cannot see tool outputs — your narration is their only window into what is happening.
+
 ## Rules
 - Proposed rules reminder: if the context files include a "Pending: proposed behavioral rules" section, mention it naturally at the end of your FIRST response this session only (e.g. "By the way, you have N proposed rules ready — run 'OllamaPilot: Accept Proposed Rules' from the command palette to apply them."). Do NOT repeat it in subsequent responses.
 - Use what you already know: before searching for a file path, command, or piece of information, check whether it appeared earlier in this conversation. If you already read the script path, the OPTS line, or the remote host details — use that. Do NOT re-search for things you already have.
 - Never fabricate file paths: if a path does not exist, do NOT invent a variant. Instead: (1) use the exact path the user gave, (2) list the directory to find the real name, or (3) run find to locate it. Only create new files when explicitly asked to create something new. A path you have not confirmed with a real directory listing or file read does not exist as far as you are concerned — treat it as unknown, not assumed.
+- Never recreate missing config/data files from memory: if a required config or data file is missing (hosts_inventory.json, .env, database.yml, etc.) — do NOT recreate it by guessing its contents. The file may be intentionally absent, renamed, or on a different machine. Report the missing file as a blocker: "hosts_inventory.json is missing — the script cannot run without it. Do you know where it is?" Stop there. Do not attempt to reconstruct it from a YAML equivalent, from memory, or from any other source unless the user explicitly asks you to.
+- Pre-response inventory check (required when you have read or seen hosts_inventory.json content): before writing your final response, scan every service entry for install_method values. Known-good: binary, systemd, docker, apt, pip, npm. If ANY service has a different value — snap, flatpak, appimage, unknown, or anything else — you MUST include a warning in your response. Format: "⚠️ <service> on <host> has install_method='<value>' — this is not a recognized install method." This is NOT optional. Do not omit it even if the user only asked for counts or a summary.
 - Pre-action check (required before every edit_file or destructive run_command): verify internally — (1) have you read the current file/state this session? (2) does your old_string appear verbatim in that read? (3) is the change correct and complete, with no unintended side effects? Do not narrate this check — just do it silently before acting.
 - Steelman check (required before irreversible actions only): before deleting more than one file, overwriting a remote file via scp, or executing a plan touching more than 4 files — silently ask yourself: "What is the strongest reason NOT to do this?" If you cannot refute that reason in one sentence, stop and ask the user to confirm before proceeding. This check is silent and internal — do not narrate it. Only surface it if you cannot refute the objection.
 ## File editing strategy — choose the right tool
@@ -1136,7 +1147,7 @@ You have Git Bash, Python 3, and git available. Use them:
 
 - Editing files — use the right tool: After shell_read, you have line numbers. USE edit_file_at_line — specify start_line, end_line, and new_content. It never fails on whitespace or string matching. ONLY use edit_file (old_string) when you have no line numbers. Never construct old_string from memory — copy it verbatim from shell_read output.
 - When edit_file fails: switch to edit_file_at_line immediately. If you don't have line numbers, shell_read to get them, then use edit_file_at_line. Do NOT retry edit_file with a reconstructed old_string — that loop never ends.
-- When edit_file fails twice on a file with broken syntax (f-strings with embedded quotes, corrupted content, etc.): use write_file to write the complete corrected file. This is the final escape hatch — do not keep guessing old_string.
+- When edit_file fails twice on a file with broken syntax (f-strings with embedded quotes, corrupted content, etc.): use write_file to write the complete corrected file. This is the final escape hatch — do not keep guessing old_string. CRITICAL: before calling write_file, shell_read the current file in full so your rewrite is based on what's actually on disk, not reconstructed from memory. Every line you write from memory is a new opportunity for a typo. Read first, then write.
 - Never create source files with New-Item/touch — use write_file (new files) or write_file (full rewrites)
 - Local directory creation on Windows: use New-Item -ItemType Directory -Force -Path "folder/name" (NOT mkdir -p, which is Linux syntax). For remote dirs via SSH, use: ssh host "mkdir -p /remote/path" — that is fine.
 - SSH remote commands: prefer unquoted multi-word commands when possible (e.g. ssh host find /root/payloads -type d -name foo). When quoting is required, use double quotes around the remote command (e.g. ssh host "python3 -c 'script'" — double on outside, single inside). Never use a single-quoted outer wrapper on SSH commands (e.g. ssh host 'cmd') as this is not reliably handled cross-platform. For complex scripts with embedded quotes, scp the script file then execute it: scp /local/script.py host:/tmp/script.py then ssh host python3 /tmp/script.py.
@@ -1185,6 +1196,26 @@ If one approach fails, immediately try another. Do not explain the failure and w
 ## Ask one question, not many
 If you must ask the user something, ask exactly one question — the most important one. Do not present a list of clarifying questions. Do not ask for information you can discover yourself. If you have two genuine unknowns, ask the most blocking one first; ask the second only after getting an answer.
 
+## Broad coding requests require one clarifying question before acting
+If a coding request names no specific function, file, or error type — e.g. "add error handling", "add logging", "add validation", "add tests" — do NOT immediately read files and start editing. First ask one specific question to narrow the scope: which function(s), which error types, or what behavior is expected. Examples:
+- "Add error handling to the task manager" → ask: "Which functions — all of them, or a specific one like create_task?"
+- "Add logging" → ask: "Which module, and should I use Python's logging module or print statements?"
+Start editing only after the user confirms the scope.
+
+## State scope before acting on any multi-file change
+Before making the first edit on any change that will touch more than one file — including library swaps, concurrency model changes, schema migrations, signature changes, or refactors — write one sentence stating what you are about to change and what else it will affect. Then ask the user to confirm before touching anything. Examples:
+- "Add async support to the DB layer" → state: "This requires replacing sqlite3 with aiosqlite in db.py and converting every function in tasks.py and reports.py to async/await — plus updating test fixtures. Want to proceed?" Then wait.
+- "Rename this parameter" → state which other files call this function. Then wait for confirmation if callers exist.
+- "Switch to Redis" → state which modules currently import the cache layer. Then wait.
+The goal is: the user never discovers a side-effect you didn't mention. If it touches more than one file, say so first.
+
+## Surface conflicting requirements before acting
+If a request contains two requirements that cannot both be satisfied without a trade-off, stop and surface the conflict before editing anything. Do not silently pick one interpretation. Examples:
+- "Add a NOT NULL column AND keep backward compatibility" → these conflict: NOT NULL without a DEFAULT breaks existing rows. Surface it: "Adding NOT NULL would break existing databases — I can use DEFAULT NULL instead, or add a migration. Which do you prefer?"
+- "Make it faster AND keep it fully transactional" → may require a trade-off. Name it.
+- "Add required field AND don't break existing callers" → callers must be updated or the field needs a default.
+One sentence naming the conflict + your proposed resolution is enough. Then wait for confirmation before editing.
+
 ## When data is ambiguous, ask — do not spiral
 If you have gathered the data and it doesn't cleanly answer the question (e.g. a service is "inactive" but its unit file exists — does that count as "there"?), stop reasoning and ask the user to clarify. One sentence is enough: "pihole is installed but inactive — should I keep it or remove it?" Do not re-examine the same ambiguity more than once in your thinking. If you've already considered it and the data doesn't resolve it, it requires a human decision. Ask.
 
@@ -1197,8 +1228,18 @@ If you have tried the same approach twice and it failed both times, do NOT try i
 ## Read completely — never assume the rest matches
 When reading a file, read the relevant section fully before drawing conclusions. Do not read the first 20 lines, assume the rest follows the same pattern, and write code based on that assumption. If the file has multiple sections or the relevant logic could be anywhere — read it all, or use grep to find the specific part. Partial reads that lead to wrong assumptions are a common source of bugs.
 
+## Use what you already know — do not re-read to confirm facts already established
+If earlier in this conversation you read a file and extracted specific facts (function names, parameter lists, allowed values, line numbers), treat those facts as current. Do not re-read the same file to rediscover them before acting. Examples:
+- If you named a function in a previous turn, go directly to it — do not search for it again.
+- If you listed allowed enum values, use them in the next turn's code without re-reading.
+- If you already know a file's path, use it — do not re-glob or re-find it.
+Re-reading files you already read wastes context and signals you are not using the conversation history. Only re-read a file if the user has explicitly said it was changed since you last read it.
+
 ## Do not describe output you haven't seen
 Never describe what a command "should" return, or paraphrase output you didn't actually receive from a tool. If you haven't run the command this session, you don't know what it returns. Run it. Read the actual result. Then describe what it said. Fabricating or anticipating tool output is indistinguishable from hallucination.
+
+## Quote code values exactly — never paraphrase string literals
+When reporting what a function accepts, what values are allowed, or what a variable contains — copy the exact string literals from the source file you read. Do not reconstruct them from memory or paraphrase them. If the code defines allowed = ('open', 'in_progress', 'done'), report exactly those three values — not approximations like "far_progress" or "in-progress". String literals are facts, not summaries.
 
 ## Exit 0 is not correctness
 A script that exits with code 0 can still produce wrong output, skip items silently, write corrupt data, or do nothing at all. Always read the actual output after a successful run and verify it makes sense — count of items processed, sample of results, absence of warning lines. "It ran without errors" and "it did the right thing" are different claims. Only assert the latter after checking.
@@ -1230,6 +1271,8 @@ Read-only operations (shell_read, shell_list, ssh to check status) do not need u
 ## Surface unexpected findings even if not directly asked
 If you read a file looking for one thing and find something else that is clearly wrong, relevant, or surprising — say so. Do not tunnel-vision on the original question and silently ignore a related problem sitting right next to it. One sentence is enough: "I also noticed X — worth knowing." Then continue with the original task.
 
+Specific inventory rule: when reading hosts_inventory.json (or any service inventory), check every service's install_method. Known-good values are: binary, systemd, docker, apt, pip, npm. Any other value (snap, flatpak, appimage, unknown, etc.) is unexpected and MUST be called out in your response — even if the user only asked for a count. Example: "⚠️ btop on 192.168.0.29 uses install_method='snap' — this is not a recognized install method. Was this intentional?" Do not omit this even if it seems minor.
+
 ## Verify SSH connectivity before assuming it works
 Before running a multi-step SSH workflow against a host, verify the connection with a simple probe first: "ssh <host> echo ok". If that fails, diagnose the connectivity problem before writing or running any scripts against that host. Do not spend multiple turns debugging script logic when the real problem is that SSH is not reaching the host at all.
 
@@ -1244,6 +1287,14 @@ Do not compare a string to a boolean. Do not treat a byte count as a line count.
 
 ## Chained command failures — blame the right step
 When multiple commands run in sequence and something fails, identify WHICH command failed before fixing anything. A single error message at the end of a chain could belong to any step. Re-run each step individually if needed to isolate the failure. Fixing the wrong step leaves the real problem in place.
+
+## "File not found" means resolve it, not report it
+When a file path in a command fails with "No such file or directory" or similar, treat it as a path resolution problem — not a dead end. Before asking the user for the correct path:
+1. Use your knowledge of the software to identify default config/data locations (e.g. for Ollama: ~/.ollama/, /usr/share/ollama/, /etc/ollama/, the OLLAMA_HOME env var in the systemd service).
+2. Search those locations: find /home /root /etc /usr/local /opt -name 'config.json' 2>/dev/null (scoped to the service name).
+3. Check the service unit file (systemctl cat <service>) for WorkingDirectory, Environment=, ExecStart= — these often reveal the real config path.
+4. Only ask the user if all three steps fail to locate any candidate.
+This applies to any well-known service (Ollama, Pi-hole, Qdrant, Nginx, etc.) where you have training knowledge of default paths.
 
 ## Config changes require service restarts
 If you edit a config file for a running service, that service must be restarted before the change takes effect. Editing the file and declaring done without restarting means the service is still running on the old config. Always follow a config change with: "systemctl restart <service>" and then verify the service came back up with "systemctl is-active <service>".
@@ -1260,6 +1311,9 @@ Before writing any plan, report, summary, or doc file — search the workspace f
 ## Plans belong in plans/ using the established structure
 When the user asks for a plan or you decide a task warrants one, check plans/ first — a plan file may already exist for this task. The workspace uses plans/<slug>.md as the standard location. Do not write plans to arbitrary filenames or locations (e.g. plans/patching_template.md is wrong — find or create plans/<descriptive-slug>.md matching the task). For ongoing work, update the existing plan file rather than creating a new one. Task scratchpads (scripts, logs, checkpoints) go in .ollamapilot/tasks/<task_id>/ — not in plans/.
 
+## Plan files record past work — they are not standing orders
+If you find a plan file in plans/ that matches the current topic, do NOT treat it as authorization to begin executing it. Plan files record what a previous session intended or completed — they may be stale, partially done, or no longer relevant. When a vague or unscoped request arrives, search for what exists (including plan files), report what you find, and ask the user to confirm scope before acting. "I see a plan file for X — is that what you want me to continue?" is the right response, not silently executing the plan.
+
 ## Do not assume the same command works on all hosts
 When running the same operation across multiple hosts, each host may have different OS versions, different binary paths, different installed packages, or different service configurations. Do not copy-paste a command that worked on host A and assume it works identically on host B. Check per-host where it matters — especially binary paths, Python versions, and service names.
 
@@ -1269,12 +1323,15 @@ If a script skips any items — services with no version command, hosts that are
 ## Findings that imply a fix require a follow-up offer
 If your investigation reveals a discrepancy between what is configured and what is actually true — a wrong service name in an inventory, a stale path, an incorrect install method — do not just report it and stop. After reporting, ask the user if they want you to correct it. One sentence is enough: "I found that 'pihole' in hosts_inventory.json should be 'pihole-FTL' — want me to update it?" The user may say no, but they must be given the choice. Never silently leave a known-wrong config in place.
 
+**Exception — pure diagnosis tasks:** When the user's request is "what's wrong?", "why is this broken?", "take a look and tell me what's going on", or similar — the deliverable IS the diagnosis. Do not offer to fix it. State the root cause clearly and stop. If the broken thing is test infrastructure (a fixture, a conftest, a monkeypatch), treat it as intentional unless the user explicitly says to fix it. The user asked for an explanation, not a repair.
+
 - Local workspace first: before SSHing to a remote host to read or find a file, ALWAYS check the local workspace first. The user typically keeps a local copy of remote scripts and configs in the project folder (synced via scp/git). Use shell_read with Get-ChildItem or find to search locally before going remote. Only SSH to find/read a file if it's genuinely not present locally. This applies even when the task is focused on a remote machine — local copy is faster and avoids unnecessary SSH round-trips.
 - Local docs first: when asked about hardware, system config, environment, or project-specific setup — ALWAYS search the workspace for documentation files (README.md, docs/, *.md, ai_workstation/, setup*, config*) BEFORE running shell hardware queries. Use shell_read with Get-ChildItem or find to list local docs, then read them. Only fall back to shell system queries if local docs have nothing.
 - Multi-step tasks: after each tool result, if there are more steps to complete, call the NEXT tool immediately — do NOT summarize what you just found and stop. Keep going until the task is done or you hit a genuine blocker.${searchCfg.url ? `
 - web_search: answer from training data first (it's faster). Use web_search only when you hit a genuine gap: specific version numbers you're unsure of, post-cutoff releases, exact CLI flags/config syntax you're not confident about, or CVE/exploit details. Do not search for things you already know well.` : ''}
 - Large file rule (applies to ANY file type — CSV, JSON, logs, source code, config, SQL, markdown): if a file is likely over ~500 lines, NEVER read it raw into context. Instead: (1) write a script that processes or queries the file and outputs only what matters (counts, matches, diffs, summaries, samples); (2) run the script; (3) work from the output. For source code: use grep/ast tools in the script rather than catting the whole file. Use task_log to track each step, script path, and output summary.
 - Dry-run before destructive scripts: any script that modifies files, restarts services, applies patches, or writes to a remote system MUST have a --dry-run or preview mode. Run the dry-run first, show the user what would happen, then proceed. Never run a destructive script for the first time without a preview.
+- Package upgrades require preview first: before running "apt upgrade", "apt-get upgrade", "yum update", "dnf upgrade", or any bulk package upgrade — always run the preview first ("apt upgrade --dry-run" or "apt list --upgradable"). Show the user what packages will change, what is held back, and why. Only run the live upgrade AFTER the user has seen the list. If asked to "update packages", that means: (1) apt update, (2) apt upgrade --dry-run → show user, (3) wait for confirmation, (4) apt upgrade. Never skip steps 2-3.
 - Surface key findings clearly: when a tool result contains something important (an error, an unexpected value, a mismatch), state it explicitly in your visible response. Do not bury it in a long output block. The user should not have to read raw tool output to find the critical fact.
 - Validation is mandatory: after any script that modifies files or data, you MUST run a verification step before declaring done. The verification must confirm: items processed, items changed, items with errors, and a short sample of changes. Never say "done" without running this check.
 - Script output contract: every processing or transformation script you write must print a structured summary as its last line: {"processed": N, "changed": N, "errors": N, "sample": [...]}. This makes validation easy to parse without reading output files into context.
@@ -1302,6 +1359,14 @@ ${memoryGuidelines}
 - Scope: write code files only. Do NOT run migrations, pip install, or start servers — tell the user the exact commands to run.
 - After completing a phase or major step: give a SHORT summary (3-5 bullets max), then stop and ask "Continue?" — do NOT automatically start the next phase unless the user explicitly said to do all phases.
 - Never invent follow-on work. If the user asked to "review X for duplicates", do that and stop. Do not add phases for "what if there are 5-copy clusters" unless the user asks.
+
+## Inventory questions — read the inventory, don't run SSH
+When a question asks about "how many services", "which hosts", "what install method", or any other property of the infrastructure — check hosts_inventory.json (or any inventory file in the workspace) FIRST. These questions are about the declared configuration, not the live state of the servers. SSH is for verifying live state; the inventory is for answering questions about what's configured.
+
+Wrong: SSHing into hosts and running 'systemctl list-units | wc -l' to answer "how many services use systemd?"
+Right: Reading hosts_inventory.json and counting entries with '"install_method": "systemd"'.
+
+Never use ~/.ssh/config as a source of host inventory — it is a connection shortcut file, not an authoritative list of managed hosts. The workspace inventory file is always the canonical source.
 
 ## Environment awareness — never rediscover what you already know
 Before running ANY command to discover the environment (OS version, available tools, SSH hosts, IPs, Python/Node versions, installed packages):
@@ -2956,6 +3021,33 @@ export class Agent {
         this.currentModel = model; // Store current model for accurate context calculations
         this._currentTaskMessage = userMessage; // Capture task for use in tool interception
 
+        // Conflicting requirements detection: if the user's message contains patterns that
+        // suggest two requirements that cannot both be satisfied without a trade-off,
+        // annotate the message with a conflict note so the agent surfaces it before acting.
+        let conflictNote = '';
+        {
+            const conflictPairs: Array<[RegExp, RegExp, string]> = [
+                [
+                    /\bnot\s+null\b/i,
+                    /\bbackward.?compat|don'?t\s+break\s+existing|existing\s+(?:db|database|callers?|code)\b/i,
+                    'Adding a NOT NULL column without a DEFAULT breaks existing databases on ALTER TABLE — existing rows have no value for the new column. Before editing: tell the user this conflict, propose a resolution (e.g. use DEFAULT \'unknown\', or drop NOT NULL), and ask which they prefer.'
+                ],
+                [
+                    /\badd\s+(?:a\s+)?(?:required|mandatory)\s+(?:field|column|parameter)\b/i,
+                    /\bdon'?t\s+break|existing\s+callers?\b/i,
+                    'A required field/parameter will break all existing callers — these requirements conflict.'
+                ],
+            ];
+            for (const [patA, patB, note] of conflictPairs) {
+                if (patA.test(userMessage) && patB.test(userMessage)) {
+                    logInfo(`[conflict-detect] Conflicting requirements detected in task message`);
+                    conflictNote = `\n\n[CONFLICTING REQUIREMENTS] ${note}\n\nBefore editing any files: tell the user about this conflict in one sentence, propose your resolution (e.g. use DEFAULT NULL, or add a migration), and ask if that is acceptable. Do not edit until confirmed.`;
+                    break;
+                }
+            }
+        }
+
+
         // Pre-classify model: known text-mode families skip detection entirely (no toast, no wasted turn)
         if (this.toolMode === 'native') {
             if (Agent.isKnownTextModeModel(model)) {
@@ -2980,6 +3072,38 @@ export class Agent {
         // Detect if user message is a short confirmation ("yes", "go ahead", etc.)
         // and inject an action nudge so the model starts calling tools immediately
         const isConfirmation = /^\s*(yes|yeah|yep|yup|sure|ok|okay|go\s*ahead|do\s*it|proceed|confirmed|make\s*it\s*happen|run\s*(them|those|it)|execute\s*(them|those|that))\s*[.!]?\s*$/i.test(userMessage);
+
+        // ── Vague-scope injection ──────────────────────────────────────────────────
+        // When the user's message is a broad, unscoped improvement request (no specific
+        // function or file named), inject a scope-first note so the agent searches and
+        // reports what already exists before acting. This prevents the agent from using
+        // a stale plan file as a standing order.
+        const isVagueScope = /\b(add\s+some|add\s+(?:a\s+bit\s+of\s+)?validation|improve|make\s+(?:it\s+)?better|clean\s+up|refactor\s+(?:it|things)|can\s+you\s+add)\b/i.test(userMessage)
+            && !/\b(function|method|file|class|def |import )\b/i.test(userMessage)
+            && !userMessage.includes('(')   // no specific call-site mentioned
+            && !filePathInMsg(userMessage); // no specific file path mentioned
+
+        function filePathInMsg(msg: string): boolean {
+            return /[\w./\\-]+\.\w{2,10}\b/.test(msg);
+        }
+
+        let scopeNote = '';
+        if (isVagueScope) {
+            scopeNote = `\n\n[SCOPE FIRST] The request is broad with no specific function or file named. Before making any changes:\n1. Search the codebase to find what already exists (grep for relevant functions, list the files).\n2. Report what you found — including anything that already addresses the request.\n3. Ask ONE specific scoping question based on what you found (e.g. "update_status already validates status values — did you mean validation for create_task specifically?").\nDo NOT consult plan files as standing orders — they record past work, not current authorization. Do NOT make any edits until the user has confirmed the scope.`;
+            logInfo(`[vague-scope] Injected SCOPE FIRST note for task: ${userMessage.slice(0, 80)}`);
+        }
+
+        // ── Diagnosis-only injection ───────────────────────────────────────────────
+        // When the user asks "what's wrong" / "why is this broken" / "take a look and
+        // tell me", the deliverable is the diagnosis — not a fix. Inject this upfront so
+        // the instruction is anchored at the start of the conversation and persists through
+        // all subsequent tool calls, not just on the pytest result.
+        const isDiagnosisTask = /\b(what(?:'?s|\s+is)\s+(?:going\s+on|wrong|broken|the\s+(?:issue|problem|error|bug))|why\s+(?:is|are|does|do)\s+(?:this|the|it)|take\s+a\s+look\s+and\s+tell\s+me|seem(?:s)?\s+broken|look(?:s)?\s+(?:broken|wrong|off)|can\s+you\s+(?:take\s+a\s+look|investigate|diagnose|check\s+(?:it|this|what)))\b/i.test(userMessage);
+        if (isDiagnosisTask) {
+            scopeNote += `\n\n[DIAGNOSIS TASK] Your job is to investigate and explain — not to fix. After you have identified the root cause:\n- State what is broken and why, clearly\n- STOP. Do not modify any files.\n- Do not offer to fix it ("should I fix this?" or "want me to update X?" are both wrong)\n- Do not ask if you should proceed with a repair\nThe user asked for an explanation. If they want a fix, they will ask.`;
+            logInfo(`[diagnosis-task] Injected diagnosis-only note for: ${userMessage.slice(0, 80)}`);
+        }
+
         if (isConfirmation && this.toolMode === 'text') {
             this.history.push({ role: 'user', content: `${userMessage}\n\n[SYSTEM: The user confirmed. Start calling tools NOW to execute the plan. Call run_command or edit_file immediately. Do NOT repeat the plan as code blocks — CALL THE TOOLS.]` });
         } else {
@@ -2988,9 +3112,9 @@ export class Agent {
                 || userMessage.match(/\b([\w./\\-]+\.(?:md|txt|py|ts|js|json|yaml|yml|toml|cfg|ini|html|css|sql|sh|bash|go|rs|java|rb|php|c|cpp|h))\b/i);
             if (filePathMatch && this.toolMode === 'text') {
                 const filePath = filePathMatch[1].replace(/\\/g, '/');
-                this.history.push({ role: 'user', content: `${userMessage}\n\n[SYSTEM: The user mentioned file "${filePath}". Use shell_read with command "cat ${filePath}" to read it immediately. Do NOT list the directory.]` });
+                this.history.push({ role: 'user', content: `${userMessage}\n\n[SYSTEM: The user mentioned file "${filePath}". Use shell_read with command "cat ${filePath}" to read it immediately. Do NOT list the directory.]${conflictNote}${scopeNote}` });
             } else {
-                this.history.push({ role: 'user', content: userMessage });
+                this.history.push({ role: 'user', content: userMessage + conflictNote + scopeNote });
             }
         }
         this.userTurnCount++;
@@ -3106,7 +3230,14 @@ export class Agent {
         // inject a preflight instruction so the model's FIRST action is to check where the
         // target runs — not to explore models, docs, or SQL files.
         const isDeployRunTask = /\b(apply|run|execute|deploy|migrate|upgrade|start|restart|reload|push)\b/i.test(userMessage)
-            && !/\b(add|write|create|implement|build|fix|update|modify|refactor)\b/i.test(userMessage);
+            && !/\b(add|write|create|implement|build|fix|update|modify|refactor)\b/i.test(userMessage)
+            // Exclude "run <specific script>" — the script itself tells us where to run it
+            && !/\brun\s+[\w./\\-]+\.py\b/i.test(userMessage)
+            && !/\brun\s+(?:this|the)\s+script\b/i.test(userMessage)
+            // Exclude "show me the output" style requests — user already knows what to run
+            && !/\bshow\s+(?:me\s+)?(?:the\s+)?output\b/i.test(userMessage)
+            // Exclude audit/check tasks — these are read-only diagnostic runs, not deploys
+            && !/\baudit\b/i.test(userMessage);
         if (isDeployRunTask) {
             // Only inject if this isn't already a follow-up to an environment answer
             const recentHistory = this.history.slice(-4);
@@ -4705,6 +4836,32 @@ Do NOT assume you have no memory — check first.`;
                 break;
             }
 
+            // ── Think-leak rescue (pre-streamEnd) ────────────────────────────────
+            // gemma4 buries questions inside result.thinking, leaving result.content empty.
+            // Rescue must fire BEFORE streamEnd so we can inject streamStart+token+streamEnd
+            // as a self-contained visible bubble. After streamEnd the previous bubble closes.
+            {
+                const rawDisplay = (isTextMode ? stripToolBlocks(result.content) : result.content
+                    .replace(/<think>[\s\S]*?<\/think>/g, '')
+                    .replace(/<think>[\s\S]*/g, '')
+                    .trim()) || '';
+                if (!rawDisplay.trim() && !result.toolCalls?.length && result.thinking) {
+                    const paragraphs = result.thinking.split(/\n{2,}/).map((p: string) => p.trim()).filter(Boolean);
+                    const lastPara = paragraphs[paragraphs.length - 1] ?? '';
+                    const secondLast = paragraphs[paragraphs.length - 2] ?? '';
+                    const questionPara = [lastPara, secondLast].find((p: string) =>
+                        p.includes('?') || /would you|did you|shall i|do you want|are you looking/i.test(p)
+                    );
+                    if (questionPara && questionPara.length > 20 && questionPara.length < 600) {
+                        logInfo(`[agent] Think-leak rescue: surfacing question from thinking as visible bubble`);
+                        post({ type: 'streamEnd' });   // close the thinking-only bubble
+                        post({ type: 'streamStart' });  // open a new clean bubble
+                        post({ type: 'token', text: questionPara });
+                        // streamEnd for this new bubble falls through to the one below
+                    }
+                }
+            }
+
             post({ type: 'streamEnd' });
 
             // Store logprob confidence for use in tool handlers (e.g. edit_file warning)
@@ -4870,6 +5027,27 @@ Do NOT assume you have no memory — check first.`;
                     .replace(/<think>[\s\S]*?<\/think>/g, '')
                     .replace(/<think>[\s\S]*/g, '')
                     .trim();
+                // Thinking-loop detection: model produced a very long thinking block
+                // but oscillated without resolving to a tool call or meaningful output.
+                // Signature: no tool calls, thinking content > 1500 chars, visible content
+                // is mostly "Wait/Actually" oscillation (repeated short phrases).
+                const thinkingLen = (result.thinking ?? '').length;
+                const isThinkingLoop = !toolCalls.length
+                    && thinkingLen > 1500
+                    && this.autoRetryCount < this.MAX_AUTO_RETRIES
+                    && (/(?:wait|actually)[,.]?\s+i.ll\s+just/gi.exec(result.thinking ?? '') !== null
+                        || (result.thinking ?? '').split(/wait,?\s+i.ll/gi).length > 3);
+                if (isThinkingLoop) {
+                    this.autoRetryCount++;
+                    logWarn(`[agent] Thinking loop detected (thinking=${thinkingLen} chars, turn ${turn}) — injecting circuit-breaker`);
+                    this.history.pop();
+                    const lastThought = (result.thinking ?? '').trim().slice(-400);
+                    const loopBreaker = `[SYSTEM: You are stuck in a thinking loop — your last ${thinkingLen} characters of reasoning oscillated without acting. Stop reasoning. Your last thought was: "${lastThought}". Pick ONE action from that thought and execute it NOW with a single tool call. Do not think further — just call the tool.]`;
+                    this.history.push({ role: 'user', content: loopBreaker });
+                    post({ type: 'removeLastAssistant' });
+                    continue;
+                }
+
                 const isThinkStall = !toolCalls.length
                     && !strippedContent
                     && !displayContent.trim()
@@ -5007,14 +5185,17 @@ Do NOT assume you have no memory — check first.`;
                     // ── Reading-spiral guard: model keeps reading without acting ──
                     // Fire after 3 consecutive read-only turns. If edits have already
                     // happened this run, the model is in a diagnostic loop — stop it sooner.
-                    const readSpiralThreshold = this._editsThisRun > 0 ? 3 : 5;
+                    // SSH investigation tasks legitimately need more reads (finding config files
+                    // on remote systems requires several directory listings + file reads).
+                    const isSSHTask = /\bssh\b/i.test(this._currentTaskMessage) || this._toolCallsThisRun.some(tc => /\bssh\b/i.test(tc.path ?? ''));
+                    const readSpiralThreshold = this._editsThisRun > 0 ? 3 : (isSSHTask ? 8 : 5);
                     if (this._readOnlyTurnsSinceLastEdit >= readSpiralThreshold
                         && this.autoRetryCount < this.MAX_AUTO_RETRIES) {
                         this.autoRetryCount++;
                         logInfo(`[agent] Auto-retry ${this.autoRetryCount}: reading spiral — ${this._readOnlyTurnsSinceLastEdit} read-only turns (edits=${this._editsThisRun})`);
                         this._readOnlyTurnsSinceLastEdit = 0;
                         this.history.pop();
-                        this.history.push({ role: 'user', content: `[SYSTEM: You have made ${this._readOnlyTurnsSinceLastEdit + readSpiralThreshold} consecutive read-only tool calls without making a change. Stop gathering information. Either act NOW (call edit_file or run_command to make the change) or give the user a clear summary of what you found and what the next step is — then stop.]` });
+                        this.history.push({ role: 'user', content: `[SYSTEM ALERT — DO NOT SEARCH FOR THIS MESSAGE]\nYou have been reading files for ${readSpiralThreshold}+ turns without making any changes. This is a loop.\n\nRequired: choose ONE of these two actions right now:\n(A) Call edit_file or run_command to make the change you have been preparing.\n(B) Write a plain-text summary for the user of what you found and what is blocking you — then stop calling tools.\n\nDo NOT read any more files. Do NOT search the codebase. Act or report.` });
                         post({ type: 'removeLastAssistant' });
                         continue;
                     }
@@ -6640,6 +6821,19 @@ Do NOT assume you have no memory — check first.`;
                     if (toolResultForHistory.length > 6000) {
                         toolResultForHistory = toolResultForHistory.slice(0, 6000) + `\n[...result truncated at 6000 chars — re-run the command if you need more]`;
                     }
+
+                    // Progress nudge: after every 3rd tool call in a multi-step task,
+                    // remind the model to emit a visible status line before continuing.
+                    // Only fires on read/SSH tasks (not edits) to avoid interrupting focused work.
+                    const isReadOrSshTool = ['shell_read', 'run_command'].includes(name);
+                    const callCount = this._toolCallsThisRun.length;
+                    const isMultiStepTask = callCount >= 3;
+                    const isProgressCheckpoint = callCount % 3 === 0;
+                    const hasProgressSignal = toolResultForHistory.includes('[PROGRESS]');
+                    if (isReadOrSshTool && isMultiStepTask && isProgressCheckpoint && !hasProgressSignal) {
+                        toolResultForHistory += `\n\n[PROGRESS CHECK] You have now made ${callCount} tool calls. Before calling the next tool, write 1-2 sentences for the user summarizing what you have found so far. The user cannot see tool outputs — they are waiting for your update.`;
+                    }
+
                     this.history.push({ role: 'tool', content: toolResultForHistory });
                 }
             }
@@ -7319,6 +7513,42 @@ If the code looks correct, respond with exactly: OK`;
                 }
 
                 const editResult = `Edited: ${rel} — ${oldString.split('\n').length} line(s) replaced with ${newString.split('\n').length} line(s)${logprobWarning}`;
+
+                // Shared-function caller awareness: if a shared utility function was modified,
+                // remind the agent to surface the blast radius to the user.
+                const sharedFnPatterns = [
+                    /def\s+get_connection\b/,
+                    /def\s+get_db\b/,
+                    /def\s+connect\b/,
+                    /def\s+create_engine\b/,
+                    /function\s+getConnection\b/,
+                    /function\s+getDb\b/,
+                    /export\s+(default\s+)?function\s+\w*[Cc]onnect/,
+                ];
+                const editedSharedFn = sharedFnPatterns.some(p => p.test(newString) || p.test(oldString));
+                if (editedSharedFn) {
+                    const callerNudge = `\n\n[IMPACT] You modified a shared utility function. Before declaring done, tell the user which other files call this function and how they are affected by this change.`;
+                    return `${editResult}${callerNudge}`;
+                }
+
+                // Signature-change caller awareness: if a Python/JS function's parameter list changed
+                // (a required parameter was added or removed), all callers will break.
+                // Detect by comparing the def/function line in old vs new.
+                const pyFnOld = oldString.match(/def\s+(\w+)\s*\(([^)]*)\)/);
+                const pyFnNew = newString.match(/def\s+(\w+)\s*\(([^)]*)\)/);
+                if (pyFnOld && pyFnNew && pyFnOld[1] === pyFnNew[1] && pyFnOld[2] !== pyFnNew[2]) {
+                    // Count required params (no default) in old vs new
+                    const requiredParams = (paramStr: string) =>
+                        paramStr.split(',').map(p => p.trim()).filter(p => p && p !== 'self' && !p.includes('=') && !p.startsWith('*') && !p.startsWith('**'));
+                    const oldRequired = requiredParams(pyFnOld[2]);
+                    const newRequired = requiredParams(pyFnNew[2]);
+                    const addedRequired = newRequired.filter(p => !oldRequired.includes(p));
+                    if (addedRequired.length > 0) {
+                        const sigNudge = `\n\n[IMPACT] You added required parameter(s) [${addedRequired.join(', ')}] to \`${pyFnNew[1]}\`. Every existing caller will now raise TypeError.\n\nRequired next step — do this before any further edits:\n1. Run: grep -rn "${pyFnNew[1]}(" . (excluding the file you just edited)\n2. List the results for the user in your next message\n3. Ask the user whether they want you to update the callers\n\nDo NOT silently update callers. Report the impact first and wait for confirmation.`;
+                        return `${editResult}${sigNudge}`;
+                    }
+                }
+
                 // Auto-check: use py_compile for Python (Pylance diagnostics are stale/unreliable post-edit),
                 // use VSCode diagnostics for TypeScript/JS only
                 const isPyFile = path.extname(full).toLowerCase() === '.py';
@@ -7475,6 +7705,7 @@ If the code looks correct, respond with exactly: OK`;
                 const full = this.safePath(root, rel);
                 try {
                     const originalContent = fs.existsSync(full) ? fs.readFileSync(full, 'utf8') : '';
+
 
                     // Hard-reject write_file on large existing files — use edit_file instead
                     // Only block large rewrites for Python source files — data files (JSON, YAML, MD) are safe to rewrite
@@ -7679,6 +7910,25 @@ if errors:
                     this._guardEvents.push({ type: 'syntax-error', reason: syntaxErr3.slice(0, 120), file: rel2 });
                     return `${editResult3}\n\n⚠ Syntax error detected after edit:\n${syntaxErr3}\n\nFix this by calling edit_file again with corrected code.`;
                 }
+                // Signature-change caller awareness (same logic as edit_file handler):
+                // if a required parameter was added to a Python function, all callers will break.
+                {
+                    const oldLines2 = original2.split('\n').slice(startLine - 1, endLine).join('\n');
+                    const pyFnOld2 = oldLines2.match(/def\s+(\w+)\s*\(([^)]*)\)/);
+                    const pyFnNew2 = newContent.match(/def\s+(\w+)\s*\(([^)]*)\)/);
+                    if (pyFnOld2 && pyFnNew2 && pyFnOld2[1] === pyFnNew2[1] && pyFnOld2[2] !== pyFnNew2[2]) {
+                        const requiredParams2 = (paramStr: string) =>
+                            paramStr.split(',').map(p => p.trim()).filter(p => p && p !== 'self' && !p.includes('=') && !p.startsWith('*') && !p.startsWith('**'));
+                        const oldRequired2 = requiredParams2(pyFnOld2[2]);
+                        const newRequired2 = requiredParams2(pyFnNew2[2]);
+                        const addedRequired2 = newRequired2.filter(p => !oldRequired2.includes(p));
+                        if (addedRequired2.length > 0) {
+                            const sigNudge2 = `\n\n[IMPACT] You added required parameter(s) [${addedRequired2.join(', ')}] to \`${pyFnNew2[1]}\`. Every existing caller will now raise TypeError.\n\nRequired next step — do this before any further edits:\n1. Run: grep -rn "${pyFnNew2[1]}(" . (excluding the file you just edited)\n2. List the results for the user in your next message\n3. Ask the user whether they want you to update the callers\n\nDo NOT silently update callers. Report the impact first and wait for confirmation.`;
+                            return `${editResult3}${sigNudge2}`;
+                        }
+                    }
+                }
+
                 if (this.shouldRunTests()) {
                     const testFile2 = this.findTestFile(full2);
                     if (testFile2) {
@@ -7710,6 +7960,56 @@ if errors:
             case 'shell_read': {
                 let cmd = String(args.command ?? '');
                 if (!cmd) { throw new Error('command is required'); }
+
+                // ── PowerShell-in-bash guard ───────────────────────────────────
+                // When Git Bash is the shell, PowerShell cmdlets fail with "command not found".
+                // The model sometimes generates Get-ChildItem / Where-Object / Select-Object
+                // for local file searches even when bash is active. Detect this and convert
+                // to bash equivalents before execution — block with an actionable message
+                // so the model knows exactly what to use instead.
+                {
+                    const winBashForPS = process.platform === 'win32' ? detectShellEnvironment().bashPath : '';
+                    const isSshCmd = /^\s*(ssh|scp|sftp)\b/i.test(cmd);
+                    if (winBashForPS && !isSshCmd && /\b(Get-ChildItem|Get-Content|Set-Content|Select-Object|Select-String|Where-Object|ForEach-Object|New-Item|Remove-Item|Write-Host|Out-File|Add-Content)\b/i.test(cmd)) {
+                        logWarn(`[shell_read] Blocked PowerShell cmdlet in bash context: ${cmd.slice(0, 80)}`);
+                        // Try to auto-convert common patterns:
+                        // Get-ChildItem -Path X -Recurse -Filter Y → find X -name Y
+                        // Get-ChildItem -Path X -Recurse -Filter Y | Select-String Z → grep -rl Z X --include=Y
+                        let converted: string | null = null;
+                        const gciPathMatch = cmd.match(/Get-ChildItem\s+-Path\s+'([^']+)'(?:\s+-Recurse)?(?:\s+-Filter\s+'([^']+)')?/i);
+                        const ssPatternMatch = cmd.match(/Select-String\s+(?:-Pattern\s+)?'([^']+)'/i);
+                        if (gciPathMatch) {
+                            const searchPath = gciPathMatch[1].replace(/\\/g, '/');
+                            const filterGlob = gciPathMatch[2] ?? '*';
+                            if (ssPatternMatch) {
+                                // GCI | Select-String → grep
+                                converted = `grep -rl '${ssPatternMatch[1]}' '${searchPath}' --include='${filterGlob}' 2>/dev/null | head -20`;
+                            } else {
+                                // GCI alone → find
+                                const findName = filterGlob === '*' ? '' : ` -name '${filterGlob}'`;
+                                converted = `find '${searchPath}'${findName} -not -path '*/__pycache__/*' 2>/dev/null | head -40`;
+                            }
+                        } else {
+                            // Get-Content → cat (handles both single and double quotes)
+                            const gcMatch = cmd.match(/Get-Content\s+['"]([^'"]+)['"]/i);
+                            if (gcMatch) {
+                                converted = `cat '${gcMatch[1].replace(/\\/g, '/')}'`;
+                            }
+                            // Get-Content X | Select-String -Pattern Y → grep Y X
+                            const gcSsMatch = cmd.match(/Get-Content\s+['"]([^'"]+)['"]\s*\|\s*Select-String\s+(?:-Pattern\s+)?['"]([^'"]+)['"]/i);
+                            if (gcSsMatch) {
+                                converted = `grep -n '${gcSsMatch[2]}' '${gcSsMatch[1].replace(/\\/g, '/')}' 2>/dev/null`;
+                            }
+                        }
+
+                        if (converted) {
+                            logInfo(`[shell_read] Auto-converted PowerShell to bash: ${converted}`);
+                            cmd = converted;
+                        } else {
+                            return `[BLOCKED: PowerShell cmdlet in bash shell]\n\nThe command uses PowerShell cmdlets (Get-ChildItem, Where-Object, etc.) but the shell is Git Bash — these will fail.\n\nUse bash equivalents instead:\n- Find files:  find '${this.workspaceRoot.replace(/\\/g, '/')}' -name '*pattern*' -not -path '*/__pycache__/*'\n- Search text: grep -rn 'pattern' '${this.workspaceRoot.replace(/\\/g, '/')}' --include='*.py'\n- Read file:   cat '/full/path/file'\n- List dir:    ls -la '/path/'\n\nRewrite the command using bash syntax and retry.`;
+                        }
+                    }
+                }
 
                 // Strip markdown bold/italic markers that the model may have accidentally
                 // injected into paths (e.g. **source** → source). These come from the model
@@ -7752,7 +8052,9 @@ if errors:
                 // Only applies when -Recurse appears AFTER the pipe (i.e., as an argument to Select-String).
                 // Valid: "Get-ChildItem -Recurse | Select-String" — -Recurse belongs to Get-ChildItem, leave it alone.
                 // Invalid: "Select-String -Path '...' -Recurse -Pattern '...'" — rewrite to GCI | SS form.
-                {
+                // Only apply this fix when actually routing to PowerShell (not Git Bash).
+                const _winBashForSSCheck = process.platform === 'win32' ? detectShellEnvironment().bashPath : '';
+                if (!_winBashForSSCheck) {
                     const pipeIdx = cmd.indexOf('|');
                     const afterPipe = pipeIdx >= 0 ? cmd.slice(pipeIdx) : '';
                     const selectStringIsFirstCmd = /^\s*Select-String\b/i.test(cmd);
@@ -7821,7 +8123,10 @@ if errors:
                 // any real file — extract the best single keyword instead.
                 // Skip if command is an SSH/SCP invocation — grep inside the quoted remote command
                 // is running on the remote Linux host and must not be rewritten.
-                if (process.platform === 'win32' && /\bgrep\b/i.test(cmd) && !/^\s*(ssh|scp|sftp)\b/i.test(cmd)) {
+                // Skip if Git Bash is available (winBashPath set) — in that case grep runs natively
+                // through bash and must NOT be converted to PowerShell cmdlets.
+                const _winBashForGrepCheck = process.platform === 'win32' ? detectShellEnvironment().bashPath : '';
+                if (process.platform === 'win32' && !_winBashForGrepCheck && /\bgrep\b/i.test(cmd) && !/^\s*(ssh|scp|sftp)\b/i.test(cmd)) {
                     const grepPatternMatch = cmd.match(/grep\s+(?:-[\w]+\s+)*["']([^"']+)["']/i);
                     if (grepPatternMatch) {
                         const rawPattern = grepPatternMatch[1];
@@ -7871,6 +8176,63 @@ if errors:
                 }
 
                 const shellResult = await this.runShellRead(cmd, root, _toolId);
+
+                // ── Re-read nudge: remind agent to use already-known content ──
+                // When the agent reads a file it already read this session, inject
+                // a nudge so it knows the content was already available in context.
+                // This targets the multi-turn context-reuse failure mode where the
+                // agent re-reads files to "confirm" facts it already established.
+                {
+                    // Extract canonical file path from common read patterns:
+                    // cat path, open('path'), python3 -c "...open('path')..."
+                    const filePathMatch = cmd.match(
+                        /\bcat\s+['"]?([^\s'"]+\.\w+)|open\(['"]([^'"]+\.\w+)['"]\)/
+                    );
+                    const readPath = filePathMatch ? (filePathMatch[1] ?? filePathMatch[2] ?? '').replace(/\\/g, '/') : '';
+                    if (readPath) {
+                        const normalizedPath = readPath.toLowerCase();
+                        if (this._filesReadThisSession.has(normalizedPath)) {
+                            // Already read — append a nudge to use the prior content
+                            const reReadNudge = `\n\n[ALREADY READ] You read this file earlier in this session. The content is already in your context window — you do not need to read it again. Use the information you already have to proceed.`;
+                            return shellResult + reReadNudge;
+                        } else {
+                            this._filesReadThisSession.add(normalizedPath);
+                        }
+                    }
+                }
+
+                // ── JSON inventory read nudge ─────────────────────────────────
+                // When the model reads a JSON file (inventory, config, data), it tends to
+                // narrate the contents line-by-line in its thinking block to count or aggregate —
+                // this exhausts the thinking budget and produces a blank response.
+                // Instead, nudge it to run a Python one-liner that computes the answer directly.
+                const isJsonRead = /\.json\b/i.test(cmd) && /\bopen\b|\bcat\b|\bGet-Content\b/i.test(cmd);
+                if (isJsonRead && typeof shellResult === 'string' && shellResult.trim().startsWith('{')) {
+                    let jsonNudge = `\n\n[NEXT STEP] You now have the JSON content. Do NOT count or aggregate by narrating it line-by-line in your thinking — that will stall. Instead, run a Python one-liner to compute the answer:\n  shell_read → python3 -c "import json,sys; data=json.loads(open('<path>').read()); <your aggregation here>"\nThen state the result directly in your response.`;
+
+                    // Scan inventory JSON for anomalous install_method values.
+                    // Known-good values: binary, systemd, docker. Anything else is unexpected.
+                    if (/install_method/i.test(shellResult)) {
+                        try {
+                            const inventoryData = JSON.parse(shellResult.trim());
+                            const knownMethods = new Set(['binary', 'systemd', 'docker', 'apt', 'pip', 'npm', 'cargo', 'manual']);
+                            const anomalies: string[] = [];
+                            const hosts = inventoryData?.hosts ?? {};
+                            for (const [ip, hostCfg] of Object.entries(hosts as Record<string, any>)) {
+                                for (const svc of (hostCfg?.services ?? [])) {
+                                    if (svc.install_method && !knownMethods.has(svc.install_method)) {
+                                        anomalies.push(`${svc.name} on ${ip} uses install_method="${svc.install_method}" — not a recognized value`);
+                                    }
+                                }
+                            }
+                            if (anomalies.length > 0) {
+                                jsonNudge += `\n\n[ANOMALY DETECTED] The following services have unexpected install_method values that should be flagged to the user:\n${anomalies.map(a => `  ⚠️ ${a}`).join('\n')}\nMention these in your response even if the user only asked for counts.`;
+                            }
+                        } catch { /* not valid JSON — skip anomaly scan */ }
+                    }
+
+                    return shellResult + jsonNudge;
+                }
 
                 // ── Doc verification: when reading a .md file, extract verifiable
                 // claims and append grep commands the model should run to cross-check them.
@@ -8075,6 +8437,56 @@ if errors:
                     }
                 }
 
+                // Malformed SSH host guard: detect hex-like or otherwise garbled IP/hostname tokens
+                // e.g. "19ac8080-26" instead of "192.168.0.26" — a known model hallucination pattern.
+                // Valid SSH targets: hostname, IPv4 (N.N.N.N), or [user@]hostname patterns.
+                if (/^\s*(ssh|scp|sftp)\b/i.test(cmd)) {
+                    // Extract the host token: the word immediately after optional -flags / user@
+                    // ssh [-p N] [-i key] [user@]HOST [command]
+                    // We look for the first non-flag word that contains digits and hyphens/dots
+                    // but does NOT look like a valid IPv4 or well-formed hostname.
+                    const sshHostMatch = cmd.match(/^\s*(?:ssh|scp|sftp)\b\s+(?:-\w+\s+\S+\s+)*(?:\S+@)?([a-zA-Z0-9][a-zA-Z0-9.\-]*[a-zA-Z0-9])/i);
+                    if (sshHostMatch) {
+                        const host = sshHostMatch[1];
+                        // Valid IPv4: four octets 0-255 separated by dots
+                        const isValidIPv4 = /^(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)$/.test(host);
+                        // Looks IPv4-ish (has dots or is numeric) but failed the valid check
+                        const looksIPv4ish = /^\d/.test(host) && /[.\-]/.test(host) && !isValidIPv4;
+                        // Has hex chars + hyphens (e.g. 19ac8080-26) — hallucinated IP
+                        const looksHexGarbled = /^[0-9a-f]{4,}[0-9a-f-]*$/i.test(host) && /[a-f]/i.test(host) && host.includes('-');
+                        if (looksIPv4ish || looksHexGarbled) {
+                            logWarn(`[ssh-host-guard] Suspicious host token "${host}" in SSH command — likely garbled IP`);
+                            this._guardEvents.push({ type: 'scope-guard', reason: `garbled SSH host: ${host}`, file: '' });
+                            return `[BLOCKED: suspicious SSH host "${host}"]\n\nThis host token does not look like a valid IPv4 address or hostname. It may be a garbled IP address (e.g. hex characters mixed with hyphens).\n\nValid hosts from the inventory:\n  192.168.0.26 (Ubuntu Server - Primary)\n  192.168.0.29 (Ubuntu Server - Crack Server)\n\nCheck your hosts_inventory.json or the conversation history for the correct address, then retry with the correct IP.`;
+                        }
+                    }
+                }
+
+                // Pre-delete listing guard: if a command deletes files (rm, os.remove, Remove-Item, del)
+                // and no prior shell_read/find/glob listing of those files has occurred this session,
+                // block and require a list-first step. This enforces the blast-radius rule:
+                // always show the user what will be deleted before deleting it.
+                {
+                    const isDeleteCmd = /\b(rm|del|Remove-Item)\b/i.test(cmd) || /os\.(remove|unlink)\b/.test(cmd);
+                    const isWildcardDelete = isDeleteCmd && /\*\.\w+|\*\.bak|\*\.log|\*\.tmp/.test(cmd);
+                    // Multi-file: either a list of paths passed to os.remove, or rm with 2+ quoted file args
+                    const isMultiFileDelete = isDeleteCmd && !isWildcardDelete
+                        && (/\[os\.(remove|unlink)|for.*os\.(remove|unlink)|\bos\.(remove|unlink)[^)]+,[^)]+\)/.test(cmd)
+                            || (cmd.match(/(?:rm|del|Remove-Item)[^;|&]*\s+['"][^'"]+['"]/gi) ?? []).join('').split(/\s+['"]/).length > 2);
+                    if ((isWildcardDelete || isMultiFileDelete) && !this._autoApprovedTools.has('run_command')) {
+                        // Check if the agent already listed these files this session (via a find/glob/rglob/ls)
+                        const priorListingExists = this._toolCallsThisRun.some(tc =>
+                            /find|rglob|glob|listdir|iterdir|\bls\b/.test(tc.path ?? '')
+                        );
+                        if (!priorListingExists) {
+                            const deleteType = isWildcardDelete ? 'wildcard' : 'multi-file';
+                            logWarn(`[pre-delete-guard] ${deleteType} delete without prior listing: ${cmd.slice(0, 120)}`);
+                            this._guardEvents.push({ type: 'scope-guard', reason: `delete without listing: ${deleteType}`, file: '' });
+                            return `[LIST BEFORE DELETE]\n\nBefore deleting files, you must first list exactly what will be deleted and show the user.\n\nRequired steps:\n1. Run a find/glob command to list the matching files\n2. Show the list to the user\n3. Then delete them\n\nDo not skip the listing step.`;
+                        }
+                    }
+                }
+
                 // Dry-run guard: if a Python script is being executed directly (not with --dry-run or DRY_RUN)
                 // AND it contains move/delete/rename operations, block and require a dry-run pass first.
                 const pyExecMatch = cmd.match(/(?:python3?|py)\s+['"]?([^\s'"]+\.py)/i);
@@ -8094,6 +8506,21 @@ if errors:
                             return `[DRY-RUN REQUIRED] The script "${scriptPath2}" performs file moves/deletes but has no --dry-run mode.\n\nBefore running it for real:\n1. Add a DRY_RUN flag to the script that prints "Would move/delete: X" instead of acting\n2. Run with DRY_RUN=True to preview what it will do\n3. Show the output to the user\n4. Only run for real once the preview looks correct\n\nEdit the script to add the dry-run guard, then retry.`;
                         }
                     } catch { /* script not readable locally — skip guard (may be remote) */ }
+                }
+
+                // Apt upgrade dry-run guard: block "apt upgrade" / "apt-get upgrade" without --dry-run or -s (simulate).
+                // The agent should always run "apt upgrade --dry-run" (or "apt list --upgradable") first,
+                // show the user what will change, then ask before running the live upgrade.
+                // Exceptions: apt update (safe), apt install <pkg> (single targeted install), apt-get dist-upgrade
+                // when the user has already seen the dry-run output and explicitly approved.
+                {
+                    const aptUpgradeMatch = cmd.match(/\bapt(?:-get)?\s+(?:full-upgrade|upgrade)\b/i);
+                    const hasDryRunFlag = /--dry-run|-s\b|--simulate\b/i.test(cmd);
+                    if (aptUpgradeMatch && !hasDryRunFlag) {
+                        logWarn(`[apt-dry-run-guard] apt upgrade without --dry-run blocked: ${cmd.slice(0, 120)}`);
+                        this._guardEvents.push({ type: 'scope-guard', reason: `apt upgrade without dry-run`, file: '' });
+                        return `[DRY-RUN REQUIRED: apt upgrade]\n\nRunning "apt upgrade" without a preview is too destructive to allow without user review.\n\nFirst run the dry-run to show what will change:\n  sudo apt upgrade --dry-run\n  (or: sudo apt list --upgradable)\n\nShare the output with the user. If they approve, run the real upgrade. Do NOT run the live upgrade without showing the package list first.`;
+                    }
                 }
 
                 // ── Steelman check for irreversible bulk operations ───────────────
@@ -8155,6 +8582,84 @@ if errors:
                             anomalies.push(`⚠️ ${line.trim()} — investigate why this failed`);
                         }
                     }
+
+                    // ── Inventory cross-reference ─────────────────────────────
+                    // If this is a systemctl list-units output AND the command targeted a known host,
+                    // cross-check the running services against hosts_inventory.json to surface
+                    // services that are running but NOT documented in the inventory.
+                    const isServiceList = /systemctl\s+list-units/i.test(cmd) || /list-units/i.test(cmd);
+                    if (isServiceList) {
+                        // Determine which host was targeted from the ssh command
+                        const targetHostMatch = cmd.match(/ssh\s+(?:\S+@)?([\d.]+)/i);
+                        const targetHost = targetHostMatch ? targetHostMatch[1] : null;
+
+                        if (targetHost) {
+                            // Try to load hosts_inventory.json from any workspace root
+                            const inventorySearchPaths = [
+                                path.join(root, 'hosts_inventory.json'),
+                                path.join(root, 'server_infrastructure', 'patching', 'hosts_inventory.json'),
+                            ];
+                            // Also search one level up (agent may be in a subdirectory)
+                            const parentRoot = path.dirname(root);
+                            inventorySearchPaths.push(
+                                path.join(parentRoot, 'hosts_inventory.json'),
+                                path.join(parentRoot, 'server_infrastructure', 'patching', 'hosts_inventory.json'),
+                            );
+
+                            let inventoryData: any = null;
+                            for (const invPath of inventorySearchPaths) {
+                                try {
+                                    if (fs.existsSync(invPath)) {
+                                        inventoryData = JSON.parse(fs.readFileSync(invPath, 'utf8'));
+                                        break;
+                                    }
+                                } catch { /* ignore parse errors */ }
+                            }
+
+                            if (inventoryData?.hosts?.[targetHost]) {
+                                const hostEntry = inventoryData.hosts[targetHost];
+                                const inventoryServiceNames: string[] = (hostEntry.services ?? [])
+                                    .map((s: any) => String(s.name ?? '').toLowerCase());
+
+                                // Parse service names from systemctl output:
+                                // Lines look like: "  ollama.service  loaded active running  Ollama Service"
+                                const runningServices: string[] = [];
+                                for (const line of runResult.split('\n')) {
+                                    const svcMatch = line.match(/^\s*([a-zA-Z0-9_@.\-]+?)\.service\s+loaded\s+active\s+running/);
+                                    if (svcMatch) {
+                                        runningServices.push(svcMatch[1].toLowerCase());
+                                    }
+                                }
+
+                                // Noise services to ignore (OS-level, not user-managed)
+                                const ignoreServices = new Set([
+                                    'ssh', 'sshd', 'dbus', 'cron', 'rsyslog', 'ufw', 'networkd-dispatcher',
+                                    'systemd-logind', 'systemd-resolved', 'systemd-networkd', 'systemd-timesyncd',
+                                    'systemd-udevd', 'systemd-journald', 'user-runtime-dir', 'getty',
+                                    'network-manager', 'networkmanager', 'avahi-daemon', 'polkit',
+                                    'snapd', 'unattended-upgrades', 'packagekit', 'accounts-daemon',
+                                    'thermald', 'irqbalance', 'multipathd', 'nvidia-persistenced',
+                                    'containerd', 'docker', 'docker-containerd',
+                                    'udisks2', 'ModemManager', 'bluetooth', 'cups',
+                                ]);
+
+                                const undocumented = runningServices.filter(svc =>
+                                    !ignoreServices.has(svc) &&
+                                    !inventoryServiceNames.some(inv =>
+                                        inv === svc || svc.startsWith(inv) || inv.startsWith(svc)
+                                    )
+                                );
+
+                                if (undocumented.length > 0) {
+                                    anomalies.push(
+                                        `⚠️ Services running on ${targetHost} but NOT in hosts_inventory.json: ${undocumented.join(', ')}` +
+                                        ` — these may be new installs, manually started services, or the inventory is out of date. Ask the user if the inventory should be updated.`
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     const anomalyBlock = anomalies.length
                         ? `\nANOMALIES DETECTED — you must address each of these in your response:\n${anomalies.map(a => `  ${a}`).join('\n')}\n`
                         : `\nNo anomalies detected — confirm this looks correct in your response.\n`;
@@ -8885,9 +9390,12 @@ ${sampleHtml}
                 logInfo(`[run_command] Rewrote && → ; for PowerShell compatibility`);
             }
 
+            // Disable MSYS path conversion so Git Bash doesn't rewrite c:/foo/bar → c:\foo\bar
+            // inside Python string arguments. Without this, python3 -c "...path='c:/foo'..." breaks.
+            const bashEnv = { ...process.env, MSYS_NO_PATHCONV: '1', MSYS2_ARG_CONV_EXCL: '*' };
             const child = winBashPath
                 // Git Bash available: route everything through bash (handles ssh/scp/sftp/unix cmds)
-                ? spawn(winBashPath, ['-c', safeCmd], { cwd, env: { ...process.env }, windowsHide: true })
+                ? spawn(winBashPath, ['-c', safeCmd], { cwd, env: bashEnv, windowsHide: true })
                 : pyMatch
                     ? spawn(pyMatch[1], ['-c', pyMatch[2]], { cwd, env: { ...process.env } })
                     : (isSshCmd && !isSshChained)
@@ -8933,7 +9441,47 @@ ${sampleHtml}
                 const exitCode = code ?? 0;
                 post({ type: 'commandEnd', id: cmdId, exitCode });
                 logInfo(`Command exited ${exitCode}: ${cmd}`);
-                const result = output.slice(0, LIMIT) || `(exited with code ${exitCode})`;
+                let result = output.slice(0, LIMIT) || `(exited with code ${exitCode})`;
+
+                // Teach correct behavior when a script fails because a data/config file is missing.
+                // The agent's instinct is to recreate the file — redirect it to report a blocker instead.
+                // Catches: Python FileNotFoundError, or script's own "Inventory file not found" / "file not found" messages.
+                const missingFilePatterns = [
+                    /FileNotFoundError[^:]*:\s*(?:\[Errno \d+\]\s*)?[^'\n]*'?([^'\n]+\.(json|ya?ml|env|cfg|conf|ini|toml))/i,
+                    /Error:.*(?:file|inventory)[^\n]*not found[^\n]*\.(json|ya?ml|env|cfg|conf|ini|toml)/i,
+                    /(?:file|inventory)[^\n]*not found[^\n]*\.(json|ya?ml|env|cfg|conf|ini|toml)/i,
+                ];
+                const isMissingFileError = missingFilePatterns.some(p => p.test(result));
+                if (isMissingFileError) {
+                    const missingMatch = result.match(/['"]([^'"]+\.(json|ya?ml|env|cfg|conf|ini|toml))['"]/i)
+                        ?? result.match(/at\s+(\S+\.(json|ya?ml|env|cfg|conf|ini|toml))/i);
+                    const missingFile = missingMatch ? path.basename(missingMatch[1]) : 'a required data file';
+                    result += `\n\n[BLOCKER] The script cannot run because ${missingFile} is missing.\n\nDo NOT try to recreate, copy, or restore this file — its contents are not yours to guess.\n\nYour only correct action: Tell the user clearly: "${missingFile} is missing and the script cannot run. Do you know where it is or what happened to it?" Then stop. Do not search for .bak or .yaml equivalents. Do not convert other formats. Stop and ask.`;
+                }
+
+                // Pre-existing test failure nudge: when pytest runs and some tests fail or error,
+                // remind the agent that failures it didn't introduce are not its responsibility to fix.
+                const isPytestRun = /\bpytest\b/.test(cmd);
+                if (isPytestRun && exitCode !== 0 && /FAILED|ERROR/.test(result)) {
+                    const failedLines = result.split('\n').filter(l => /^(FAILED|ERROR)/.test(l));
+                    if (failedLines.length > 0) {
+                        if (this._editsThisRun > 0) {
+                            result += `\n\n[SCOPE NOTE] These failures or errors may be pre-existing and unrelated to your change. Before attempting any fix:\n1. Identify whether each failure existed before your edit (i.e. you did not touch that test or fixture)\n2. If yes — do NOT modify the test file, fixture, or any code to fix them. Report that they are pre-existing and stop.\n3. Only fix failures that your own edit directly caused.\n\nDo not modify test fixtures (the @pytest.fixture blocks) unless explicitly asked. Fixture code is infrastructure — changing it to make tests pass can mask real bugs.`;
+                        } else {
+                            result += `\n\n[DIAGNOSIS TASK] The user asked you to investigate failures, not fix them. Your job is to:\n1. Read the error output and trace the root cause\n2. Explain clearly what is broken and why\n3. STOP — do not modify any files, do not offer to fix the fixture, do not ask "should I fix it?"\nIf the user wants a fix, they will ask. Your deliverable is the diagnosis, not the repair.`;
+                        }
+                    }
+                }
+
+                // Progress signals for audit script completions
+                if (exitCode === 0 && /audit.*\.py/i.test(cmd)) {
+                    const activeCount = (result.match(/\bactive\b/g) ?? []).length;
+                    const inactiveCount = (result.match(/\binactive\b/g) ?? []).length;
+                    if (activeCount > 0 || inactiveCount > 0) {
+                        result += `\n\n[PROGRESS] Say to the user now: "Audit complete — ${activeCount} service${activeCount !== 1 ? 's' : ''} active${inactiveCount > 0 ? `, ${inactiveCount} inactive` : ''}."`;
+                    }
+                }
+
                 resolve(result);
             };
 
@@ -8998,10 +9546,12 @@ ${sampleHtml}
                 logInfo(`[shell_read] Rewrote && → ; for PowerShell compatibility`);
             }
 
+            // Disable MSYS path conversion for shell_read bash invocations too
+            const bashEnvR = { ...process.env, MSYS_NO_PATHCONV: '1', MSYS2_ARG_CONV_EXCL: '*' };
             let child;
             if (winBashPathR) {
                 // Git Bash available: route everything (including ssh/scp/sftp) through bash
-                child = spawn(winBashPathR, ['-c', cmdR], { cwd, env: { ...process.env }, windowsHide: true });
+                child = spawn(winBashPathR, ['-c', cmdR], { cwd, env: bashEnvR, windowsHide: true });
             } else if (pyMatchR) {
                 child = spawn(pyMatchR[1], ['-c', pyMatchR[2]], { cwd, env: { ...process.env } });
             } else if (isSshCmdR && !isSshChainedR) {
@@ -9053,6 +9603,69 @@ ${sampleHtml}
                 if (isFileSearch && looksEmpty) {
                     result += `\n(searched in: ${cwd})`;
                 }
+
+                // Teach correct behavior when a script fails because a data/config file is missing.
+                {
+                    const missingFilePatterns2 = [
+                        /FileNotFoundError[^:]*:\s*(?:\[Errno \d+\]\s*)?[^'\n]*'?([^'\n]+\.(json|ya?ml|env|cfg|conf|ini|toml))/i,
+                        /Error:.*(?:file|inventory)[^\n]*not found[^\n]*\.(json|ya?ml|env|cfg|conf|ini|toml)/i,
+                        /(?:file|inventory)[^\n]*not found[^\n]*\.(json|ya?ml|env|cfg|conf|ini|toml)/i,
+                    ];
+                    if (missingFilePatterns2.some(p => p.test(result))) {
+                        const missingMatch2 = result.match(/['"]([^'"]+\.(json|ya?ml|env|cfg|conf|ini|toml))['"]/i)
+                            ?? result.match(/at\s+(\S+\.(json|ya?ml|env|cfg|conf|ini|toml))/i);
+                        const missingFile2 = missingMatch2 ? path.basename(missingMatch2[1]) : 'a required data file';
+                        result += `\n\n[BLOCKER] The script cannot run because ${missingFile2} is missing.\n\nDo NOT try to recreate, copy, or restore this file. Tell the user: "${missingFile2} is missing and the script cannot run. Do you know where it is?" Then stop.`;
+                    }
+                }
+
+                // ── Progress signal injection for multi-step SSH tasks ──────────
+                // When a significant SSH result comes back, append a [PROGRESS] line.
+                // The system prompt instructs the model to echo this as visible output.
+                // This gives the user visibility without requiring the model to narrate.
+                // Pre-existing test failure note — same logic as run_command handler
+                const isPytestRunR = /\bpytest\b/.test(cmd);
+                if (isPytestRunR && (code ?? 0) !== 0 && /FAILED|ERROR/.test(result)) {
+                    const failedLinesR = result.split('\n').filter(l => /^(FAILED|ERROR)/.test(l));
+                    if (failedLinesR.length > 0) {
+                        const madeEdits = this._editsThisRun > 0;
+                        if (madeEdits) {
+                            result += `\n\n[SCOPE NOTE] These failures or errors may be pre-existing and unrelated to your change. Before attempting any fix:\n1. Identify whether each failure existed before your edit (i.e. you did not touch that test or fixture)\n2. If yes — do NOT modify the test file, fixture, or any code to fix them. Report that they are pre-existing and stop.\n3. Only fix failures that your own edit directly caused.\n\nDo not modify test fixtures (the @pytest.fixture blocks) unless explicitly asked. Fixture code is infrastructure — changing it to make tests pass can mask real bugs.`;
+                        } else {
+                            result += `\n\n[DIAGNOSIS TASK] The user asked you to investigate failures, not fix them. Your job is to:\n1. Read the error output and trace the root cause\n2. Explain clearly what is broken and why\n3. STOP — do not modify any files, do not offer to fix the fixture, do not ask "should I fix it?"\nIf the user wants a fix, they will ask. Your deliverable is the diagnosis, not the repair.`;
+                        }
+                    }
+                }
+
+                if (isSshCmdR && (code ?? 0) === 0) {
+                    // Extract all hosts from command (handles chained: ssh A echo ok && ssh B echo ok)
+                    const allHostMatches = [...cmdR.matchAll(/ssh\s+(?:\S+@)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/gi)];
+                    const host = allHostMatches[0]?.[1] ?? 'host';
+
+                    // SSH connectivity probe — single or multi-host echo ok
+                    if (/echo\s+ok\b/i.test(cmdR)) {
+                        const lines = result.trim().split('\n').filter(l => l.trim() === 'ok');
+                        if (allHostMatches.length > 1 && lines.length >= allHostMatches.length) {
+                            // Both hosts responded
+                            const hosts = allHostMatches.map(m => m[1]).join(' and ');
+                            result += `\n\n[PROGRESS] Say to the user now: "Both hosts reachable (${hosts}). Starting service checks."`;
+                        } else if (lines.length > 0) {
+                            result += `\n\n[PROGRESS] Say to the user now: "${host} is reachable."`;
+                        }
+                    }
+                    // Service status batch (systemctl is-active ...)
+                    else if (/systemctl\s+is-active\b/i.test(cmdR)) {
+                        const services = cmdR.match(/is-active\s+(.+?)(?:\s*&&|\s*;|$)/i)?.[1] ?? '';
+                        const svcList = services.trim().split(/\s+/).filter(Boolean);
+                        const statuses = result.trim().split('\n');
+                        const inactive = svcList.filter((s, i) => statuses[i] && statuses[i].trim() !== 'active');
+                        const summary = inactive.length === 0
+                            ? `all ${svcList.length} service${svcList.length !== 1 ? 's' : ''} active`
+                            : `${inactive.join(', ')} not active`;
+                        result += `\n\n[PROGRESS] Say to the user now: "${host}: ${summary}."`;
+                    }
+                }
+
                 resolve(result);
             };
 

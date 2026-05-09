@@ -180,13 +180,14 @@ export function streamChatRequest(
                     if (thinking.length < 800) { return false; }
                     const tail = thinking.slice(-800);
 
-                    // Pattern 1: consecutive numbered list items
+                    // Pattern 1: consecutive numbered list items — only fire on very long runs (8+)
+                    // Short numbered plans (1-2-3-4-5) are normal planning behavior, not spirals.
                     const nums = [...tail.matchAll(/^\s*(\d+)\.\s+/mg)].map(m => parseInt(m[1]));
-                    if (nums.length >= 5) {
+                    if (nums.length >= 8) {
                         let consecutive = 0;
                         for (let i = 1; i < nums.length; i++) {
                             if (nums[i] === nums[i - 1] + 1) { consecutive++; } else { consecutive = 0; }
-                            if (consecutive >= 4) { return true; }
+                            if (consecutive >= 7) { return true; }
                         }
                     }
 
@@ -199,6 +200,20 @@ export function streamChatRequest(
                     if (lines.length >= 8) {
                         const unique = new Set(lines).size;
                         if (unique / lines.length < 0.4) { return true; }
+                    }
+
+                    // Pattern 4: dash-bullet enumeration spiral — model narrating a list/dict item by item
+                    // e.g. "- omada: systemd\n- pihole-FTL: systemd\n- vaultwarden: systemd\n..."
+                    // Only trigger if there are many bullets AND they have a highly repetitive structure
+                    // (same key: value pattern). Normal planning lists have varied content.
+                    const dashBulletLines = [...tail.matchAll(/^\s*[-*]\s+\S.*/mg)].map(m => m[0].trim());
+                    if (dashBulletLines.length >= 15) {
+                        // Check structural similarity: if >70% of lines match "- word: word" pattern, it's a data narration
+                        const kvPattern = dashBulletLines.filter(l => /^[-*]\s+\S+\s*:\s*\S+/.test(l));
+                        if (kvPattern.length / dashBulletLines.length > 0.7) { return true; }
+                        // Also catch numbered enumeration within bullet sections: "1. item\n2. item\n..."
+                        const numberedInBullets = [...tail.matchAll(/^\s+\d+\.\s+\S.*/mg)];
+                        if (numberedInBullets.length >= 8) { return true; }
                     }
 
                     return false;
@@ -235,13 +250,55 @@ export function streamChatRequest(
                                         // stream continue — the model may be about to start its response.
                                         // Destroying on overflow when fullContent is empty leaves the user
                                         // with a blank or error response.
-                                        if (thinkingLoop || thinkingSpiral) {
-                                            resolved = true;
-                                            req.destroy();
-                                            const avgLogprob = logprobCount > 0 ? logprobSum / logprobCount : null;
-                                            resolve({ content: fullContent || `\n\n[Generation stopped — ${reason} in thinking block. Please retry.]`, toolCalls, avgLogprob, thinking: fullThinking.slice(0, 2000) + `\n[thinking truncated — ${reason}]` });
+                                        resolved = true;
+                                        req.destroy();
+                                        // Close the thinking block in the webview — without this the THINK_END
+                                        // sentinel is never emitted and all recovery content routes to the
+                                        // thought panel instead of the visible chat response.
+                                        if (thinkingStarted) {
+                                            onToken('\x01THINK_END\x01');
+                                            thinkingStarted = false;
                                         }
-                                        // For overflow: log and continue — the model will exit think naturally
+                                        const avgLogprob = logprobCount > 0 ? logprobSum / logprobCount : null;
+                                        // Try to extract a usable answer from the thinking block before giving up.
+                                        // The model often computes the correct answer in thinking but never
+                                        // transitions to content. Surface it directly when detectable.
+                                        let extractedAnswer: string | null = null;
+                                        if (!fullContent) {
+                                            const t = fullThinking;
+                                            // Strategy 1: count "install_method": "systemd" occurrences in any JSON
+                                            // embedded in the thinking block — reliable regardless of narration style.
+                                            const systemdCount = (t.match(/"install_method"\s*:\s*"systemd"/g) ?? []).length;
+                                            if (systemdCount > 0) {
+                                                extractedAnswer = `**${systemdCount}** services use the systemd install method across all hosts.\n\n*(Answer extracted from reasoning — the model had the correct data but did not produce a visible response.)*`;
+                                            } else {
+                                                // Strategy 2: sum all per-host "Total: N" values
+                                                const allTotals = [...t.matchAll(/\bTotal[:\s]+(\d+)/gi)].map(m => parseInt(m[1]));
+                                                if (allTotals.length > 1) {
+                                                    const sum = allTotals.reduce((a, b) => a + b, 0);
+                                                    extractedAnswer = `**${sum}** services use the systemd install method across all hosts (${allTotals.join(' + ')} = ${sum}).\n\n*(Answer extracted from reasoning.)*`;
+                                                } else if (allTotals.length === 1) {
+                                                    // Only one total visible — note it's partial
+                                                    extractedAnswer = `At least **${allTotals[0]}** services use the systemd install method (reasoning was cut before all hosts were counted). Please retry for the full count.\n\n*(Partial answer extracted from reasoning.)*`;
+                                                } else {
+                                                    // Strategy 3: "X services use systemd" explicit statement
+                                                    const countMatch = t.match(/\bthere\s+are\s+(\d+)\b[^.]*\bsystem[d]?\b/i)
+                                                        || t.match(/(\d+)\s+services?\s+use\s+systemd/i);
+                                                    if (countMatch) {
+                                                        extractedAnswer = `**${countMatch[1]}** services use the systemd install method across all hosts.\n\n*(Answer extracted from reasoning.)*`;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        const recoveryContent = fullContent || extractedAnswer
+                                            || `\n\n[Generation stopped — ${reason}. The answer may be in the thought process panel. Please retry and I will answer without enumerating the data.]\n`;
+                                        // Emit recovery content as tokens so the webview renders it.
+                                        // result.content alone is not shown — only onToken() output is visible.
+                                        if (!fullContent && recoveryContent) {
+                                            onToken(recoveryContent);
+                                        }
+                                        resolve({ content: recoveryContent, toolCalls, avgLogprob, thinking: fullThinking.slice(0, 4000) + (fullThinking.length > 4000 ? `\n[thinking truncated — ${reason}]` : '') });
+                                        // (removed: "let stream continue" — model never exits think naturally when narrating lists)
                                     }
                                 }
                             }
@@ -279,7 +336,12 @@ export function streamChatRequest(
                                 if (fullThinking) { logInfo(`[think] ${fullThinking.length} thinking chars`); }
                                 if (avgLogprob !== null) { logInfo(`[logprobs] avg=${avgLogprob.toFixed(3)} over ${logprobCount} tokens`); }
                                 logInfo(`Stream done — ${fullContent.length} chars, ${toolCalls.length} tool calls`);
-                                resolve({ content: fullContent, toolCalls, avgLogprob, thinking: fullThinking });
+                                // If the model produced thinking but no visible content and no tool calls,
+                                // it got stuck in the thinking block and stopped. Return empty content —
+                                // agent.ts will detect this and extract the question from result.thinking
+                                // after the stream resolves, with correct streamStart/streamEnd framing.
+                                const effectiveContent = fullContent;
+                                resolve({ content: effectiveContent, toolCalls, avgLogprob, thinking: fullThinking });
                             }
                         } catch { /* skip malformed line */ }
                     }

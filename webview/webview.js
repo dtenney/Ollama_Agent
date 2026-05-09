@@ -859,7 +859,10 @@ function extractModelSelfTalk(text) {
     let startIdx = 0;
     for (let i = 0; i < paragraphs.length; i++) {
         const para = paragraphs[i].trim();
-        if (selfTalkPrefixes.some(re => re.test(para))) { startIdx = i + 1; }
+        // Never classify as self-talk if: contains a question (user-facing), or is long
+        // (substantive findings report), or contains code backticks (technical output).
+        const isUserFacing = para.includes('?') || para.length > 160 || para.includes('`');
+        if (!isUserFacing && selfTalkPrefixes.some(re => re.test(para))) { startIdx = i + 1; }
         else { break; }
     }
     if (startIdx > 0) {
