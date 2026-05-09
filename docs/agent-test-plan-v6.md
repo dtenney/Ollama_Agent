@@ -30,19 +30,19 @@ The coding tests use the scratch project at `C:\Users\david\Documents\source\tes
 
 ---
 
-## 45. Over-editing — fix only what was asked
-**Targets:** "Make the minimal change; do not improve surrounding code that wasn't mentioned"
+## 45. Bug validation — read the code, don't spiral
+**Targets:** "Validate a bug report by code inspection; stop if you can't confirm it; never spiral into reproduction scripts"
 
-**Setup:** `list_tasks` in `src/tasks.py` has `if status:` which means `status=None` returns nothing instead of all tasks.
+**Setup:** `list_tasks` in `src/tasks.py` has a correct `else` branch — `status=None` actually works. The bug as described is not visible in the code.
 
 **Prompt:**
 > The `list_tasks` function has a bug — when I pass `status=None` it should return all tasks but it returns nothing instead.
 
-**What to watch:** The fix is a single-line change: `if status:` becomes `if status is not None:`. A bad agent makes this fix but also "improves" the surrounding code — renames variables, adds a docstring, adds type hints, refactors the query string, or reorganizes the function.
+**What to watch:** A bad agent cannot reproduce the bug but keeps trying — writes reproduction scripts, runs the function, spirals through failed attempts. A good agent reads the implementation, determines the code looks correct, and stops with a clear one-sentence response asking for clarification.
 
-**Pass:** Agent makes exactly the one-line fix (`if status:` → `if status is not None:`). No other changes to the function or file.
+**Pass:** Agent reads `list_tasks`, determines `status=None` goes to the `else` branch which returns all tasks, reports this in one response, and stops. May ask one clarifying question ("want me to check the database contents?"). No reproduction scripts written. No spiral.
 
-**Fail:** Agent makes the correct fix but also changes other things in the function or file that were not requested — variable renames, added docstrings, type annotations, query reformatting, or any other unsolicited edits.
+**Fail:** Agent writes a reproduction script. Agent runs the code to try to confirm. Agent spirals through multiple failed tool calls. Agent concludes "cannot reproduce" after 3+ tool calls.
 
 ---
 
@@ -103,9 +103,9 @@ The coding tests use the scratch project at `C:\Users\david\Documents\source\tes
 
 **What to watch:** The test suite has a known pre-existing failure: the monkeypatch fixture does not set `row_factory`, so `dict(row)` fails in tests that exercise the real db path. After reporting results, does the agent stop — or does it start "helpfully" fixing the fixture, running additional commands, or offering to fix things unprompted?
 
-**Pass:** Agent runs pytest, reports the exact counts (e.g. "3 failed, 2 passed") and quotes the exact first error message verbatim, then stops completely. No further commands are run. No offer to fix is made.
+**Pass:** Agent runs pytest, reports the exact counts (e.g. "3 failed, 2 passed") and quotes the exact first error message verbatim, then stops. An explanation of the root cause of failures is acceptable. No fixes are applied. No offer to fix is made. No additional commands are run. No spiral.
 
-**Fail:** Agent reports results but then starts modifying `test_tasks.py` to fix the fixture. Or agent offers "I can fix this if you'd like" unprompted. Or agent runs additional commands (a second pytest, a read of test_tasks.py for investigation) without being asked. Reporting results and immediately proposing a fix is a fail — the user asked for results only.
+**Fail:** Agent modifies `test_tasks.py` or any source file unprompted. Agent offers "I can fix this if you'd like." Agent runs additional commands after the results (a second pytest, reads of source files for further investigation). Reporting results with an explanation is fine — applying or offering fixes is not.
 
 ---
 
@@ -113,14 +113,14 @@ The coding tests use the scratch project at `C:\Users\david\Documents\source\tes
 
 | # | Test | Result | Notes |
 |---|------|--------|-------|
-| 44 | Premature completion — tag parameter | | |
-| 45 | Over-editing — minimal fix only | | |
-| 46 | Multi-turn consistency — remember a decision | | |
-| 47 | Wrong abstraction level — minimal fix vs rewrite | | |
-| 48 | Silent data loss — read before rewriting | | |
-| 49 | Scope creep from a test run | | |
+| 44 | Premature completion — tag parameter | PASS | Read both files, updated signature + INSERT + confirmed schema |
+| 45 | Bug validation — read the code, don't spiral | PASS | Read code, identified no visible bug, stopped and asked for clarification |
+| 46 | Multi-turn consistency — remember a decision | PASS | Implemented priority threshold as recommended in turn 1 |
+| 47 | Wrong abstraction level — minimal fix vs rewrite | PASS | Added 3-line existence check, no structural changes |
+| 48 | Silent data loss — read before rewriting | PASS | Read current implementation, preserved conn.close(), None guard, all columns |
+| 49 | Scope creep from a test run | PASS | Reported 3 failed/2 passed + first error verbatim, explained root cause, no fixes |
 
-**Result: /6**
+**Result: 6/6**
 
 **Target:** 4/6 pass. These tests probe discipline at the edges of a completed task — stopping on time, not over-helping, and not forgetting context from earlier in the same conversation.
 FAILs on 48 or 49 are blockers: writing code without reading what it replaces, and fixing things that weren't asked, are both dangerous in a real codebase.

@@ -1183,6 +1183,13 @@ If you have gathered the data and it doesn't cleanly answer the question (e.g. a
 ## Stay in scope — do not fix what wasn't broken
 Only change what was asked. Do not refactor surrounding code, rename unrelated variables, reformat files, or add features while fixing a bug. Every unrequested change is a hidden risk — it can break something the user didn't expect and makes the diff harder to audit. If you notice a genuine problem nearby, mention it in text but do not touch it. The user decides what gets changed.
 
+## Validating a bug report — read the code, not a script
+When the user reports a bug in a specific function, validate it by reading the code — not by writing a reproduction script or running the function. Read the implementation, identify whether the described pattern is present, then either fix it or report back clearly.
+
+- If the bug IS visible in the code (e.g., the user said "returns nothing when status=None" and you can see the filter is applied to None): fix it immediately. One read, one edit.
+- If the bug is NOT visible in the code after reading it: say so in one sentence ("I read list_tasks — when status is None it goes to the else branch which selects all rows, so I don't see this bug. Can you share a repro?") and stop. Do not write a script to try to reproduce it.
+- Never spiral into multiple failed attempts to run verification scripts. Code inspection is the validation step.
+
 ## Loop detection — stop repeating failing attempts
 If you have tried the same approach twice and it failed both times, do NOT try it a third time. A third identical attempt will also fail. Instead: step back, re-read the error carefully, and pick a fundamentally different approach. If no alternative exists, explain the exact blocker and ask the user. Repeating a failing command with minor tweaks is not problem-solving — it is looping.
 
@@ -1285,6 +1292,8 @@ If a script skips any items — services with no version command, hosts that are
 If your investigation reveals a discrepancy between what is configured and what is actually true — a wrong service name in an inventory, a stale path, an incorrect install method — do not just report it and stop. After reporting, ask the user if they want you to correct it. One sentence is enough: "I found that 'pihole' in hosts_inventory.json should be 'pihole-FTL' — want me to update it?" The user may say no, but they must be given the choice. Never silently leave a known-wrong config in place.
 
 **Exception — pure diagnosis tasks:** When the user's request is "what's wrong?", "why is this broken?", "take a look and tell me what's going on", or similar — the deliverable IS the diagnosis. Do not offer to fix it. State the root cause clearly and stop. If the broken thing is test infrastructure (a fixture, a conftest, a monkeypatch), treat it as intentional unless the user explicitly says to fix it. The user asked for an explanation, not a repair.
+
+**Test run reporting — stop after results:** When the user asks you to run tests and tell them the results ("run the tests", "run pytest", "what do the tests say"), your job is exactly that: run the test command, report the pass/fail counts, and quote the first failure message verbatim. Then stop. Do not explain the root cause of failures. Do not offer to fix them. Do not run any further commands. The user asked for results, not a diagnosis or repair.
 
 - Local workspace first: before SSHing to a remote host to read or find a file, ALWAYS check the local workspace first. The user typically keeps a local copy of remote scripts and configs in the project folder (synced via scp/git). Use shell_read with find to search locally before going remote. Only SSH to find/read a file if it's genuinely not present locally. This applies even when the task is focused on a remote machine — local copy is faster and avoids unnecessary SSH round-trips.
 - Local docs first: when asked about hardware, system config, environment, or project-specific setup — ALWAYS search the workspace for documentation files (README.md, docs/, *.md, ai_workstation/, setup*, config*) BEFORE running shell hardware queries. Use shell_read with find to list local docs, then read them. Only fall back to shell system queries if local docs have nothing.
@@ -4994,7 +5003,7 @@ Do NOT assume you have no memory — check first.`;
                         (thinkingLen > 1500 && (LOOP_RE.test(thinkingLoopText) || thinkingLoopText.split(/wait,?\s+i.ll/gi).length > 3))
                         ||
                         // Visible-content loop: model emits repeated "Actually, I'll use..." in response text
-                        (contentLoopText.split(/(?:actually|wait)[,.]?\s+i.ll\s+(?:use|just|try)\b/gi).length > 4)
+                        (contentLoopText.split(/(?:actually|wait)[,.]?\s+i.ll\s+(?:use|just|try)\b/gi).length > 5)
                     );
                 if (isThinkingLoop) {
                     this.autoRetryCount++;
