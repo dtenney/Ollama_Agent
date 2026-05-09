@@ -3818,26 +3818,15 @@ export class Agent {
                             const files = c.files.map(f => `\`${f.relPath}\``).join(', ');
                             return `  ${i + 1}. ${files} (similarity ${c.avgSimilarity.toFixed(2)})`;
                         }).join('\n');
-                        const _mergeEnv = detectShellEnvironment();
-                        const _mergeBash = _mergeEnv.os === 'windows' && !!_mergeEnv.bashPath;
                         const mergeInstruction = `The similarity analysis found ${allClusters.length} clusters in \`${relDir}\`:\n${clusterList}\n\n` +
                             `Work through them in order. For each cluster, merge all files into the LARGEST one (most lines), then delete the smaller ones.\n\n` +
                             `WORKFLOW per cluster:\n` +
-                            (_mergeBash
-                                ? `1. Get method lists: run shell_read with "grep -n '^\\s*\\(def \\|class \\)' <file>" on EACH file to see all method/class names.\n` +
-                                  `2. Identify unique methods in the smaller files that do NOT appear in the largest file.\n` +
-                                  `3. For each unique method: read its full implementation from the source file with "cat <file>". Copy the REAL code verbatim — do NOT summarize or abbreviate.\n` +
-                                  `4. Append unique methods to the END of the largest file using edit_file with force_overwrite=false, or use write_file to rewrite the merged file.\n` +
-                                  `   Do NOT use Add-Content, Get-Content, or any PowerShell cmdlets — they will fail in Git Bash.\n` +
-                                  `5. After the merge succeeds, delete the smaller file with run_command "rm <file>".\n` +
-                                  `6. Repeat for all files in the cluster until only the largest remains.\n\n`
-                                : `1. Get method lists: run shell_read with "grep -n '^\\s*\\(def \\|class \\)' <file>" on EACH file to see all method/class names.\n` +
-                                  `2. Identify unique methods in the smaller files that do NOT appear in the largest file.\n` +
-                                  `3. For each unique method: read its full implementation from the source file with "cat <file>". Copy the REAL code verbatim — do NOT summarize or abbreviate.\n` +
-                                  `4. Append unique methods to the END of the largest file using edit_file with force_overwrite=false, or use write_file to rewrite the merged file.\n` +
-                                  `   Do NOT use Add-Content, Get-Content, or any PowerShell cmdlets — use bash equivalents (cat, grep, echo >>).\n` +
-                                  `5. After the merge succeeds, delete the smaller file with run_command "rm <file>".\n` +
-                                  `6. Repeat for all files in the cluster until only the largest remains.\n\n`) +
+                            `1. Get method lists: run shell_read with "grep -n '^\\s*\\(def \\|class \\)' <file>" on EACH file to see all method/class names.\n` +
+                            `2. Identify unique methods in the smaller files that do NOT appear in the largest file.\n` +
+                            `3. For each unique method: read its full implementation from the source file with "cat <file>". Copy the REAL code verbatim — do NOT summarize or abbreviate.\n` +
+                            `4. Append unique methods to the END of the largest file using edit_file or write_file. NEVER use PowerShell cmdlets (Add-Content, Get-Content, etc.) — use bash only.\n` +
+                            `5. After the merge succeeds, delete the smaller file with run_command "rm <file>".\n` +
+                            `6. Repeat for all files in the cluster until only the largest remains.\n\n` +
                             `RULES:\n` +
                             `- If a smaller file has NO unique methods (all duplicates), just delete it.\n` +
                             `- If a smaller file is empty or only stubs (pass/return None), just delete it.\n` +
